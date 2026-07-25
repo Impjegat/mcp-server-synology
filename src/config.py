@@ -99,7 +99,20 @@ class SynologyConfig:
 
         Returns True if permissions are safe, False otherwise.
         Prints warning if permissions are too open.
+
+        POSIX only: os.getuid() and the group/other mode bits this check
+        relies on don't exist on Windows (NTFS uses ACLs, not POSIX mode
+        bits), so on platforms without os.getuid() the check is skipped
+        with a warning instead of raising.
         """
+        if not hasattr(os, "getuid"):
+            logger.warning(
+                f"Skipping file-permission check for {path}: not supported on "
+                "this platform. Restrict access to this file yourself (it "
+                "contains NAS credentials) via your OS's file permissions."
+            )
+            return True
+
         try:
             file_stat = path.stat()
             mode = file_stat.st_mode
