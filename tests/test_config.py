@@ -311,6 +311,51 @@ class TestFilePermissions:
                 # Permission warning is emitted via logger.warning, not stderr
                 assert any("permission" in rec.message.lower() for rec in caplog.records)
 
+    def test_permission_check_skips_without_getuid(self, tmp_path, caplog, monkeypatch):
+        """Platforms without os.getuid() (Windows) must not crash on load.
+
+        os.getuid() and the group/other mode bits it gates don't exist on
+        Windows (NTFS uses ACLs, not POSIX mode bits). The check should
+        degrade to "skip with a warning" rather than raising AttributeError.
+        """
+        import json
+        import logging
+
+        secrets_data = {
+            "synology": {
+                "test_nas": {
+                    "host": "192.168.1.100",
+                    "port": 5001,
+                    "username": "admin",
+                    "password": "pass123",
+                }
+            }
+        }
+        secrets_file = tmp_path / "secrets.json"
+        secrets_file.write_text(json.dumps(secrets_data))
+
+        # Simulate a platform without os.getuid() regardless of what's
+        # actually running this test (raising=False: a no-op on platforms
+        # where it's already absent, e.g. Windows).
+        monkeypatch.delattr(os, "getuid", raising=False)
+
+        reload_config()
+
+        with patch.dict(os.environ, {}, clear=True):
+            with patch("config.SETTINGS_FILE", secrets_file):
+                from config import SynologyConfig
+
+                with caplog.at_level(logging.WARNING, logger="synology-mcp"):
+                    cfg = SynologyConfig()
+
+                assert any(
+                    "skipping file-permission check" in rec.message.lower()
+                    for rec in caplog.records
+                )
+                # The file must still actually load (not be refused) once
+                # the permission check is skipped.
+                assert "test_nas" in cfg.nas_configs
+
 
 def test_config_str_representation():
     """Test string representation of config."""
