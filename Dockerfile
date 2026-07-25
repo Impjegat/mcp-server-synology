@@ -31,6 +31,5 @@ USER mcpuser
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONPATH=/app
 
-# Default command - supports both stdio (Claude/Cursor) and WebSocket (Xiaozhi) modes
-# Mode is controlled by ENABLE_XIAOZHI environment variable
-CMD ["python", "main.py"] 
+# Default command - stdio MCP server for Claude/Cursor
+CMD ["python", "main.py"]

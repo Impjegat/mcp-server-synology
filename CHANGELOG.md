@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Security
+- **HTTPS-only transport**: `SYNOLOGY_URL` and settings.json host configs that would resolve to plain `http://` are now rejected at startup with a clear error. Previously, settings.json silently downgraded to `http://` for any NAS port other than 5001.
+- `VERIFY_SSL` (and every `verify_ssl` constructor default across the service classes) now defaults to `true` instead of `false`.
+- The `synology_login` tool's URL validator now requires `https://`.
+- Removed the false "RSA encrypted password transmission" claim from the README.
+
+### Removed
+- **WebSocket bridge integration** (`src/multiclient_bridge.py`, see the 1.1.0 entry below) and its associated configuration (the enable/disable toggle, token, and endpoint fields in both `.env` and `settings.json`) have been removed from this fork entirely. `main.py` now always launches the stdio MCP server directly. The `websockets` dependency was dropped from `requirements.txt` accordingly.
+- `docker-compose.http.yml` and the HTTP/SSE remote-deployment path it supported (`requirements-http.txt`, the Dockerfile `INSTALL_HTTP` build arg, and the corresponding README section), since it contradicted HTTPS-only operation.
+
 ## [1.5.0] - 2026-06-27
 
 ### Added
@@ -20,7 +30,7 @@
 ## [1.4.2] - 2026-06-12
 
 ### Added
-- Optional HTTP/SSE transport for remote deployments via `docker-compose.http.yml` (mcp-proxy). The extra dependency is isolated in `requirements-http.txt` and only installed when the image is built with `INSTALL_HTTP=1`/`true`; the default stdio/Xiaozhi image is unchanged. (#25, #36)
+- Optional HTTP/SSE transport for remote deployments via `docker-compose.http.yml` (mcp-proxy). The extra dependency is isolated in `requirements-http.txt` and only installed when the image is built with `INSTALL_HTTP=1`/`true`; the default stdio image is unchanged. (#25, #36)
 
 ### Fixed
 - Transparent recovery from DSM error 119 ("SID not found"). When a server-side session expires — typically after ~1h of inactivity on `SYNO.Core.*` APIs — `SynologyAPIClient` now re-authenticates with the cached credentials and retries the call once instead of failing until the process restarts. The relogin is concurrency-safe (serialized per NAS, so simultaneous 119s collapse into a single new session rather than leaking orphaned SIDs) and resyncs `mcp_server`'s cached SID/token and lazily-built service instances, so a later logout targets the live session. A failed auth-module import on the recovery path is now logged instead of silently swallowed. (#27, #37)
@@ -64,7 +74,7 @@
 ## [1.2.0] - 2026-02-27
 
 ### Added
-- Unified `settings.json` configuration replacing `secrets.json` — single file for NAS credentials, Xiaozhi, and server settings. Uses XDG path `~/.config/synology-mcp/settings.json`. Supports multiple NAS devices.
+- Unified `settings.json` configuration replacing `secrets.json` — single file for NAS credentials, the WebSocket bridge (see 1.1.0), and server settings. Uses XDG path `~/.config/synology-mcp/settings.json`. Supports multiple NAS devices.
 - Centralized logging via Python's `logging` module with configurable levels (DEBUG/INFO/WARNING/ERROR), set in `settings.json`.
 - Lint configuration in `pyproject.toml` (Ruff, Black, mypy). Codebase reformatted with Black.
 
@@ -74,7 +84,7 @@
 
 ## [1.1.0] - 2025-06-07
 
-# 🚀 Synology MCP Server v1.1.0 - Xiaozhi WebSocket & Enhanced Docker Support
+# 🚀 Synology MCP Server v1.1.0 - WebSocket Bridge & Enhanced Docker Support
 
 **Release Date:** June 7, 2025
 
@@ -82,11 +92,11 @@
 
 ## 🚀 What's New
 
-### 🤖 **Xiaozhi WebSocket Integration**
-- **WebSocket-based MCP support** for [Xiaozhi ESP32](https://github.com/78/xiaozhi-esp32)
-- **Dual client support** - Run both stdio (Claude/Cursor) and WebSocket (Xiaozhi) simultaneously
-- **Environment-based configuration** with `ENABLE_XIAOZHI` toggle
-- **Secure token authentication** for Xiaozhi connections
+### 🤖 **WebSocket Bridge Integration**
+- **WebSocket-based MCP support** for a third-party ESP32 voice-assistant client
+- **Dual client support** - Run both stdio (Claude/Cursor) and the WebSocket bridge simultaneously
+- **Environment-based configuration** with an enable/disable toggle
+- **Secure token authentication** for the WebSocket bridge
 - **Auto-reconnection** and error recovery for WebSocket connections
 
 ### 🐳 **Enhanced Docker Support**
@@ -96,7 +106,7 @@
 - **Better logging and debugging** for Docker-based setups
 
 ### 🔧 **Infrastructure Improvements**
-- **Multiclient bridge architecture** for handling multiple connection types
+- **Multi-client bridge architecture** for handling multiple connection types
 - **Requirements validation** with helpful error messages
 - **Enhanced startup diagnostics** and configuration display
 - **Improved error handling** and graceful shutdown
@@ -104,13 +114,17 @@
 ## 📋 Configuration
 
 ### Environment Variables
-- `ENABLE_XIAOZHI`: Enable Xiaozhi WebSocket bridge (true/false, default: false)
-- `XIAOZHI_TOKEN`: Your Xiaozhi authentication token (required if ENABLE_XIAOZHI=true)
-- `XIAOZHI_MCP_ENDPOINT`: Xiaozhi MCP endpoint (optional, defaults to wss://api.xiaozhi.me/mcp/)
+- An enable/disable toggle for the WebSocket bridge (default: disabled)
+- A bridge authentication token (required when the bridge is enabled)
+- A configurable WebSocket endpoint for the bridge
 
 ### Usage Modes
-- **Claude/Cursor Only**: `ENABLE_XIAOZHI=false` (default)
-- **Dual Support**: `ENABLE_XIAOZHI=true` (supports both Xiaozhi WebSocket and Claude/Cursor stdio)
+- **Claude/Cursor Only** (default)
+- **Dual Support** (stdio + WebSocket bridge simultaneously)
+
+> **Note:** The WebSocket bridge and its third-party integration were removed
+> in this fork — see the [Unreleased] section at the top of this file. This
+> historical entry is kept for release-history accuracy.
 
 ---
 

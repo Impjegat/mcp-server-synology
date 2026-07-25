@@ -1,6 +1,6 @@
 # src/config.py - Configuration management
 # Loads all settings from XDG standard config directory (~/.config/synology-mcp/settings.json).
-# Supports multiple NAS, Xiaozhi integration, and server settings.
+# Supports multiple NAS and server settings.
 
 import json
 import logging
@@ -42,11 +42,6 @@ SETTINGS_JSON_EXAMPLE = """
       "password": "your_password",
       "note": "Backup NAS"
     }
-  },
-  "xiaozhi": {
-    "enabled": false,
-    "token": "your_xiaozhi_token",
-    "endpoint": "wss://api.xiaozhi.me/mcp/"
   },
   "server": {
     "auto_login": true,
@@ -129,11 +124,6 @@ class SynologyConfig:
         """Load all settings from XDG config directory (~/.config/synology-mcp/settings.json)."""
         self.nas_configs: Dict[str, Dict[str, Any]] = {}
 
-        # Default values for xiaozhi and server settings
-        self.xiaozhi_enabled = False
-        self.xiaozhi_token = ""
-        self.xiaozhi_endpoint = "wss://api.xiaozhi.me/mcp/"
-
         if SETTINGS_FILE.exists():
             # Check file permissions - refuse to load if insecure
             if not self._check_file_permissions(SETTINGS_FILE):
@@ -201,15 +191,6 @@ class SynologyConfig:
                         "otp_code": otp_code,
                         "device_id": device_id,
                     }
-
-                # Load Xiaozhi settings
-                xiaozhi_section = data.get("xiaozhi", {})
-                if xiaozhi_section:
-                    self.xiaozhi_enabled = xiaozhi_section.get("enabled", False)
-                    self.xiaozhi_token = xiaozhi_section.get("token", "")
-                    self.xiaozhi_endpoint = xiaozhi_section.get(
-                        "endpoint", "wss://api.xiaozhi.me/mcp/"
-                    )
 
                 # Load server settings (override env vars if present)
                 server_section = data.get("server", {})

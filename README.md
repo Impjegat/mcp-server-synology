@@ -4,8 +4,6 @@
 
 A Model Context Protocol (MCP) server for Synology NAS devices. Enables AI assistants to manage files and downloads through secure authentication and session management.
 
-**🌟 NEW: Unified server supports both Claude/Cursor (stdio) and Xiaozhi (WebSocket) simultaneously!**
-
 ## 🚀 Quick Start with Docker
 
 ### 1️⃣ Setup Environment
@@ -26,7 +24,7 @@ cp env.example .env
 > HTTPS**, or **Control Panel → Security → Certificate**) and use port
 > `5001`. Plain `http://` URLs are rejected at startup.
 
-**Basic Configuration (Claude/Cursor only):**
+**Configuration:**
 ```bash
 # Required: Synology NAS connection (HTTPS only)
 SYNOLOGY_URL=https://192.168.1.100:5001
@@ -36,34 +34,11 @@ SYNOLOGY_PASSWORD=your_password
 # Optional: Auto-login on startup
 AUTO_LOGIN=true
 VERIFY_SSL=true
-```
-
-**Extended Configuration (Both Claude/Cursor + Xiaozhi):**
-```bash
-# Required: Synology NAS connection (HTTPS only)
-SYNOLOGY_URL=https://192.168.1.100:5001
-SYNOLOGY_USERNAME=your_username
-SYNOLOGY_PASSWORD=your_password
-
-# Optional: Auto-login on startup
-AUTO_LOGIN=true
-VERIFY_SSL=true
-
-# Enable Xiaozhi support
-ENABLE_XIAOZHI=true
-XIAOZHI_TOKEN=your_xiaozhi_token_here
-XIAOZHI_MCP_ENDPOINT=wss://api.xiaozhi.me/mcp/
 ```
 
 ### 3️⃣ Run with Docker
 
-**One simple command supports both modes:**
-
 ```bash
-# Claude/Cursor only mode (default if ENABLE_XIAOZHI not set)
-docker-compose up -d
-
-# Both Claude/Cursor + Xiaozhi mode (if ENABLE_XIAOZHI=true in .env)
 docker-compose up -d
 
 # Build and run
@@ -176,62 +151,11 @@ If you prefer not to use Docker:
         "SYNOLOGY_URL": "https://192.168.1.100:5001",
         "SYNOLOGY_USERNAME": "your_username",
         "SYNOLOGY_PASSWORD": "your_password",
-        "AUTO_LOGIN": "true",
-        "ENABLE_XIAOZHI": "false"
+        "AUTO_LOGIN": "true"
       }
     }
   }
 }
-```
-## 🌟 Xiaozhi Integration
-
-**New unified architecture supports both clients simultaneously!**
-
-### How It Works
-
-- **ENABLE_XIAOZHI=false** (default): Standard MCP server for Claude/Cursor via stdio
-- **ENABLE_XIAOZHI=true**: Multi-client bridge supporting both:
-  - 📡 **Xiaozhi**: WebSocket connection
-  - 💻 **Claude/Cursor**: stdio connection
-
-### Setup Steps
-
-1. **Add to your .env file:**
-```bash
-ENABLE_XIAOZHI=true
-XIAOZHI_TOKEN=your_xiaozhi_token_here
-```
-
-2. **Run normally:**
-```bash
-# Same command, different behavior based on environment
-python main.py
-# OR
-docker-compose up
-```
-
-### Key Features
-- ✅ **Zero Configuration Conflicts**: One server, multiple clients
-- ✅ **Parallel Operation**: Both clients can work simultaneously  
-- ✅ **All Tools Available**: Xiaozhi gets access to all Synology MCP tools
-- ✅ **Backward Compatible**: Existing setups work unchanged
-- ✅ **Auto-Reconnection**: Handles WebSocket connection drops
-- ✅ **Environment Controlled**: Simple boolean flag to enable/disable
-
-### Startup Messages
-
-**Claude/Cursor only mode:**
-```
-🚀 Synology MCP Server
-==============================
-📌 Claude/Cursor only mode (ENABLE_XIAOZHI=false)
-```
-
-**Both clients mode:**
-```
-🚀 Synology MCP Server with Xiaozhi Bridge
-==================================================
-🌟 Supports BOTH Xiaozhi and Claude/Cursor simultaneously!
 ```
 
 ## 🛠️ Available MCP Tools
@@ -432,9 +356,6 @@ The skill is purely additive — it works alongside the MCP and only triggers on
 | `AUTO_LOGIN` | No | `true` | Auto-login on server start |
 | `VERIFY_SSL` | No | `true` | Verify SSL certificates |
 | `DEBUG` | No | `false` | Enable debug logging |
-| `ENABLE_XIAOZHI` | No | `false` | Enable Xiaozhi WebSocket bridge |
-| `XIAOZHI_TOKEN` | Xiaozhi only | - | Authentication token for Xiaozhi |
-| `XIAOZHI_MCP_ENDPOINT` | No | `wss://api.xiaozhi.me/mcp/` | Xiaozhi WebSocket endpoint |
 
 *Required for auto-login and default operations
 
@@ -471,11 +392,6 @@ The docker-compose.yml automatically mounts your `~/.config/synology-mcp` direct
       "password": "your_password",
       "note": "Backup NAS"
     }
-  },
-  "xiaozhi": {
-    "enabled": false,
-    "token": "your_xiaozhi_token",
-    "endpoint": "wss://api.xiaozhi.me/mcp/"
   },
   "server": {
     "auto_login": true,
@@ -620,9 +536,6 @@ The MCP server supports DSM accounts with 2FA enabled. There are two ways to use
 
 ## ✨ Features
 
-- ✅ **Unified Entry Point** - Single `main.py` supports both stdio and WebSocket clients
-- ✅ **Environment Controlled** - Switch modes via `ENABLE_XIAOZHI` environment variable
-- ✅ **Multi-Client Support** - Simultaneous Claude/Cursor + Xiaozhi access
 - ✅ **Secure Authentication** - HTTPS-only NAS connections with certificate verification enabled by default
 - ✅ **Session Management** - Persistent sessions across multiple NAS devices  
 - ✅ **Complete File Operations** - Create, delete, list, search, rename, move files with detailed metadata
@@ -637,21 +550,14 @@ The MCP server supports DSM accounts with 2FA enabled. There are two ways to use
 ### File Structure
 ```
 mcp-server-synology/
-├── main.py                    # 🎯 Unified entry point
+├── main.py                    # 🎯 Entry point
 ├── src/
-│   ├── mcp_server.py         # Standard MCP server
-│   ├── multiclient_bridge.py # Multi-client bridge
+│   ├── mcp_server.py         # MCP server (stdio)
 │   ├── auth/                 # Authentication modules
 │   ├── filestation/          # File operations
 │   └── downloadstation/      # Download management
-├── docker-compose.yml        # Single service, environment-controlled
+├── docker-compose.yml
 ├── Dockerfile
 ├── requirements.txt
 └── .env                      # Configuration
 ```
-
-### Mode Selection
-- **`ENABLE_XIAOZHI=false`** → `main.py` → `mcp_server.py` (stdio only)
-- **`ENABLE_XIAOZHI=true`** → `main.py` → `multiclient_bridge.py` → `mcp_server.py` (both clients)
-
-**Perfect for any workflow - from simple Claude/Cursor usage to advanced multi-client setups!** 🚀

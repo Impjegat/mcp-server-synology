@@ -1,5 +1,5 @@
 services:
-  # Synology MCP Server with optional Xiaozhi support
+  # Synology MCP Server
   # Configure via ~/.config/synology-mcp/settings.json
   synology-mcp:
     build: .
