@@ -24,7 +24,7 @@ Don't preface a workflow with `synology_login`. It's noise 99% of the time and c
 Every operational tool accepts:
 
 - `nas_name` — the identifier from settings.json (e.g., `"nas1"`, `"backup"`). Preferred.
-- `base_url` — full URL like `"http://192.168.1.100:5000"`. Fallback when the NAS isn't configured.
+- `base_url` — full HTTPS URL like `"https://192.168.1.100:5001"`. Fallback when the NAS isn't configured. Plain `http://` is rejected.
 
 ### Picking a target
 
@@ -45,7 +45,7 @@ Lives at `~/.config/synology-mcp/settings.json` (XDG standard). The file require
 {
   "synology": {
     "nas1": {
-      "host": "192.168.1.100", "port": 5000,
+      "host": "192.168.1.100", "port": 5001,
       "username": "...", "password": "...",
       "note": "Primary",
       "otp_code": "123456",

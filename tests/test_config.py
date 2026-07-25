@@ -6,6 +6,8 @@ import sys
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 
 # Force reimport of config module to avoid cached global instance
 def reload_config():
@@ -26,7 +28,7 @@ class TestSynologyConfig:
         with patch.dict(
             os.environ,
             {
-                "SYNOLOGY_URL": "http://test.local:5000",
+                "SYNOLOGY_URL": "https://test.local:5001",
                 "SYNOLOGY_USERNAME": "testuser",
                 "SYNOLOGY_PASSWORD": "testpass",
             },
@@ -37,9 +39,28 @@ class TestSynologyConfig:
 
                     config = SynologyConfig()
 
-                    assert config.synology_url == "http://test.local:5000"
+                    assert config.synology_url == "https://test.local:5001"
                     assert config.synology_username == "testuser"
                     assert config.synology_password == "testpass"
+
+    def test_env_rejects_http_url(self):
+        """SYNOLOGY_URL using plain http:// must fail fast at startup."""
+        reload_config()
+
+        with patch.dict(
+            os.environ,
+            {
+                "SYNOLOGY_URL": "http://test.local:5000",
+                "SYNOLOGY_USERNAME": "testuser",
+                "SYNOLOGY_PASSWORD": "testpass",
+            },
+        ):
+            with patch("config.SETTINGS_FILE", Path("/nonexistent/secrets.json")):
+                with patch.object(Path, "exists", return_value=False):
+                    from config import InsecureURLError, SynologyConfig
+
+                    with pytest.raises(InsecureURLError, match="https://"):
+                        SynologyConfig()
 
     def test_default_values(self):
         """Test default configuration values."""
@@ -56,7 +77,7 @@ class TestSynologyConfig:
                     assert config.server_version == "1.0.0"
                     assert config.default_session_timeout == 3600
                     assert config.auto_login is True
-                    assert config.verify_ssl is False
+                    assert config.verify_ssl is True
 
     def test_has_credentials_with_secrets(self, tmp_path):
         """Test credential detection with secrets.json."""
@@ -85,7 +106,8 @@ class TestSynologyConfig:
 
                 assert cfg.has_synology_credentials() is True
                 assert "test_nas" in cfg.nas_configs
-                assert cfg.nas_configs["test_nas"]["base_url"] == "http://192.168.1.100:5000"
+                # HTTPS is forced regardless of port — no silent http fallback.
+                assert cfg.nas_configs["test_nas"]["base_url"] == "https://192.168.1.100:5000"
 
     def test_get_nas_names(self, tmp_path):
         """Test getting NAS names from secrets.json."""
@@ -169,7 +191,7 @@ class TestSynologyConfig:
         with patch.dict(
             os.environ,
             {
-                "SYNOLOGY_URL": "http://test.local:5000",
+                "SYNOLOGY_URL": "https://test.local:5001",
                 "SYNOLOGY_USERNAME": "user",
                 "SYNOLOGY_PASSWORD": "pass",
                 "SESSION_TIMEOUT": "30",
@@ -256,7 +278,7 @@ class TestSynologyConfig:
                 cfg = SynologyConfig()
 
                 url = cfg.resolve_base_url("office_nas")
-                assert url == "http://office.example.com:5000"
+                assert url == "https://office.example.com:5000"
 
                 # Test non-existent NAS
                 url = cfg.resolve_base_url("nonexistent")
@@ -297,7 +319,7 @@ def test_config_str_representation():
     with patch.dict(
         os.environ,
         {
-            "SYNOLOGY_URL": "http://test.local:5000",
+            "SYNOLOGY_URL": "https://test.local:5001",
             "SYNOLOGY_USERNAME": "user",
             "SYNOLOGY_PASSWORD": "pass",
         },

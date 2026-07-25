@@ -20,28 +20,34 @@ cp env.example .env
 
 ### 2️⃣ Configure .env File
 
+> **🔒 HTTPS-only:** This server requires an encrypted connection to your NAS.
+> `SYNOLOGY_URL` (and any `settings.json` host) must resolve to `https://`.
+> Enable HTTPS in DSM (**Control Panel → Login Portal → Advanced → enable
+> HTTPS**, or **Control Panel → Security → Certificate**) and use port
+> `5001`. Plain `http://` URLs are rejected at startup.
+
 **Basic Configuration (Claude/Cursor only):**
 ```bash
-# Required: Synology NAS connection
-SYNOLOGY_URL=http://192.168.1.100:5000
+# Required: Synology NAS connection (HTTPS only)
+SYNOLOGY_URL=https://192.168.1.100:5001
 SYNOLOGY_USERNAME=your_username
 SYNOLOGY_PASSWORD=your_password
 
 # Optional: Auto-login on startup
 AUTO_LOGIN=true
-VERIFY_SSL=false
+VERIFY_SSL=true
 ```
 
 **Extended Configuration (Both Claude/Cursor + Xiaozhi):**
 ```bash
-# Required: Synology NAS connection
-SYNOLOGY_URL=http://192.168.1.100:5000
+# Required: Synology NAS connection (HTTPS only)
+SYNOLOGY_URL=https://192.168.1.100:5001
 SYNOLOGY_USERNAME=your_username
 SYNOLOGY_PASSWORD=your_password
 
 # Optional: Auto-login on startup
 AUTO_LOGIN=true
-VERIFY_SSL=false
+VERIFY_SSL=true
 
 # Enable Xiaozhi support
 ENABLE_XIAOZHI=true
@@ -167,7 +173,7 @@ If you prefer not to use Docker:
       "args": ["main.py"],
       "cwd": "/path/to/your/mcp-server-synology",
       "env": {
-        "SYNOLOGY_URL": "http://192.168.1.100:5000",
+        "SYNOLOGY_URL": "https://192.168.1.100:5001",
         "SYNOLOGY_USERNAME": "your_username",
         "SYNOLOGY_PASSWORD": "your_password",
         "AUTO_LOGIN": "true",
@@ -177,85 +183,6 @@ If you prefer not to use Docker:
   }
 }
 ```
-## 🌐 Remote HTTP/SSE Deployment (NEW)
-
-By default the server speaks **stdio**, which means the MCP client has to spawn the process locally (or via a bridge such as SSH/docker exec). For setups where the NAS is remote (different machine from where Claude/Cursor runs), you can expose the MCP server over **HTTP/SSE** using [`mcp-proxy`](https://github.com/sparfenyuk/mcp-proxy). This makes it consumable by any MCP client that supports URL-based connectors — exactly like `ha-mcp` or other "remote" MCP servers.
-
-### Architecture
-
-```
-[Claude Desktop / Cursor / ...]
-        │
-        │ HTTPS (URL connector)
-        ▼
-[Reverse proxy: DSM / Nginx / Traefik / Caddy]
-        │  (TLS termination + auth)
-        │ HTTP localhost:8765
-        ▼
-[Docker container]
-  └─ mcp-proxy
-       └─ python main.py (stdio)
-```
-
-### Deploy
-
-1. `mcp-proxy` is installed automatically when you build the HTTP image — it
-   lives in `requirements-http.txt` and the provided compose file sets the
-   `INSTALL_HTTP=true` build arg (it is not in the default stdio/Xiaozhi image).
-2. Use the provided `docker-compose.http.yml`:
-
-```bash
-# Edit credentials in docker-compose.http.yml first
-docker compose -f docker-compose.http.yml up -d --build
-docker logs -f synology-mcp-http
-```
-
-You should see mcp-proxy report `Uvicorn running on http://0.0.0.0:8765` and the auto-login succeed.
-
-### Reverse proxy
-
-Most MCP clients require HTTPS, so the HTTP endpoint must be fronted by a TLS-terminating reverse proxy. For DSM users, the built-in **Login Portal → Reverse Proxy** does the job:
-
-- **Source**: `HTTPS`, hostname `synology-mcp.example.com`, port `443`
-- **Destination**: `HTTP`, `localhost`, port `8765`
-- **Custom Headers**: click *Create → WebSocket* (adds the headers needed for SSE/long-lived connections)
-
-For Nginx, the equivalent is:
-
-```nginx
-location / {
-    proxy_pass http://localhost:8765;
-    proxy_http_version 1.1;
-    proxy_set_header Host $host;
-    proxy_set_header X-Real-IP $remote_addr;
-    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-    proxy_set_header X-Forwarded-Proto $scheme;
-    # SSE-specific
-    proxy_buffering off;
-    proxy_cache off;
-    proxy_read_timeout 24h;
-}
-```
-
-### Client configuration
-
-In Claude Desktop (or any MCP client that supports remote connectors), add a custom connector pointing at:
-
-```
-https://synology-mcp.example.com/sse
-```
-
-No `command`, no `args`, no local Python — just a URL.
-
-### Security
-
-`mcp-proxy` does **not** provide server-side authentication. Anything that can reach the HTTP endpoint can call every tool. Mitigations:
-
-- Keep it on a private network or behind a VPN
-- Use the reverse proxy to enforce an IP allow-list
-- Add Basic Auth / mTLS / OAuth2 proxy at the reverse proxy layer
-- Use a dedicated low-privilege DSM user (already recommended in the security warning above)
-
 ## 🌟 Xiaozhi Integration
 
 **New unified architecture supports both clients simultaneously!**
@@ -499,11 +426,11 @@ The skill is purely additive — it works alongside the MCP and only triggers on
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `SYNOLOGY_URL` | Yes* | - | NAS base URL (e.g., `http://192.168.1.100:5000`) |
+| `SYNOLOGY_URL` | Yes* | - | NAS base URL, **must be HTTPS** (e.g., `https://192.168.1.100:5001`) |
 | `SYNOLOGY_USERNAME` | Yes* | - | Username for authentication |
 | `SYNOLOGY_PASSWORD` | Yes* | - | Password for authentication |
 | `AUTO_LOGIN` | No | `true` | Auto-login on server start |
-| `VERIFY_SSL` | No | `false` | Verify SSL certificates |
+| `VERIFY_SSL` | No | `true` | Verify SSL certificates |
 | `DEBUG` | No | `false` | Enable debug logging |
 | `ENABLE_XIAOZHI` | No | `false` | Enable Xiaozhi WebSocket bridge |
 | `XIAOZHI_TOKEN` | Xiaozhi only | - | Authentication token for Xiaozhi |
@@ -532,7 +459,7 @@ The docker-compose.yml automatically mounts your `~/.config/synology-mcp` direct
   "synology": {
     "nas1": {
       "host": "192.168.1.100",
-      "port": 5000,
+      "port": 5001,
       "username": "admin",
       "password": "your_password",
       "note": "Primary NAS at home"
@@ -552,7 +479,7 @@ The docker-compose.yml automatically mounts your `~/.config/synology-mcp` direct
   },
   "server": {
     "auto_login": true,
-    "verify_ssl": false,
+    "verify_ssl": true,
     "session_timeout": 3600,
     "debug": false,
     "log_level": "INFO"
@@ -564,7 +491,7 @@ The docker-compose.yml automatically mounts your `~/.config/synology-mcp` direct
 | Field | Required | Description |
 |-------|----------|-------------|
 | `host` | Yes | NAS hostname or IP address |
-| `port` | No | API port (default: 5000 for HTTP, 5001 for HTTPS) |
+| `port` | No | HTTPS API port on your NAS (default: `5001`) |
 | `username` | Yes | NAS username |
 | `password` | Yes | NAS password |
 | `otp_code` | No | One-shot 6-digit 2FA code (first login only, then remove) |
@@ -572,7 +499,7 @@ The docker-compose.yml automatically mounts your `~/.config/synology-mcp` direct
 | `note` | No | Optional description for your reference |
 
 **Notes:**
-- The server will use port 5001 (HTTPS) if port is 5001, otherwise defaults to HTTP (5000)
+- HTTPS-only: the server always connects as `https://<host>:<port>` — plain HTTP is not supported. Make sure `port` is your DSM's HTTPS port (`5001` by default) and that HTTPS is enabled in DSM.
 - File permissions: `chmod 600 ~/.config/synology-mcp/settings.json` is required for security
 - The server will refuse to load settings if permissions are too open
 - Both .env and settings.json can be used together (settings.json takes priority)
@@ -580,10 +507,10 @@ The docker-compose.yml automatically mounts your `~/.config/synology-mcp` direct
 ### ⚠️ Security Recommendations
 
 **SSL Certificate Verification (VERIFY_SSL):**
-- Default is `false` to support self-signed certificates on internal NAS devices
-- **If your NAS has a valid SSL certificate (e.g., from Let's Encrypt or a corporate CA), set `VERIFY_SSL=true`**
-- Setting `VERIFY_SSL=false` disables certificate verification and makes your connection vulnerable to man-in-the-middle (MITM) attacks
+- Default is `true` — certificates are verified against the system trust store
+- Setting `VERIFY_SSL=false` disables certificate verification and makes your connection vulnerable to man-in-the-middle (MITM) attacks; only do this if your NAS uses a self-signed certificate you can't add to your trust store
 - Never disable SSL verification on untrusted networks
+- Note this is separate from the HTTPS-only transport requirement above — HTTPS is always required; `VERIFY_SSL` only controls whether the server's certificate is validated
 
 **Auto-Login (AUTO_LOGIN):**
 - Default is `true` for convenience with settings.json
@@ -696,7 +623,7 @@ The MCP server supports DSM accounts with 2FA enabled. There are two ways to use
 - ✅ **Unified Entry Point** - Single `main.py` supports both stdio and WebSocket clients
 - ✅ **Environment Controlled** - Switch modes via `ENABLE_XIAOZHI` environment variable
 - ✅ **Multi-Client Support** - Simultaneous Claude/Cursor + Xiaozhi access
-- ✅ **Secure Authentication** - RSA encrypted password transmission
+- ✅ **Secure Authentication** - HTTPS-only NAS connections with certificate verification enabled by default
 - ✅ **Session Management** - Persistent sessions across multiple NAS devices  
 - ✅ **Complete File Operations** - Create, delete, list, search, rename, move files with detailed metadata
 - ✅ **Directory Management** - Recursive directory operations with safety checks

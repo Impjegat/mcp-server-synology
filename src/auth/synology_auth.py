@@ -29,7 +29,7 @@ def get_auth_for_url(base_url: str) -> Optional["SynologyAuth"]:
 class SynologyAuth:
     """Handles Synology NAS authentication using simple API calls."""
 
-    def __init__(self, base_url: str, verify_ssl: bool = False):
+    def __init__(self, base_url: str, verify_ssl: bool = True):
         self.base_url = base_url.rstrip("/")
         self.verify_ssl = verify_ssl
         self.current_session_id: Optional[str] = None

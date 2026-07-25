@@ -14,6 +14,11 @@ from dotenv import load_dotenv
 # Setup logger
 logger = logging.getLogger("synology-mcp")
 
+
+class InsecureURLError(ValueError):
+    """Raised at startup when a configured NAS URL does not use HTTPS."""
+
+
 # XDG Base Directory Specification: ~/.config/synology-mcp/
 XDG_CONFIG_HOME: Path = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
 CONFIG_DIR = XDG_CONFIG_HOME / "synology-mcp"
@@ -25,7 +30,7 @@ SETTINGS_JSON_EXAMPLE = """
   "synology": {
     "nas1": {
       "host": "192.168.1.100",
-      "port": 5000,
+      "port": 5001,
       "username": "admin",
       "password": "your_password",
       "note": "Primary NAS at home"
@@ -45,7 +50,7 @@ SETTINGS_JSON_EXAMPLE = """
   },
   "server": {
     "auto_login": true,
-    "verify_ssl": false,
+    "verify_ssl": true,
     "session_timeout": 3600,
     "debug": false,
     "log_level": "INFO"
@@ -74,12 +79,18 @@ class SynologyConfig:
         self.server_version = os.getenv("MCP_SERVER_VERSION", "1.0.0")
         self.default_session_timeout = int(os.getenv("SESSION_TIMEOUT", "3600"))
         self.auto_login = os.getenv("AUTO_LOGIN", "true").lower() == "true"
-        self.verify_ssl = os.getenv("VERIFY_SSL", "false").lower() == "true"
+        self.verify_ssl = os.getenv("VERIFY_SSL", "true").lower() == "true"
         self.debug = os.getenv("DEBUG", "false").lower() == "true"
         self.log_level = os.getenv("LOG_LEVEL", "INFO").upper()
 
         # Legacy single-NAS env vars (still supported as fallback)
         self.synology_url = os.getenv("SYNOLOGY_URL")
+        if self.synology_url and not self.synology_url.lower().startswith("https://"):
+            raise InsecureURLError(
+                f"SYNOLOGY_URL must use HTTPS, got: {self.synology_url!r}. "
+                "Set SYNOLOGY_URL to https://<your-nas>:5001 and ensure DSM has a "
+                "valid TLS certificate (DSM Control Panel > Security > Certificate)."
+            )
         self.synology_username = os.getenv("SYNOLOGY_USERNAME")
         self.synology_password = os.getenv("SYNOLOGY_PASSWORD")
         # One-shot 2FA code for legacy .env single-NAS users on first login.
@@ -175,8 +186,11 @@ class SynologyConfig:
                         )
                         continue
 
-                    scheme = "https" if port == 5001 else "http"
-                    base_url = f"{scheme}://{host}:{port}"
+                    # HTTPS-only: never fall back to plain http:// based on port
+                    # number. If DSM isn't serving HTTPS on this port, the
+                    # connection will simply fail rather than transmit in the
+                    # clear.
+                    base_url = f"https://{host}:{port}"
 
                     self.nas_configs[nas_name] = {
                         "base_url": base_url,

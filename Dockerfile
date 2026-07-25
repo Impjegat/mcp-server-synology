@@ -10,16 +10,10 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements first for better caching
-COPY requirements.txt requirements-http.txt ./
+COPY requirements.txt ./
 
-# Install Python dependencies. The default image (stdio / Xiaozhi) installs only
-# requirements.txt. The HTTP/SSE image (docker-compose.http.yml) passes
-# INSTALL_HTTP=true to additionally install mcp-proxy from requirements-http.txt.
-ARG INSTALL_HTTP=false
-RUN pip install --no-cache-dir -r requirements.txt \
-    && if [ "$INSTALL_HTTP" = "true" ] || [ "$INSTALL_HTTP" = "1" ]; then \
-        pip install --no-cache-dir -r requirements-http.txt; \
-    fi
+# Install Python dependencies.
+RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy source code
 COPY src/ ./src/

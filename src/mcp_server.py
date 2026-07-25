@@ -24,11 +24,15 @@ from health import SynologyHealth
 from nfs import SynologyNFS
 from usermanagement import SynologyUserManager
 
-# Suppress InsecureRequestWarning when verify_ssl is disabled (internal NAS devices)
+# Suppress InsecureRequestWarning when verify_ssl is explicitly disabled.
+# VERIFY_SSL now defaults to true; this only fires if the user opted out.
 if not config.verify_ssl:
     urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
     logger.warning(
-        "SSL verification is disabled. Set VERIFY_SSL=true if your NAS has a valid SSL certificate."
+        "SSL certificate verification is DISABLED (VERIFY_SSL=false). The "
+        "connection is still HTTPS-encrypted, but the server's certificate is "
+        "not being validated, which makes it vulnerable to MITM attacks. "
+        "Remove VERIFY_SSL=false unless you have a specific reason to keep it."
     )
 
 
@@ -444,7 +448,7 @@ class SynologyMCPServer:
         """Get base URL from arguments or config.
 
         Accepts either:
-          - base_url: a full URL like http://10.0.0.51:5000
+          - base_url: a full URL like https://10.0.0.51:5001
           - nas_name: a key from secrets.json like 'nas1', 'nas2'
         Falls back to the first connected NAS if neither is provided.
         """
@@ -472,6 +476,9 @@ class SynologyMCPServer:
     def _validate_url(self, url: str) -> bool:
         """Validate URL format and scheme.
 
+        HTTPS-only: plain http:// is rejected so credentials and session
+        tokens are never sent unencrypted.
+
         Args:
             url: URL to validate
 
@@ -482,7 +489,7 @@ class SynologyMCPServer:
 
         try:
             result = urlparse(url)
-            return bool(result.scheme in ("http", "https") and result.netloc)
+            return bool(result.scheme == "https" and result.netloc)
         except Exception:
             return False
 
@@ -524,7 +531,10 @@ class SynologyMCPServer:
                 types.TextContent(
                     type="text",
                     text=f"Invalid base_url format: {base_url}\n"
-                    "URL must start with http:// or https:// and include a hostname",
+                    "URL must start with https:// and include a hostname "
+                    "(e.g., https://192.168.1.100:5001). Plain http:// is not "
+                    "supported — enable HTTPS in DSM Control Panel > Security > "
+                    "Certificate.",
                 )
             ]
 
