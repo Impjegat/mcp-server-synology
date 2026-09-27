@@ -314,3 +314,56 @@ def test_make_request_redacts_session_id_from_network_error():
             fs._make_request("SYNO.FileStation.List", "2", "list", path="/share")
 
     assert "LIVE_SID_req" not in str(exc_info.value)
+
+
+# ---------------------------------------------------------------------------
+# Critical-path check consolidation (PR 2): one prefix-matching helper,
+# applied consistently across every path-taking method.
+# ---------------------------------------------------------------------------
+
+
+def test_check_critical_path_blocks_exact_and_nested_paths():
+    from filestation.synology_filestation import SynologyFileStation
+
+    fs = SynologyFileStation("https://nas.example.test:5001", "sid")
+
+    with pytest.raises(Exception, match="critical system path"):
+        fs._check_critical_path("/etc")
+    # Prefix-matched, not just exact — this was the gap between the two
+    # previously-separate denylists (one exact-only, one prefix-matching).
+    with pytest.raises(Exception, match="critical system path"):
+        fs._check_critical_path("/etc/passwd")
+    # A share that merely starts with the same characters must NOT match.
+    fs._check_critical_path("/etchome")  # no exception
+
+
+@pytest.mark.parametrize(
+    "method_name,args",
+    [
+        ("list_directory", ("/etc",)),
+        ("get_file_info", ("/etc",)),
+        ("search_files", ("/etc", "*.conf")),
+        ("create_directory", ("/etc", "newdir")),
+    ],
+)
+def test_previously_unchecked_methods_now_reject_critical_paths(method_name, args):
+    """Before PR 2, only rename_file/get_file_content/move_file/delete
+    checked critical paths at all. list_directory, get_file_info,
+    search_files, and create_directory had no check whatsoever."""
+    from filestation.synology_filestation import SynologyFileStation
+
+    fs = SynologyFileStation("https://nas.example.test:5001", "sid")
+
+    with pytest.raises(Exception, match="critical system path"):
+        getattr(fs, method_name)(*args)
+
+
+def test_delete_uses_the_consolidated_helper_not_a_separate_denylist():
+    """delete() used to carry its own independent, prefix-matching denylist;
+    it must now go through the one shared `_check_critical_path` helper."""
+    from filestation.synology_filestation import SynologyFileStation
+
+    fs = SynologyFileStation("https://nas.example.test:5001", "sid")
+
+    with pytest.raises(Exception, match="critical system path"):
+        fs.delete("/var/log/nested/deep")

@@ -7,7 +7,7 @@ Status: Proposed (revised)
 This plan is implemented as a sequence of PRs, each tracked in its own dated folder under `plans/` (see `plans/README.md` for the convention). A folder moves to `plans/shipped/` once that PR's changes are implemented.
 
 1. [`plans/shipped/2026-09-27-credential-and-session-leak-hardening/`](plans/shipped/2026-09-27-credential-and-session-leak-hardening/PLAN.md) — §1 below, in full, plus the auth-specific timeout/retry-rule portion of §4. PR: [#2](https://github.com/Impjegat/mcp-server-synology/pull/2).
-2. `restricted-mode-tool-registry` (not yet started) — §3: unified deny-by-default tool registry, borderline-tool classification, restricted `synology_login`, path-allowlist consolidation, dedicated-admin NAS hardening.
+2. [`plans/2026-09-27-restricted-mode-tool-registry/`](plans/2026-09-27-restricted-mode-tool-registry/PLAN.md) — §3: unified deny-by-default tool registry, borderline-tool classification, restricted `synology_login`, path-check consolidation, dedicated-admin NAS hardening. In progress.
 3. `connection-defaults-and-bounds` (not yet started) — remainder of §4: port default, CA-bundle support, `search_files`/`get_file_content` bounds.
 4. `packaging-and-test-isolation` (not yet started) — §2 and §5: Dockerfile/`.dockerignore`/compose fixes, conftest isolation ordering, documentation.
 
