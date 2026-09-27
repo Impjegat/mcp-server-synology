@@ -9,7 +9,7 @@ This plan is implemented as a sequence of PRs, each tracked in its own dated fol
 1. [`plans/shipped/2026-09-27-credential-and-session-leak-hardening/`](plans/shipped/2026-09-27-credential-and-session-leak-hardening/PLAN.md) — §1 below, in full, plus the auth-specific timeout/retry-rule portion of §4. PR: [#2](https://github.com/Impjegat/mcp-server-synology/pull/2).
 2. [`plans/shipped/2026-09-27-restricted-mode-tool-registry/`](plans/shipped/2026-09-27-restricted-mode-tool-registry/PLAN.md) — §3: unified deny-by-default tool registry, borderline-tool classification, restricted `synology_login`, path-check consolidation, dedicated-admin NAS hardening. PR: [#4](https://github.com/Impjegat/mcp-server-synology/pull/4).
 3. [`plans/shipped/2026-09-27-connection-defaults-and-bounds/`](plans/shipped/2026-09-27-connection-defaults-and-bounds/PLAN.md) — remainder of §4: port default, CA-bundle support, `search_files`/`get_file_content` bounds, distinguished login errors. PR: [#5](https://github.com/Impjegat/mcp-server-synology/pull/5).
-4. `packaging-and-test-isolation` (not yet started) — §2 and §5: Dockerfile/`.dockerignore`/compose fixes, conftest isolation ordering, documentation.
+4. [`plans/shipped/2026-09-27-packaging-and-test-isolation/`](plans/shipped/2026-09-27-packaging-and-test-isolation/PLAN.md) — §2 and §5: Dockerfile/`.dockerignore`/compose fixes, conftest isolation ordering, the two pre-existing test failures root-caused and fixed, documentation. PR: TBD.
 
 ## Objective
 

@@ -58,7 +58,7 @@ Lives at `~/.config/synology-mcp/settings.json` (XDG standard). The file require
 
 `otp_code` and `device_id` are both optional. `device_id` wins over `otp_code`. Workflow: set `otp_code` once → start the server → copy the returned `did` into `device_id` → delete `otp_code`. From then on, OTP is no longer needed.
 
-Port 5001 enables HTTPS; anything else uses HTTP. The `note` is for the user's reference — surface it when listing NAS units to a user, since human-readable notes ("primary", "backup") are easier to reason about than `nas1`/`nas2`.
+Every connection is HTTPS-only regardless of port — there is no HTTP fallback. 5001 is DSM's default HTTPS port (and the default here when `port` is omitted); a custom port still connects over HTTPS. The `note` is for the user's reference — surface it when listing NAS units to a user, since human-readable notes ("primary", "backup") are easier to reason about than `nas1`/`nas2`.
 
 ## Gotchas
 
