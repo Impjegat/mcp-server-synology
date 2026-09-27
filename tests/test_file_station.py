@@ -314,3 +314,142 @@ def test_make_request_redacts_session_id_from_network_error():
             fs._make_request("SYNO.FileStation.List", "2", "list", path="/share")
 
     assert "LIVE_SID_req" not in str(exc_info.value)
+
+
+# ---------------------------------------------------------------------------
+# Critical-path check consolidation (PR 2): one helper, applied consistently
+# across every path-taking method. True OS-level paths are prefix-matched
+# (the path and everything under it is blocked); /volume1 and /homes are
+# exact-matched only — they're the raw volume mount and the aggregate
+# home-directories share, not places real files live directly, so a real
+# share/subfolder underneath (e.g. /volume1/photo, /homes/alice) must stay
+# reachable. An earlier version of this PR prefix-matched them too, which
+# blocked browsing/reading almost everything on a real NAS — caught in
+# review and fixed before merge.
+# ---------------------------------------------------------------------------
+
+
+def test_check_critical_path_blocks_exact_and_nested_paths():
+    from filestation.synology_filestation import SynologyFileStation
+
+    fs = SynologyFileStation("https://nas.example.test:5001", "sid")
+
+    with pytest.raises(Exception, match="critical system path"):
+        fs._check_critical_path("/etc")
+    # Prefix-matched, not just exact — this was the gap between the two
+    # previously-separate denylists (one exact-only, one prefix-matching).
+    with pytest.raises(Exception, match="critical system path"):
+        fs._check_critical_path("/etc/passwd")
+    # A share that merely starts with the same characters must NOT match.
+    fs._check_critical_path("/etchome")  # no exception
+
+
+@pytest.mark.parametrize("root", ["/volume1", "/volume2", "/volume3", "/volume42", "/homes"])
+def test_check_critical_path_blocks_volume_and_homes_root_only(root):
+    """Any /volumeN root and /homes are raw volume mounts and the aggregate
+    home-directories share — block the bare root, but a real share or
+    subfolder underneath must stay reachable (unlike /etc, these are not
+    prefix-matched). Synology NAS units commonly expose more than one
+    storage volume, so this must not be hardcoded to /volume1 alone."""
+    from filestation.synology_filestation import SynologyFileStation
+
+    fs = SynologyFileStation("https://nas.example.test:5001", "sid")
+
+    with pytest.raises(Exception, match="critical system path"):
+        fs._check_critical_path(root)
+    fs._check_critical_path(f"{root}/some-share-or-user")  # no exception
+
+
+def test_check_critical_path_volume_regex_does_not_overmatch():
+    """A share that merely starts with "volume" (not a bare /volumeN root)
+    must not match — e.g. /volume1backup or /volumes."""
+    from filestation.synology_filestation import SynologyFileStation
+
+    fs = SynologyFileStation("https://nas.example.test:5001", "sid")
+
+    fs._check_critical_path("/volume1backup")  # no exception
+    fs._check_critical_path("/volumes")  # no exception
+
+
+@pytest.mark.parametrize(
+    "method_name,args",
+    [
+        ("list_directory", ("/etc",)),
+        ("get_file_info", ("/etc",)),
+        ("search_files", ("/etc", "*.conf")),
+        ("create_directory", ("/etc", "newdir")),
+    ],
+)
+def test_previously_unchecked_methods_now_reject_critical_paths(method_name, args):
+    """Before PR 2, only rename_file/get_file_content/move_file/delete
+    checked critical paths at all. list_directory, get_file_info,
+    search_files, and create_directory had no check whatsoever."""
+    from filestation.synology_filestation import SynologyFileStation
+
+    fs = SynologyFileStation("https://nas.example.test:5001", "sid")
+
+    with pytest.raises(Exception, match="critical system path"):
+        getattr(fs, method_name)(*args)
+
+
+def test_delete_uses_the_consolidated_helper_not_a_separate_denylist():
+    """delete() used to carry its own independent, prefix-matching denylist;
+    it must now go through the one shared `_check_critical_path` helper."""
+    from filestation.synology_filestation import SynologyFileStation
+
+    fs = SynologyFileStation("https://nas.example.test:5001", "sid")
+
+    with pytest.raises(Exception, match="critical system path"):
+        fs.delete("/var/log/nested/deep")
+
+
+@pytest.mark.parametrize(
+    "raw_path,expected_formatted",
+    [
+        ("/share/../etc/passwd", "/etc/passwd"),
+        ("/homes/alice/../../etc/passwd", "/etc/passwd"),
+        ("/volume1/photo/../../../etc", "/etc"),
+        ("/homes/../etc", "/etc"),
+        ("/a/./b/../c", "/a/c"),
+        # Double (or more) leading slashes: posixpath.normpath alone
+        # preserves exactly two leading slashes verbatim (a POSIX quirk),
+        # which would otherwise let "//etc/passwd" survive unresolved even
+        # though the filesystem treats "//" the same as "/".
+        ("//etc/passwd", "/etc/passwd"),
+        ("///etc/passwd", "/etc/passwd"),
+        ("//homes/../../etc/shadow", "/etc/shadow"),
+    ],
+)
+def test_format_path_resolves_dot_dot_before_any_check_runs(raw_path, expected_formatted):
+    """`_format_path` must resolve `.`/`..` segments (and collapse repeated
+    leading slashes) itself — a prefix-based critical-path check downstream
+    only ever sees the literal string, so an unresolved
+    `/share/../etc/passwd` or `//etc/passwd` would sail past a check for
+    `/etc`."""
+    from filestation.synology_filestation import SynologyFileStation
+
+    fs = SynologyFileStation("https://nas.example.test:5001", "sid")
+    assert fs._format_path(raw_path) == expected_formatted
+
+
+@pytest.mark.parametrize(
+    "method_name,args",
+    [
+        ("list_directory", ("/share/../etc",)),
+        ("get_file_info", ("/homes/alice/../../etc/passwd",)),
+        ("search_files", ("/volume1/../../etc", "*.conf")),
+        ("create_directory", ("/homes/../etc", "newdir")),
+        ("get_file_info", ("//etc/passwd",)),
+        ("list_directory", ("///etc",)),
+    ],
+)
+def test_dot_dot_traversal_cannot_bypass_the_critical_path_check(method_name, args):
+    """A `..`-bearing or double-slash-prefixed path that resolves to a
+    critical path must still be rejected — the denylist check must see the
+    resolved path, not the raw string the caller supplied."""
+    from filestation.synology_filestation import SynologyFileStation
+
+    fs = SynologyFileStation("https://nas.example.test:5001", "sid")
+
+    with pytest.raises(Exception, match="critical system path"):
+        getattr(fs, method_name)(*args)

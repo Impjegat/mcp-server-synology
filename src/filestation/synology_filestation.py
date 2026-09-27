@@ -2,6 +2,8 @@
 
 import json
 import os
+import posixpath
+import re
 import tempfile
 import unicodedata
 from typing import Any, Dict, List, Optional
@@ -9,6 +11,21 @@ from typing import Any, Dict, List, Optional
 import requests
 
 from utils.redact import redact
+
+# Paths no path-taking method below may touch, read or write. See
+# _check_critical_path.
+#
+# Volume roots and /homes are blocked only as exact matches: they're raw
+# volume mounts and the aggregate home-directories share, not places real
+# files live directly — but /volume2/photo or /homes/alice are ordinary
+# user shares/subfolders and must stay reachable, so these are NOT
+# prefix-matched. Synology NAS units commonly expose more than one storage
+# volume (/volume1, /volume2, ...), so this is a pattern, not a fixed name.
+_VOLUME_ROOT_RE = re.compile(r"/volume\d+")
+_CRITICAL_PATHS_EXACT = ("/homes",)
+# True OS-level directories have no legitimate DSM share overlap at all, so
+# every path under them is blocked too (e.g. /etc/passwd, not just /etc).
+_CRITICAL_PATHS_PREFIX = ("/var", "/etc", "/usr", "/bin", "/sbin")
 
 
 class SynologyFileStation:
@@ -142,10 +159,20 @@ class SynologyFileStation:
 
     def _format_path(self, path: str) -> str:
         """Format path for Synology API."""
-        if not path.startswith("/"):
-            path = "/" + path
-        if path != "/" and path.endswith("/"):
-            path = path.rstrip("/")
+        # Collapse any run of leading slashes to exactly one *before*
+        # normpath: posixpath.normpath has a POSIX quirk where it preserves
+        # exactly two leading slashes verbatim (three or more collapse to
+        # one), so "//etc/passwd" would otherwise survive unchanged and
+        # bypass a "/etc" prefix check even though the filesystem treats
+        # "//" the same as "/".
+        path = "/" + path.lstrip("/")
+
+        # Resolve "." / ".." segments (POSIX-style, regardless of the host
+        # OS this process runs on) before anything downstream — otherwise
+        # e.g. "/share/../etc/passwd" never matches _check_critical_path's
+        # prefix check on the literal, unresolved string, even though it
+        # names a critical path once resolved.
+        path = posixpath.normpath(path)
 
         # Normalize Unicode characters to NFC form (most common for filesystems)
         path = unicodedata.normalize("NFC", path)
@@ -169,6 +196,7 @@ class SynologyFileStation:
     def list_directory(self, path: str, additional_info: bool = True) -> List[Dict[str, Any]]:
         """List contents of a directory."""
         formatted_path = self._format_path(path)
+        self._check_critical_path(formatted_path)
 
         params: Dict[str, Any] = {"folder_path": formatted_path}
 
@@ -224,6 +252,7 @@ class SynologyFileStation:
     def get_file_info(self, path: str) -> Dict[str, Any]:
         """Get detailed information about a file or directory."""
         formatted_path = self._format_path(path)
+        self._check_critical_path(formatted_path)
 
         data = self._make_request(
             "SYNO.FileStation.List",
@@ -278,6 +307,7 @@ class SynologyFileStation:
     def search_files(self, path: str, pattern: str) -> List[Dict[str, Any]]:
         """Search for files matching a pattern."""
         formatted_path = self._format_path(path)
+        self._check_critical_path(formatted_path)
 
         # Start search
         start_data = self._make_request(
@@ -396,6 +426,8 @@ class SynologyFileStation:
         if not formatted_path or formatted_path == "/":
             raise Exception("Invalid file path")
 
+        self._check_critical_path(formatted_path)
+
         # Get directory and filename
         directory = os.path.dirname(formatted_path)
         filename = os.path.basename(formatted_path)
@@ -485,6 +517,8 @@ class SynologyFileStation:
         if not formatted_folder_path:
             raise Exception("Invalid folder path")
 
+        self._check_critical_path(formatted_folder_path)
+
         # Validate name
         if not name or name.strip() == "":
             raise Exception("Directory name cannot be empty")
@@ -537,13 +571,7 @@ class SynologyFileStation:
         if not formatted_path or formatted_path == "/":
             raise Exception("Invalid path - cannot delete root")
 
-        # Safety check for critical paths
-        critical_paths = ["/volume1", "/homes", "/var", "/etc", "/usr", "/bin", "/sbin"]
-        # Check if path IS or STARTS WITH any critical path (with / to prevent /volume11 bypass)
-        if any(
-            formatted_path == cp or formatted_path.startswith(cp + "/") for cp in critical_paths
-        ):
-            raise Exception(f"Cannot delete critical system path: {formatted_path}")
+        self._check_critical_path(formatted_path)
 
         # Auto-detect if this is a file or directory
         try:
@@ -614,17 +642,28 @@ class SynologyFileStation:
             raise e
 
     def _check_critical_path(self, path: str) -> None:
-        """Check if path is critical and raise exception if so.
+        """Check if path is a critical system path, or inside one — raise if so.
+
+        `_CRITICAL_PATHS_EXACT`/`_VOLUME_ROOT_RE` entries block only the
+        literal path itself (a real share/subfolder underneath is
+        unaffected); `_CRITICAL_PATHS_PREFIX` entries block the path and
+        everything under it. This is the one denylist check every
+        path-taking method below calls; it used to be exact-match-only here
+        and separately duplicated with prefix-matching in `delete()` —
+        consolidated so there is one definition of "critical path" instead
+        of two that could drift apart.
 
         Args:
             path: Formatted path to check
 
         Raises:
-            Exception: If path is a critical system path
+            Exception: If path is or is inside a critical system path
         """
-        critical_paths = ["/volume1", "/homes", "/var", "/etc", "/usr", "/bin", "/sbin"]
-        if path in critical_paths:
+        if path in _CRITICAL_PATHS_EXACT or _VOLUME_ROOT_RE.fullmatch(path):
             raise Exception(f"Cannot access critical system path: {path}")
+        for cp in _CRITICAL_PATHS_PREFIX:
+            if path == cp or path.startswith(cp + "/"):
+                raise Exception(f"Cannot access critical system path: {path}")
 
     def get_file_content(self, path: str) -> str:
         """Get the content of a file."""

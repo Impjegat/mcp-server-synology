@@ -78,6 +78,44 @@ class TestSynologyConfig:
                     assert config.default_session_timeout == 3600
                     assert config.auto_login is True
                     assert config.verify_ssl is True
+                    # Restricted mode is on by default — the whole
+                    # remediation objective is an installation limited to
+                    # browsing and monitoring unless deliberately widened.
+                    assert config.restricted_mode is True
+
+    def test_restricted_mode_env_var_disables_it(self):
+        reload_config()
+
+        with patch.dict(os.environ, {"RESTRICTED_MODE": "false"}, clear=True):
+            with patch("config.SETTINGS_FILE", Path("/nonexistent/secrets.json")):
+                with patch.object(Path, "exists", return_value=False):
+                    from config import SynologyConfig
+
+                    assert SynologyConfig().restricted_mode is False
+
+    def test_restricted_mode_settings_json_overrides_env(self, tmp_path):
+        secrets_data = {
+            "synology": {
+                "nas1": {
+                    "host": "192.168.1.100",
+                    "port": 5001,
+                    "username": "admin",
+                    "password": "pass123",
+                }
+            },
+            "server": {"restricted_mode": False},
+        }
+        secrets_file = tmp_path / "secrets.json"
+        secrets_file.write_text(json.dumps(secrets_data))
+        os.chmod(str(secrets_file), 0o600)
+
+        reload_config()
+
+        with patch.dict(os.environ, {"RESTRICTED_MODE": "true"}, clear=True):
+            with patch("config.SETTINGS_FILE", secrets_file):
+                from config import SynologyConfig
+
+                assert SynologyConfig().restricted_mode is False
 
     def test_has_credentials_with_secrets(self, tmp_path):
         """Test credential detection with secrets.json."""

@@ -50,7 +50,8 @@ SETTINGS_JSON_EXAMPLE = """
     "verify_ssl": true,
     "session_timeout": 3600,
     "debug": false,
-    "log_level": "INFO"
+    "log_level": "INFO",
+    "restricted_mode": true
   }
 }
 """
@@ -77,6 +78,13 @@ class SynologyConfig:
         self.default_session_timeout = int(os.getenv("SESSION_TIMEOUT", "3600"))
         self.auto_login = os.getenv("AUTO_LOGIN", "true").lower() == "true"
         self.verify_ssl = os.getenv("VERIFY_SSL", "true").lower() == "true"
+        # Restricted mode: the server exposes only browsing and monitoring
+        # tools by default (REMEDIATION_PLAN.md's stated objective for the
+        # initial installation). Modifying tools (file writes/deletes, user
+        # and container management, ...) are hidden from discovery and
+        # rejected before any NAS request is made. Set to false deliberately
+        # to enable the full tool set.
+        self.restricted_mode = os.getenv("RESTRICTED_MODE", "true").lower() == "true"
         self.debug = os.getenv("DEBUG", "false").lower() == "true"
         self.log_level = os.getenv("LOG_LEVEL", "INFO").upper()
 
@@ -325,6 +333,8 @@ class SynologyConfig:
                         self.debug = server_section["debug"]
                     if "log_level" in server_section:
                         self.log_level = server_section["log_level"].upper()
+                    if "restricted_mode" in server_section:
+                        self.restricted_mode = server_section["restricted_mode"]
 
             except json.JSONDecodeError as e:
                 logger.error(f"Failed to parse {SETTINGS_FILE}: {e}")
@@ -399,7 +409,10 @@ class SynologyConfig:
 
     def __str__(self) -> str:
         nas_names = ", ".join(self.nas_configs.keys()) if self.nas_configs else "none"
-        return f"SynologyConfig(nas=[{nas_names}], auto_login={self.auto_login})"
+        return (
+            f"SynologyConfig(nas=[{nas_names}], auto_login={self.auto_login}, "
+            f"restricted_mode={self.restricted_mode})"
+        )
 
 
 # Global config instance
