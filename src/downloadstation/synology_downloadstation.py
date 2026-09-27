@@ -6,6 +6,8 @@ from typing import Any, Dict, List, Optional
 
 import requests
 
+from utils.redact import redact
+
 logger = logging.getLogger(__name__)
 
 
@@ -122,7 +124,15 @@ class SynologyDownloadStation:
             return data.get("data", {})
 
         except requests.exceptions.RequestException as e:
-            raise Exception(f"Network error: {e}")
+            # `str(e)` commonly embeds the full request URL, which carries
+            # `_sid=<session_id>` on every GET call — redact before it
+            # propagates to a caller. Backstop; the tool-response boundary
+            # in mcp_server.py also redacts.
+            raise Exception(self._redact(f"Network error: {e}"))
+
+    def _redact(self, message: str) -> str:
+        """Redact this instance's live secrets from an error message."""
+        return redact(message, live_secrets=[self.session_id, self.syno_token])
 
     def _get_error_message(self, error_code: str) -> str:
         """Get human-readable error message for error codes."""
@@ -167,7 +177,7 @@ class SynologyDownloadStation:
                 "version_string": "Download Station Available",
                 "is_manager": True,
                 "hostname": "Synology NAS",
-                "note": f"Limited info: {str(e)}",
+                "note": self._redact(f"Limited info: {str(e)}"),
             }
 
     def list_tasks(
@@ -341,8 +351,7 @@ class SynologyDownloadStation:
             return data
 
         except Exception as e:
-            error_msg = str(e)
-            logger.warning(f"Create task failed: {e}")
+            logger.warning(self._redact(f"Create task failed: {e}"))
 
             # Fallback: Try with version 1 if version 2 failed
             if self.task_version != "1":
@@ -358,11 +367,14 @@ class SynologyDownloadStation:
                     logger.info("Create successful with v1")
                     return data
                 except Exception as e2:
-                    logger.warning(f"v1 also failed: {e2}")
+                    logger.warning(self._redact(f"v1 also failed: {e2}"))
 
             # Enhanced error message
             raise Exception(
-                f"Task creation failed: {e}. Make sure the URL is valid and you have permission to create downloads."
+                self._redact(
+                    f"Task creation failed: {e}. Make sure the URL is valid and you have "
+                    "permission to create downloads."
+                )
             )
 
     def delete_tasks(self, task_ids: List[str], force_complete: bool = False) -> Dict[str, Any]:
@@ -552,4 +564,7 @@ class SynologyDownloadStation:
                 raise Exception(f"FileStation API error {error_code}: {error_msg}")
 
         except Exception as e:
-            raise Exception(f"Could not list downloaded files: {e}")
+            # This request's URL carries `_sid=<session_id>` directly (it's
+            # built by hand, not through `_make_request`), so a
+            # RequestException's str() can embed it — redact before re-raising.
+            raise Exception(self._redact(f"Could not list downloaded files: {e}"))

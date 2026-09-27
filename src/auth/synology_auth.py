@@ -6,8 +6,25 @@ from typing import Any, Callable, Dict, Optional, Tuple
 
 import requests
 
+from utils.redact import redact
+
 logger = logging.getLogger(__name__)
 
+
+# DSM login error codes that mean "DSM made an authentication decision" —
+# account disabled (401), permission denied (402), 2SV code required/wrong
+# (403/404/406), IP auto-blocked (407), or password-expiry states (408-410).
+# None of these are fixed by retrying with a different API version, and
+# retrying anyway means resubmitting the password/OTP each time, which is
+# exactly the pattern DSM's Auto Block watches for. Only a
+# parameter/API/method/version-not-supported error (101-104) or a transport
+# exception should fall through to the next API version.
+_AUTH_OUTCOME_ERROR_CODES = {400, 401, 402, 403, 404, 406, 407, 408, 409, 410}
+
+# Connect/read timeout for the login and logout requests: short enough that
+# an unreachable NAS fails fast instead of hanging the server startup, long
+# enough for a slow DSM box to answer.
+_AUTH_TIMEOUT = (5, 10)
 
 # Module-level registry of SynologyAuth instances, keyed by base_url.
 # Used by SynologyAPIClient to perform transparent session re-auth when DSM
@@ -24,6 +41,31 @@ def get_auth_for_url(base_url: str) -> Optional["SynologyAuth"]:
     DSM error 119 (SID expired) by silently re-authenticating.
     """
     return _AUTH_REGISTRY.get(base_url.rstrip("/"))
+
+
+def iter_live_secrets():
+    """Yield every currently-live secret value across all registered NAS units.
+
+    Covers session IDs, SynoTokens, device tokens, and cached passwords.
+    Used as the `secrets_provider` for the process-wide log redaction filter
+    (see `src/utils/redact.py`) and by the tool-response redaction wrapper in
+    `mcp_server.py`, so both stay current as sessions are created, refreshed,
+    and torn down over the process lifetime rather than being frozen at
+    startup.
+    """
+    for auth in list(_AUTH_REGISTRY.values()):
+        if auth.current_session_id:
+            yield auth.current_session_id
+        if auth.current_syno_token:
+            yield auth.current_syno_token
+        if auth.current_device_id:
+            yield auth.current_device_id
+        if auth._cached_device_id:
+            yield auth._cached_device_id
+        if auth._credentials:
+            _, password = auth._credentials
+            if password:
+                yield password
 
 
 class SynologyAuth:
@@ -131,7 +173,15 @@ class SynologyAuth:
                 payload["enable_device_token"] = "yes"
 
             try:
-                response = requests.get(login_url, params=payload, verify=self.verify_ssl)
+                # POST, not GET: the payload carries the password, OTP code,
+                # and device token, and a GET would put all of them in the
+                # URL query string — visible in DSM's own access log, any
+                # intermediate proxy's log, and in `requests`' own exception
+                # text if the request fails. `SYNO.API.Auth` accepts POST
+                # for `login` the same way it does for every other method.
+                response = requests.post(
+                    login_url, data=payload, verify=self.verify_ssl, timeout=_AUTH_TIMEOUT
+                )
                 response.raise_for_status()
                 result = response.json()
 
@@ -158,8 +208,12 @@ class SynologyAuth:
                     return result
                 else:
                     error_code = result.get("error", {}).get("code", "unknown")
-                    # Don't try other versions for auth errors
-                    if error_code in [400, 402, 403, 404]:
+                    # An auth-outcome error is DSM's final answer for this
+                    # account/credential — retrying with another API version
+                    # would just resubmit the same password again. Only an
+                    # unsupported-API/version error (or a transport
+                    # exception, below) is worth retrying.
+                    if error_code in _AUTH_OUTCOME_ERROR_CODES:
                         return result
             except Exception:
                 continue
@@ -264,7 +318,9 @@ class SynologyAuth:
             }
 
             try:
-                response = requests.get(logout_url, params=payload, verify=self.verify_ssl)
+                response = requests.get(
+                    logout_url, params=payload, verify=self.verify_ssl, timeout=_AUTH_TIMEOUT
+                )
                 response.raise_for_status()
                 result = response.json()
 
@@ -292,15 +348,30 @@ class SynologyAuth:
                         break
 
             except requests.RequestException as e:
+                # `str(e)` on a RequestException commonly embeds the full
+                # request URL — which carries `_sid=<logout_session_id>` on
+                # this GET request — so redact before it's returned to the
+                # caller (redaction here is a backstop; the tool-response
+                # boundary in mcp_server.py also redacts).
                 last_error = {
                     "success": False,
-                    "error": {"code": "network_error", "message": f"Network error: {str(e)}"},
+                    "error": {
+                        "code": "network_error",
+                        "message": redact(
+                            f"Network error: {str(e)}", live_secrets=[logout_session_id]
+                        ),
+                    },
                 }
                 continue
             except Exception as e:
                 last_error = {
                     "success": False,
-                    "error": {"code": "unknown_error", "message": f"Unexpected error: {str(e)}"},
+                    "error": {
+                        "code": "unknown_error",
+                        "message": redact(
+                            f"Unexpected error: {str(e)}", live_secrets=[logout_session_id]
+                        ),
+                    },
                 }
                 continue
 

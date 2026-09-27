@@ -1,6 +1,9 @@
 """File Station functionality tests."""
 
+from unittest.mock import MagicMock, patch
+
 import pytest
+import requests
 
 
 @pytest.mark.real_nas
@@ -260,3 +263,54 @@ def test_filestation_url_construction():
 
     print(f"✅ URL construction: {fs.api_url}")
     print("✅ FileStation URL construction tests passed")
+
+
+# ---------------------------------------------------------------------------
+# Credential-and-session-leak hardening (PR 1) unit tests — no real NAS needed
+# ---------------------------------------------------------------------------
+
+
+def test_create_file_upload_does_not_put_session_id_in_url():
+    """create_file()'s upload request must carry `_sid` in the multipart form
+    body, not the URL — a `params=`/hand-built-URL bug would leak the
+    session id into the query string even though the request is a POST."""
+    from filestation.synology_filestation import SynologyFileStation
+
+    fs = SynologyFileStation("https://nas.example.test:5001", "LIVE_SID_create")
+
+    fake_response = MagicMock()
+    fake_response.json.return_value = {"success": True}
+    fake_response.raise_for_status = MagicMock()
+
+    with patch("filestation.synology_filestation.requests.Session") as mock_session_cls:
+        mock_session = MagicMock()
+        mock_session.post.return_value = fake_response
+        mock_session_cls.return_value.__enter__.return_value = mock_session
+
+        fs.create_file("/share/test.txt", content="hello")
+
+        assert mock_session.post.called
+        call = mock_session.post.call_args
+        url = call.args[0] if call.args else call.kwargs.get("url")
+        assert "LIVE_SID_create" not in url
+        assert "?" not in url
+        assert call.kwargs["data"]["_sid"] == "LIVE_SID_create"
+
+
+def test_make_request_redacts_session_id_from_network_error():
+    """_make_request()'s GET path must not leak the session id through an
+    uncaught RequestException — its str() commonly embeds the full URL,
+    which carries `_sid=<session_id>`."""
+    from filestation.synology_filestation import SynologyFileStation
+
+    fs = SynologyFileStation("https://nas.example.test:5001", "LIVE_SID_req")
+    fake_url = f"{fs.api_url}?api=X&_sid=LIVE_SID_req"
+
+    with patch(
+        "filestation.synology_filestation.requests.get",
+        side_effect=requests.exceptions.ConnectionError(f"Failed to connect: {fake_url}"),
+    ):
+        with pytest.raises(Exception) as exc_info:
+            fs._make_request("SYNO.FileStation.List", "2", "list", path="/share")
+
+    assert "LIVE_SID_req" not in str(exc_info.value)

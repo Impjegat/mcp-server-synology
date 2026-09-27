@@ -34,12 +34,25 @@ def check_requirements():
 
 
 def setup_logging(level: str = "INFO"):
-    """Setup logging configuration."""
+    """Setup logging configuration.
+
+    Attaches a redaction filter to every handler so session IDs, SynoTokens,
+    device tokens, and passwords never reach the log output, however they
+    got embedded in a log message (a deliberate log line, or an exception's
+    str() picking up a URL that had `_sid=` in it).
+    """
     logging.basicConfig(
         level=getattr(logging, level.upper(), logging.INFO),
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
+
+    from auth.synology_auth import iter_live_secrets
+    from utils.redact import RedactingFilter
+
+    redacting_filter = RedactingFilter(iter_live_secrets)
+    for handler in logging.getLogger().handlers:
+        handler.addFilter(redacting_filter)
 
 
 if __name__ == "__main__":

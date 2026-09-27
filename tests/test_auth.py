@@ -287,20 +287,33 @@ class _FakeResponse:
 
 
 def _patch_requests_get(monkeypatch, payloads):
-    """Replace requests.get in synology_auth with a recorder.
+    """Replace requests.get AND requests.post in synology_auth with a recorder.
 
-    `payloads` is a list of dicts; each call pops the head. Every call also
-    records the params it was called with into `calls` for assertions.
+    `payloads` is a list of dicts; each call (whichever verb the code under
+    test used) pops the head in call order. Login sends its payload via POST
+    (`data=`); logout still uses GET (`params=`) — both are recorded under
+    the same `params` key in the returned call record, plus a `method` key,
+    so existing assertions like `calls[i]["params"][...]` keep working
+    regardless of which verb was used, while a test can also assert on
+    `calls[i]["method"]` when the verb itself matters (e.g. confirming login
+    no longer sends credentials as a URL query string).
     """
     import auth.synology_auth as mod
 
     calls = []
 
-    def _fake_get(url, params=None, verify=None):
-        calls.append({"url": url, "params": dict(params or {}), "verify": verify})
+    def _record(method, url, params, verify):
+        calls.append({"url": url, "params": dict(params or {}), "verify": verify, "method": method})
         return _FakeResponse(payloads.pop(0) if payloads else {"success": False})
 
+    def _fake_get(url, params=None, verify=None, timeout=None, **kwargs):
+        return _record("GET", url, params, verify)
+
+    def _fake_post(url, data=None, verify=None, timeout=None, **kwargs):
+        return _record("POST", url, data, verify)
+
     monkeypatch.setattr(mod.requests, "get", _fake_get)
+    monkeypatch.setattr(mod.requests, "post", _fake_post)
     return calls
 
 
@@ -486,3 +499,68 @@ def test_get_session_info_includes_device_id():
     auth.current_device_id = "DID_visible"
     info = auth.get_session_info()
     assert info["device_id"] == "DID_visible"
+
+
+# ---------------------------------------------------------------------------
+# Credential-and-session-leak hardening (PR 1) unit tests
+# ---------------------------------------------------------------------------
+
+
+def test_login_sends_credentials_via_post_not_url(monkeypatch):
+    """The password/OTP/device-token must travel in the POST body, never the
+    URL query string — a GET would put them in DSM's access log, any
+    intermediate proxy's log, and in `requests`' own exception text."""
+    from auth.synology_auth import SynologyAuth
+
+    success_payload = {"success": True, "data": {"sid": "SID_post", "synotoken": "T"}}
+    calls = _patch_requests_get(monkeypatch, [success_payload])
+
+    auth = SynologyAuth("https://nas.example.test:5001")
+    auth.login("alice", "hunter2", otp_code="123456")
+
+    assert len(calls) == 1
+    assert calls[0]["method"] == "POST"
+    assert "hunter2" not in calls[0]["url"]
+    assert "passwd=" not in calls[0]["url"]
+    # The password is still sent — just in the body, not the URL.
+    assert calls[0]["params"]["passwd"] == "hunter2"
+
+
+def test_auth_outcome_error_does_not_retry_other_api_versions(monkeypatch):
+    """A DSM auth-outcome error (account disabled, IP auto-blocked, 2SV
+    required, ...) means DSM already made its decision on these credentials.
+    Retrying with another API version would just resubmit the same password
+    again, feeding exactly the pattern DSM's Auto Block watches for."""
+    from auth.synology_auth import SynologyAuth
+
+    # Only one payload queued: if the code tries a second API version, the
+    # fake will hand back the default `{"success": False}` instead, and the
+    # call-count assertion below catches it either way.
+    calls = _patch_requests_get(monkeypatch, [{"success": False, "error": {"code": 401}}])
+
+    auth = SynologyAuth("https://nas.example.test:5001")
+    result = auth.login("alice", "pw")
+
+    assert result["success"] is False
+    assert len(calls) == 1, "a 401 (account disabled) must not trigger a version-fallback retry"
+
+
+def test_unsupported_version_error_retries_next_api_version(monkeypatch):
+    """A parameter/API/method/version-not-supported error (102) is a reason
+    to try the next API version — unlike an auth-outcome error, DSM hasn't
+    made an authentication decision yet."""
+    from auth.synology_auth import SynologyAuth
+
+    calls = _patch_requests_get(
+        monkeypatch,
+        [
+            {"success": False, "error": {"code": 102}},
+            {"success": True, "data": {"sid": "SID_v_fallback", "synotoken": "T"}},
+        ],
+    )
+
+    auth = SynologyAuth("https://nas.example.test:5001")
+    result = auth.login("alice", "pw")
+
+    assert result["success"] is True
+    assert len(calls) == 2, "an unsupported-API error should fall back to the next API version"

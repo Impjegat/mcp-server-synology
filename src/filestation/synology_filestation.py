@@ -8,6 +8,8 @@ from typing import Any, Dict, List, Optional
 
 import requests
 
+from utils.redact import redact
+
 
 class SynologyFileStation:
     """Handles Synology FileStation API operations."""
@@ -37,6 +39,10 @@ class SynologyFileStation:
             headers["X-SYNO-TOKEN"] = self.syno_token
         return headers
 
+    def _redact(self, message: str) -> str:
+        """Redact this instance's live secrets from an error message."""
+        return redact(message, live_secrets=[self.session_id, self.syno_token])
+
     def _make_request(
         self, api: str, version: str, method: str, use_post: bool = False, **params
     ) -> Dict[str, Any]:
@@ -49,25 +55,32 @@ class SynologyFileStation:
             **params,
         }
 
-        if use_post:
-            response = requests.post(
-                self.api_url,
-                data=request_params,
-                headers=self._csrf_headers(post=True),
-                verify=self.verify_ssl,
-                timeout=15,
-            )
-        else:
-            response = requests.get(
-                self.api_url,
-                params=request_params,
-                headers=self._csrf_headers(post=False) or None,
-                verify=self.verify_ssl,
-                timeout=15,
-            )
-        response.raise_for_status()
+        try:
+            if use_post:
+                response = requests.post(
+                    self.api_url,
+                    data=request_params,
+                    headers=self._csrf_headers(post=True),
+                    verify=self.verify_ssl,
+                    timeout=15,
+                )
+            else:
+                response = requests.get(
+                    self.api_url,
+                    params=request_params,
+                    headers=self._csrf_headers(post=False) or None,
+                    verify=self.verify_ssl,
+                    timeout=15,
+                )
+            response.raise_for_status()
+            data = response.json()
+        except requests.RequestException as e:
+            # This GET request's URL carries `_sid=<session_id>` directly, and
+            # `str(e)` on a RequestException commonly embeds the full URL —
+            # redact before it propagates. Backstop; the tool-response
+            # boundary in mcp_server.py also redacts.
+            raise Exception(self._redact(f"Network error: {e}"))
 
-        data = response.json()
         if not data.get("success"):
             error_code = data.get("error", {}).get("code", "unknown")
             error_info = data.get("error", {})
@@ -103,18 +116,24 @@ class SynologyFileStation:
 
         # Multipart upload — let requests set Content-Type with the boundary;
         # we only thread the X-SYNO-TOKEN header (no charset override here).
+        # `_sid` and the other API params go in `data=` (regular multipart
+        # form fields, sent alongside `files=`), not `params=` — `params=`
+        # would put them in the URL query string even though this is a POST.
         upload_headers = {"X-SYNO-TOKEN": self.syno_token} if self.syno_token else None
-        response = requests.post(
-            self.api_url,
-            params=request_params,
-            files=files,
-            headers=upload_headers,
-            verify=self.verify_ssl,
-            timeout=15,
-        )
-        response.raise_for_status()
+        try:
+            response = requests.post(
+                self.api_url,
+                data=request_params,
+                files=files,
+                headers=upload_headers,
+                verify=self.verify_ssl,
+                timeout=15,
+            )
+            response.raise_for_status()
+            data = response.json()
+        except requests.RequestException as e:
+            raise Exception(self._redact(f"Network error: {e}"))
 
-        data = response.json()
         if not data.get("success"):
             error_code = data.get("error", {}).get("code", "unknown")
             raise Exception(f"Synology API error: {error_code}")
@@ -393,13 +412,18 @@ class SynologyFileStation:
             # Use context manager for session to prevent resource leak
             with requests.Session() as session:
                 with open(temp_file_path, "rb") as payload:
-                    # Build URL with parameters
-                    url = f"{self.api_url}?api=SYNO.FileStation.Upload&version=2&method=upload&_sid={self.session_id}"
-
-                    # Create multipart data
+                    # `api`/`version`/`method`/`_sid` go in the multipart form
+                    # body (data=), not the URL — putting `_sid` in the URL
+                    # query string would leak the session id into any log or
+                    # exception text that captures the request URL, even
+                    # though this is a POST.
                     files = {"file": (filename, payload, "text/plain")}
 
                     data = {
+                        "api": "SYNO.FileStation.Upload",
+                        "version": "2",
+                        "method": "upload",
+                        "_sid": self.session_id,
                         "path": directory,
                         "create_parents": "true",
                         "overwrite": str(overwrite).lower(),
@@ -408,17 +432,19 @@ class SynologyFileStation:
                     # Make the request — thread X-SYNO-TOKEN for DSM 7.3.2+ CSRF;
                     # let requests set Content-Type with the multipart boundary.
                     upload_headers = {"X-SYNO-TOKEN": self.syno_token} if self.syno_token else None
-                    response = session.post(
-                        url,
-                        files=files,
-                        data=data,
-                        headers=upload_headers,
-                        verify=self.verify_ssl,
-                        timeout=15,
-                    )
-                    response.raise_for_status()
-
-                    result = response.json()
+                    try:
+                        response = session.post(
+                            self.api_url,
+                            files=files,
+                            data=data,
+                            headers=upload_headers,
+                            verify=self.verify_ssl,
+                            timeout=15,
+                        )
+                        response.raise_for_status()
+                        result = response.json()
+                    except requests.RequestException as e:
+                        raise Exception(self._redact(f"Network error: {e}"))
 
                     if not result.get("success"):
                         error_code = result.get("error", {}).get("code", "unknown")
@@ -609,35 +635,41 @@ class SynologyFileStation:
 
         # Use the download API to get file content
         download_headers = {"X-SYNO-TOKEN": self.syno_token} if self.syno_token else None
-        response = requests.get(
-            f"{self.base_url}/webapi/entry.cgi",
-            params={
-                "api": "SYNO.FileStation.Download",
-                "version": "2",
-                "method": "download",
-                "path": formatted_path,
-                "_sid": self.session_id,
-            },
-            headers=download_headers,
-            verify=self.verify_ssl,
-            stream=True,
-            timeout=15,
-        )
-        response.raise_for_status()
+        try:
+            response = requests.get(
+                f"{self.base_url}/webapi/entry.cgi",
+                params={
+                    "api": "SYNO.FileStation.Download",
+                    "version": "2",
+                    "method": "download",
+                    "path": formatted_path,
+                    "_sid": self.session_id,
+                },
+                headers=download_headers,
+                verify=self.verify_ssl,
+                stream=True,
+                timeout=15,
+            )
+            response.raise_for_status()
 
-        # Check for API error in the headers (download API is special)
-        if (
-            "Content-Type" in response.headers
-            and "application/json" in response.headers["Content-Type"]
-        ):
-            error_data = response.json()
-            if not error_data.get("success"):
-                error_code = error_data.get("error", {}).get("code", "unknown")
-                raise Exception(f"Synology API error: {error_code}")
+            # Check for API error in the headers (download API is special)
+            if (
+                "Content-Type" in response.headers
+                and "application/json" in response.headers["Content-Type"]
+            ):
+                error_data = response.json()
+                if not error_data.get("success"):
+                    error_code = error_data.get("error", {}).get("code", "unknown")
+                    raise Exception(f"Synology API error: {error_code}")
 
-        # Assuming the content is text, read it
-        # For binary files, this would need to be handled differently
-        return response.text
+            # Assuming the content is text, read it
+            # For binary files, this would need to be handled differently
+            return response.text
+        except requests.RequestException as e:
+            # This GET request's URL carries `_sid=<session_id>` directly —
+            # redact before a RequestException's str() (which commonly
+            # embeds the full URL) propagates to the caller.
+            raise Exception(self._redact(f"Network error: {e}"))
 
     def move_file(
         self, source_path: str, destination_path: str, overwrite: bool = False
