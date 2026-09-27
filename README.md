@@ -422,6 +422,12 @@ The docker-compose.yml automatically mounts your `~/.config/synology-mcp` direct
 
 ### ⚠️ Security Recommendations
 
+**Restricted Mode (RESTRICTED_MODE):**
+- Default is `true` — the server exposes only browsing and monitoring tools (file listing/reading, download/container/health status, and similar read-only operations). Every modifying tool (file writes/deletes, user and container management, share creation, ...) is hidden from tool discovery *and* rejected before any request reaches the NAS, even if a client somehow calls it by name.
+- Set `RESTRICTED_MODE=false` in `.env`, or `"restricted_mode": false` under the `"server"` key in `settings.json`, only once you deliberately want the full tool set available.
+- While restricted, `synology_login`'s `base_url` is also pinned to a NAS already configured in `settings.json` or `SYNOLOGY_URL` — a client can't point your credentials at an arbitrary host. This check is skipped only when no NAS is configured yet (nothing to pin against on a fresh install).
+- Because DSM's monitoring APIs (`SYNO.Core.*`, `SYNO.Storage.CGI.*`) generally require an administrator account, a non-admin account will see most monitoring tools fail even though they're read-only. If you want monitoring to work, use a **dedicated admin account created for this server** (not your personal one): enable 2FA with the device-token flow described below, and deny it any DSM application privilege the server doesn't need (Download Station, Container Manager, file-sharing protocols, etc.) wherever DSM's privilege controls allow it. With an admin account, restricted mode and your MCP client's own tool allowlist are the only barriers to writes — DSM per-share permissions can't make an administrator read-only.
+
 **SSL Certificate Verification (VERIFY_SSL):**
 - Default is `true` — certificates are verified against the system trust store
 - Setting `VERIFY_SSL=false` disables certificate verification and makes your connection vulnerable to man-in-the-middle (MITM) attacks; only do this if your NAS uses a self-signed certificate you can't add to your trust store
