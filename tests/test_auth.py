@@ -699,3 +699,33 @@ def test_missing_ca_bundle_path_is_classified_as_certificate_error(monkeypatch):
     assert result["error"]["code"] == "certificate_error"
     assert "hunter2" not in result["error"]["message"]
     assert len(calls) == 1, "a bad CA-bundle path must not retry other API versions"
+
+
+def test_http_error_is_not_misclassified_as_certificate_error(monkeypatch):
+    """requests.exceptions.RequestException (the base of HTTPError,
+    JSONDecodeError, and every other requests exception, including the
+    three special-cased above) is itself an OSError subclass. An HTTPError
+    from raise_for_status() (e.g. a reverse proxy/WAF in front of DSM
+    returning a non-2xx status) must not be swallowed by the
+    missing-CA-bundle-path branch — that would misclassify it as a
+    certificate problem and wrongly stop retrying other API versions."""
+    import auth.synology_auth as mod
+
+    calls = []
+
+    class _FakeErrorResponse:
+        def raise_for_status(self):
+            raise mod.requests.exceptions.HTTPError("502 Bad Gateway")
+
+    def _fake_post(url, data=None, verify=None, timeout=None, **kwargs):
+        calls.append(url)
+        return _FakeErrorResponse()
+
+    monkeypatch.setattr(mod.requests, "post", _fake_post)
+
+    auth = mod.SynologyAuth("https://nas.example.test:5001")
+    result = auth.login("alice", "pw")
+
+    assert result["success"] is False
+    assert result["error"]["code"] == "unknown"
+    assert len(calls) == 4, "an HTTPError must still retry every API version like before"

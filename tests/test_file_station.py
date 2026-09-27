@@ -556,3 +556,60 @@ def test_get_file_content_allows_file_within_size_cap(monkeypatch):
     )
 
     assert fs.get_file_content("/share/small.txt") == "hi there!!"
+
+
+def _fake_files_response(size):
+    """DSM's SYNO.FileStation.List response shape: "size" (like time/owner/
+    perm) is nested under the file object's "additional" key, not at its
+    top level."""
+    return {
+        "files": [
+            {
+                "name": "f",
+                "path": "/share/f",
+                "isdir": False,
+                "additional": {"size": size},
+            }
+        ]
+    }
+
+
+def test_get_file_info_reads_size_from_additional_not_top_level(monkeypatch):
+    """DSM nests the requested "size" additional field under
+    file["additional"]["size"], same as time/owner/perm — not at the file
+    object's top level. Without reading it from there, get_file_content's
+    size cap never fires against a real NAS."""
+    from filestation.synology_filestation import SynologyFileStation
+
+    fs = SynologyFileStation("https://nas.example.test:5001", "sid")
+    monkeypatch.setattr(fs, "_make_request", lambda *a, **k: _fake_files_response(5_000_000))
+
+    assert fs.get_file_info("/share/f")["size"] == 5_000_000
+
+
+def test_list_directory_reads_size_from_additional_not_top_level(monkeypatch):
+    from filestation.synology_filestation import SynologyFileStation
+
+    fs = SynologyFileStation("https://nas.example.test:5001", "sid")
+    monkeypatch.setattr(fs, "_make_request", lambda *a, **k: _fake_files_response(42))
+
+    assert fs.list_directory("/share")[0]["size"] == 42
+
+
+def test_get_file_content_size_cap_fires_against_a_realistic_dsm_response(monkeypatch):
+    """End-to-end version of the size-cap test that does NOT monkeypatch
+    get_file_info directly — exercises the real _make_request →
+    additional["size"] parsing path, which the earlier size-cap tests
+    skipped by mocking get_file_info wholesale."""
+    from filestation.synology_filestation import SynologyFileStation
+
+    fs = SynologyFileStation("https://nas.example.test:5001", "sid", max_file_content_size=100)
+    monkeypatch.setattr(fs, "_make_request", lambda *a, **k: _fake_files_response(5_000_000))
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("get_file_content must not download when the size cap is exceeded")
+
+    monkeypatch.setattr("filestation.synology_filestation.requests.get", fail_if_called)
+
+    with pytest.raises(Exception, match="exceeds the configured limit"):
+        fs.get_file_content("/share/f")

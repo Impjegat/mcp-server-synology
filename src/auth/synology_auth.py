@@ -233,18 +233,25 @@ class SynologyAuth:
                 # different API version.
                 last_exception = e
                 break
-            except OSError as e:
+            except Exception as e:
                 # requests' HTTPAdapter.cert_verify() raises a bare OSError
                 # (not requests.exceptions.SSLError) when a VERIFY_SSL
                 # CA-bundle path doesn't exist on disk — arguably the most
-                # likely misconfiguration for that feature. This must be
-                # its own clause *after* the requests.exceptions ones above:
-                # SSLError/ConnectionError/Timeout are themselves OSError
-                # subclasses, so listing this first would swallow all of
-                # them under the wrong classification.
-                last_exception = e
-                break
-            except Exception as e:
+                # likely misconfiguration for that feature. Every
+                # requests.exceptions.RequestException (HTTPError from
+                # raise_for_status(), JSONDecodeError from a malformed
+                # response, and the three types already handled above) is
+                # *also* an OSError subclass, so this checks specifically
+                # for a bare one that isn't any of those — otherwise this
+                # would misclassify e.g. an HTTPError from a reverse proxy
+                # in front of DSM as a certificate problem, and stop
+                # retrying other API versions for a reason that has
+                # nothing to do with the CA bundle.
+                if isinstance(e, OSError) and not isinstance(
+                    e, requests.exceptions.RequestException
+                ):
+                    last_exception = e
+                    break
                 last_exception = e
                 continue
 
@@ -282,11 +289,14 @@ class SynologyAuth:
                     ),
                 },
             }
-        # A bare OSError that isn't one of the requests.exceptions types
-        # above — checked last, since those are all OSError subclasses too
-        # and are meant to take the more specific branches. This is the
-        # VERIFY_SSL-points-to-a-missing-CA-bundle-file case.
-        if isinstance(last_exception, OSError):
+        # A bare OSError that isn't a requests.exceptions.RequestException
+        # (every RequestException, including the three special-cased above,
+        # is itself an OSError subclass) — this is the
+        # VERIFY_SSL-points-to-a-missing-CA-bundle-file case specifically,
+        # not an HTTPError/JSONDecodeError/other requests-level failure.
+        if isinstance(last_exception, OSError) and not isinstance(
+            last_exception, requests.exceptions.RequestException
+        ):
             return {
                 "success": False,
                 "error": {

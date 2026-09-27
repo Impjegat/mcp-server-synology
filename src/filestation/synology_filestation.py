@@ -226,6 +226,12 @@ class SynologyFileStation:
             if "additional" in file_info:
                 additional = file_info["additional"]
 
+                # DSM returns the requested "size" additional field nested
+                # here, same as time/owner/perm below — not at the file
+                # object's top level, despite the fallback above.
+                if "size" in additional:
+                    item["size"] = additional["size"]
+
                 if "time" in additional:
                     time_info = additional["time"]
                     item.update(
@@ -282,6 +288,14 @@ class SynologyFileStation:
         # Add additional info
         if "additional" in file_info:
             additional = file_info["additional"]
+
+            # DSM returns the requested "size" additional field nested
+            # here, same as time/owner/perm below — not at the file
+            # object's top level, despite the fallback above. Without this,
+            # get_file_content's size cap (checked via this method's "size")
+            # never fires against a real NAS.
+            if "size" in additional:
+                result["size"] = additional["size"]
 
             if "time" in additional:
                 time_info = additional["time"]
