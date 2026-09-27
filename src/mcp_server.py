@@ -15,7 +15,7 @@ from mcp.server import Server
 from mcp.server.lowlevel import NotificationOptions
 from mcp.server.models import InitializationOptions
 
-from auth import SynologyAuth
+from auth import SynologyAuth, iter_live_secrets
 from config import config
 from container import SynologyContainer
 from downloadstation import SynologyDownloadStation
@@ -23,6 +23,7 @@ from filestation import SynologyFileStation
 from health import SynologyHealth
 from nfs import SynologyNFS
 from usermanagement import SynologyUserManager
+from utils.redact import redact
 
 # Suppress InsecureRequestWarning when verify_ssl is explicitly disabled.
 # VERIFY_SSL now defaults to true; this only fires if the user opted out.
@@ -203,21 +204,33 @@ class SynologyMCPServer:
                     self.nas_name_map[label] = base_url
                     if nas_name is None:
                         self.nas_name_map[base_url] = base_url
-                    # Surface the DSM device token so users can copy it into
-                    # settings.json (`device_id`) to skip OTP on future starts.
-                    # Only present when DSM issued one — i.e. the first-time
-                    # OTP login (the steady-state `device_id` path doesn't
-                    # echo it back). Logged in full because (a) the value
-                    # is destined for settings.json anyway and (b) it's
-                    # useless without the password, so truncation provides
-                    # no meaningful protection.
+                    # DSM issues a device token (`did`) only on the first-time
+                    # OTP login (the steady-state `device_id` path doesn't echo
+                    # it back). Persist it straight into settings.json so 2FA
+                    # accounts don't need OTP on the next start — never log or
+                    # return the token itself, including truncated, per the
+                    # credential-handling policy this server follows.
                     did = result["data"].get("did")
-                    if did:
+                    if did and nas_name is not None:
+                        if config.save_device_id(nas_name, did):
+                            logger.info(
+                                f"{label}: 2FA device token saved to settings.json "
+                                "— OTP won't be required on the next start"
+                            )
+                        else:
+                            logger.warning(
+                                f"{label}: 2FA succeeded but the device token could not be "
+                                "saved automatically; OTP will be required again next start"
+                            )
+                    elif did:
+                        # Legacy .env single-NAS path has no per-NAS settings.json
+                        # entry to persist into.
                         logger.warning(
-                            f"{label}: 2FA bootstrap — copy this device_id into "
-                            f"settings.json to skip OTP on future starts: {did}"
+                            f"{label}: 2FA succeeded, but persistent device-token reuse "
+                            "requires migrating to settings.json (see README) — OTP will "
+                            "be required again next start"
                         )
-                    logger.info(f"{label}: session {session_id[:8]}...")
+                    logger.info(f"{label}: session established")
 
                     for inst_dict in self._service_instance_dicts():
                         inst_dict.pop(base_url, None)
@@ -318,116 +331,139 @@ class SynologyMCPServer:
             try:
                 logger.debug(f"Executing tool: {name}")
                 if name == "synology_login":
-                    return await self._handle_login(arguments)
+                    result = await self._handle_login(arguments)
                 elif name == "synology_logout":
-                    return await self._handle_logout(arguments)
+                    result = await self._handle_logout(arguments)
                 elif name == "synology_status":
-                    return await self._handle_status(arguments)
+                    result = await self._handle_status(arguments)
                 elif name == "synology_list_nas":
-                    return await self._handle_list_nas(arguments)
+                    result = await self._handle_list_nas(arguments)
                 elif name == "list_shares":
-                    return await self._handle_list_shares(arguments)
+                    result = await self._handle_list_shares(arguments)
                 elif name == "list_directory":
-                    return await self._handle_list_directory(arguments)
+                    result = await self._handle_list_directory(arguments)
                 elif name == "get_file_info":
-                    return await self._handle_get_file_info(arguments)
+                    result = await self._handle_get_file_info(arguments)
                 elif name == "search_files":
-                    return await self._handle_search_files(arguments)
+                    result = await self._handle_search_files(arguments)
                 elif name == "get_file_content":
-                    return await self._handle_get_file_content(arguments)
+                    result = await self._handle_get_file_content(arguments)
                 elif name == "rename_file":
-                    return await self._handle_rename_file(arguments)
+                    result = await self._handle_rename_file(arguments)
                 elif name == "move_file":
-                    return await self._handle_move_file(arguments)
+                    result = await self._handle_move_file(arguments)
                 elif name == "create_file":
-                    return await self._handle_create_file(arguments)
+                    result = await self._handle_create_file(arguments)
                 elif name == "create_directory":
-                    return await self._handle_create_directory(arguments)
+                    result = await self._handle_create_directory(arguments)
                 elif name == "delete":
-                    return await self._handle_delete(arguments)
+                    result = await self._handle_delete(arguments)
                 # Download Station handlers
                 elif name == "ds_get_info":
-                    return await self._handle_ds_get_info(arguments)
+                    result = await self._handle_ds_get_info(arguments)
                 elif name == "ds_list_tasks":
-                    return await self._handle_ds_list_tasks(arguments)
+                    result = await self._handle_ds_list_tasks(arguments)
                 elif name == "ds_create_task":
-                    return await self._handle_ds_create_task(arguments)
+                    result = await self._handle_ds_create_task(arguments)
                 elif name == "ds_pause_tasks":
-                    return await self._handle_ds_pause_tasks(arguments)
+                    result = await self._handle_ds_pause_tasks(arguments)
                 elif name == "ds_resume_tasks":
-                    return await self._handle_ds_resume_tasks(arguments)
+                    result = await self._handle_ds_resume_tasks(arguments)
                 elif name == "ds_delete_tasks":
-                    return await self._handle_ds_delete_tasks(arguments)
+                    result = await self._handle_ds_delete_tasks(arguments)
                 elif name == "ds_get_statistics":
-                    return await self._handle_ds_get_statistics(arguments)
+                    result = await self._handle_ds_get_statistics(arguments)
                 elif name == "ds_list_downloaded_files":
-                    return await self._handle_ds_list_downloaded_files(arguments)
+                    result = await self._handle_ds_list_downloaded_files(arguments)
                 # Health monitoring handlers
                 elif name == "synology_system_info":
-                    return await self._handle_health_call(arguments, "system_info")
+                    result = await self._handle_health_call(arguments, "system_info")
                 elif name == "synology_utilization":
-                    return await self._handle_health_call(arguments, "utilization")
+                    result = await self._handle_health_call(arguments, "utilization")
                 elif name == "synology_disk_health":
-                    return await self._handle_health_call(arguments, "disk_list")
+                    result = await self._handle_health_call(arguments, "disk_list")
                 elif name == "synology_disk_smart":
-                    return await self._handle_disk_smart(arguments)
+                    result = await self._handle_disk_smart(arguments)
                 elif name == "synology_volume_status":
-                    return await self._handle_health_call(arguments, "volume_list")
+                    result = await self._handle_health_call(arguments, "volume_list")
                 elif name == "synology_storage_pool":
-                    return await self._handle_health_call(arguments, "storage_pool_list")
+                    result = await self._handle_health_call(arguments, "storage_pool_list")
                 elif name == "synology_network":
-                    return await self._handle_health_call(arguments, "network_info")
+                    result = await self._handle_health_call(arguments, "network_info")
                 elif name == "synology_ups":
-                    return await self._handle_health_call(arguments, "ups_info")
+                    result = await self._handle_health_call(arguments, "ups_info")
                 elif name == "synology_services":
-                    return await self._handle_health_call(arguments, "package_list")
+                    result = await self._handle_health_call(arguments, "package_list")
                 elif name == "synology_system_log":
-                    return await self._handle_system_log(arguments)
+                    result = await self._handle_system_log(arguments)
                 elif name == "synology_health_summary":
-                    return await self._handle_health_call(arguments, "health_summary")
+                    result = await self._handle_health_call(arguments, "health_summary")
                 # Container Manager handlers
                 elif name.startswith("synology_container_"):
-                    return await self._handle_container_call(
+                    result = await self._handle_container_call(
                         arguments, name.removeprefix("synology_container_")
                     )
                 # NFS management handlers
                 elif name == "synology_nfs_status":
-                    return await self._handle_nfs_call(arguments, "nfs_status")
+                    result = await self._handle_nfs_call(arguments, "nfs_status")
                 elif name == "synology_nfs_enable":
-                    return await self._handle_nfs_enable(arguments)
+                    result = await self._handle_nfs_enable(arguments)
                 elif name == "synology_nfs_list_shares":
-                    return await self._handle_nfs_call(arguments, "list_shares")
+                    result = await self._handle_nfs_call(arguments, "list_shares")
                 elif name == "synology_nfs_set_permission":
-                    return await self._handle_nfs_set_permission(arguments)
+                    result = await self._handle_nfs_set_permission(arguments)
                 elif name == "synology_create_share":
-                    return await self._handle_create_share(arguments)
+                    result = await self._handle_create_share(arguments)
                 # User management handlers
                 elif name == "synology_list_users":
-                    return await self._handle_usermgr_call(arguments, "list_users")
+                    result = await self._handle_usermgr_call(arguments, "list_users")
                 elif name == "synology_get_user":
-                    return await self._handle_usermgr_get_user(arguments)
+                    result = await self._handle_usermgr_get_user(arguments)
                 elif name == "synology_create_user":
-                    return await self._handle_usermgr_create_user(arguments)
+                    result = await self._handle_usermgr_create_user(arguments)
                 elif name == "synology_set_user":
-                    return await self._handle_usermgr_set_user(arguments)
+                    result = await self._handle_usermgr_set_user(arguments)
                 elif name == "synology_delete_user":
-                    return await self._handle_usermgr_delete_user(arguments)
+                    result = await self._handle_usermgr_delete_user(arguments)
                 elif name == "synology_list_groups":
-                    return await self._handle_usermgr_call(arguments, "list_groups")
+                    result = await self._handle_usermgr_call(arguments, "list_groups")
                 elif name == "synology_list_group_members":
-                    return await self._handle_usermgr_list_group_members(arguments)
+                    result = await self._handle_usermgr_list_group_members(arguments)
                 elif name == "synology_add_user_to_group":
-                    return await self._handle_usermgr_add_to_group(arguments)
+                    result = await self._handle_usermgr_add_to_group(arguments)
                 elif name == "synology_remove_user_from_group":
-                    return await self._handle_usermgr_remove_from_group(arguments)
+                    result = await self._handle_usermgr_remove_from_group(arguments)
                 elif name == "synology_get_user_permissions":
-                    return await self._handle_usermgr_get_permissions(arguments)
+                    result = await self._handle_usermgr_get_permissions(arguments)
                 elif name == "synology_set_user_permissions":
-                    return await self._handle_usermgr_set_permissions(arguments)
+                    result = await self._handle_usermgr_set_permissions(arguments)
                 else:
                     raise ValueError(f"Unknown tool: {name}")
+                return self._redact_tool_result(result)
             except Exception as e:
-                return [types.TextContent(type="text", text=f"Error executing {name}: {str(e)}")]
+                error_text = redact(
+                    f"Error executing {name}: {str(e)}", live_secrets=list(iter_live_secrets())
+                )
+                return [types.TextContent(type="text", text=error_text)]
+
+    def _redact_tool_result(self, result: list[types.TextContent]) -> list[types.TextContent]:
+        """Redact known/likely secrets from a tool response before it leaves the process.
+
+        This is the single point every tool response passes through (see
+        `handle_call_tool` above), so a leak anywhere in a handler or the
+        service layer it calls (a raw DSM payload, a network-error message
+        that embedded a `_sid=`-bearing URL, ...) is caught here rather than
+        needing a fix at every individual call site.
+        """
+        live_secrets = list(iter_live_secrets())
+        return [
+            (
+                types.TextContent(type="text", text=redact(item.text, live_secrets=live_secrets))
+                if isinstance(item, types.TextContent)
+                else item
+            )
+            for item in result
+        ]
 
     def _service_instance_dicts(self):
         """Canonical set of per-domain instance caches keyed by base_url.
@@ -562,18 +598,28 @@ class SynologyMCPServer:
             for inst_dict in self._service_instance_dicts():
                 inst_dict.pop(base_url, None)
 
+            # Curated status only — never echo the raw DSM response (it
+            # carries the session id, SynoToken, and device token) back to
+            # the MCP client or into logs.
+            status_fields = [
+                f"Successfully authenticated with {base_url}",
+                "Session established: yes",
+            ]
+            if syno_token:
+                status_fields.append("CSRF token issued: yes")
+            if result["data"].get("did"):
+                status_fields.append(
+                    "2FA device token issued: yes (see settings.json if configured to persist it)"
+                )
+            return [types.TextContent(type="text", text="\n".join(status_fields))]
+        else:
+            error_info = result.get("error", {})
+            error_code = error_info.get("code", "unknown")
+            error_message = error_info.get("message", "Unknown error")
             return [
                 types.TextContent(
                     type="text",
-                    text=f"Successfully authenticated with {base_url}\n"
-                    f"Session ID: {session_id}\n"
-                    f"Response: {json.dumps(result, indent=2)}",
-                )
-            ]
-        else:
-            return [
-                types.TextContent(
-                    type="text", text=f"Authentication failed: {json.dumps(result, indent=2)}"
+                    text=f"Authentication failed: {error_code} - {error_message}",
                 )
             ]
 
@@ -602,7 +648,7 @@ class SynologyMCPServer:
                 types.TextContent(
                     type="text",
                     text=f"✅ Successfully logged out from {base_url}\n"
-                    f"Session {session_id[:10]}... has been terminated",
+                    "Session has been terminated",
                 )
             ]
         else:
@@ -655,9 +701,9 @@ class SynologyMCPServer:
             # Build reverse map: base_url -> nas_name
             url_to_name = {v: k for k, v in self.nas_name_map.items()}
             status_info.append(f"\nActive sessions ({len(self.sessions)}):")
-            for base_url, session_id in self.sessions.items():
+            for base_url in self.sessions:
                 name = url_to_name.get(base_url, "?")
-                status_info.append(f"• {name} ({base_url}): session {session_id[:10]}...")
+                status_info.append(f"• {name} ({base_url}): connected")
 
             # Show service instances
             if self.filestation_instances:
@@ -2775,17 +2821,17 @@ class SynologyMCPServer:
                     result = auth.logout(session_id)
 
                     if result.get("success"):
-                        logger.info(f"Session {session_id[:10]}... logged out successfully")
+                        logger.info(f"Session for {base_url} logged out successfully")
                         cleanup_results.append(f"{base_url}: Logged out successfully")
                     else:
                         error_info = result.get("error", {})
                         error_code = error_info.get("code", "unknown")
 
                         if str(error_code) in {"105", "106", "no_session"}:
-                            logger.info(f"Session {session_id[:10]}... was already expired")
+                            logger.info(f"Session for {base_url} was already expired")
                             cleanup_results.append(f"{base_url}: Session already expired")
                         else:
-                            logger.error(f"Failed to logout {session_id[:10]}...: {error_code}")
+                            logger.error(f"Failed to logout session for {base_url}: {error_code}")
                             cleanup_results.append(f"{base_url}: Logout failed - {error_code}")
 
                 # Always clear local data

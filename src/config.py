@@ -6,6 +6,8 @@ import json
 import logging
 import os
 import stat
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -132,6 +134,111 @@ class SynologyConfig:
         except OSError as e:
             logger.warning(f"Could not check permissions for {path}: {e}")
             return False
+
+    def _restrict_file_permissions(self, path: Path) -> None:
+        """Best-effort: restrict `path` to the current user only.
+
+        POSIX: chmod 0600. Windows: shell out to `icacls` to strip
+        inherited permissions and grant the current user Full Control,
+        since Windows has no POSIX mode bits (NTFS uses ACLs) and Python's
+        standard library has no built-in ACL API. Failures are logged and
+        swallowed — this is a hardening step, not a correctness requirement,
+        and must never block writing the file itself.
+        """
+        try:
+            if hasattr(os, "getuid"):
+                os.chmod(path, 0o600)
+            elif sys.platform == "win32":
+                user = os.environ.get("USERNAME") or os.getlogin()
+                subprocess.run(
+                    [
+                        "icacls",
+                        str(path),
+                        "/inheritance:r",
+                        "/grant:r",
+                        f"{user}:F",
+                    ],
+                    capture_output=True,
+                    check=True,
+                    timeout=10,
+                )
+        except Exception as e:
+            logger.warning(
+                f"Could not restrict permissions on {path}: {e}. "
+                "It contains NAS credentials — restrict access to it yourself."
+            )
+
+    def _atomic_write_settings(self, data: Dict[str, Any]) -> bool:
+        """Atomically overwrite SETTINGS_FILE with `data`.
+
+        Writes to a temp file in the same directory (so the final
+        `os.replace` is on the same filesystem and therefore atomic),
+        created already restricted to the owner (POSIX 0600) rather than
+        written with default-umask permissions and chmod'd afterward — the
+        latter leaves a window where the temp file (which holds every
+        configured NAS's password, not just the field being updated) is
+        readable at whatever the ambient umask allows. `_restrict_file_permissions`
+        is still called afterward: it's a no-op on POSIX (already 0600) but
+        is where the real restriction happens on Windows, whose `os.open`
+        mode argument doesn't set NTFS ACLs. Returns True on success, False
+        on any failure (logged, never raised — a failed settings write must
+        never crash the server or fall back to printing what it was trying
+        to save).
+        """
+        try:
+            CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+            tmp_path = SETTINGS_FILE.with_suffix(".json.tmp")
+            fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w") as f:
+                f.write(json.dumps(data, indent=2))
+            self._restrict_file_permissions(tmp_path)
+            os.replace(tmp_path, SETTINGS_FILE)
+            return True
+        except Exception as e:
+            logger.warning(f"Failed to save {SETTINGS_FILE}: {e}")
+            return False
+
+    def save_device_id(self, nas_name: str, device_id: str) -> bool:
+        """Persist a freshly-issued DSM trusted-device token for `nas_name`.
+
+        Reads the settings file fresh from disk (not from the parsed
+        `self.nas_configs`, which only carries the fields this class knows
+        about) so any other keys — other NAS entries, the `server` section,
+        anything a future version added — survive untouched. Updates the
+        in-memory config on success so the running process sees the new
+        token immediately, without needing a restart.
+
+        Returns True on success, False otherwise. Callers must not fall
+        back to logging or printing `device_id` when this returns False —
+        that would defeat the point of storing it out of logs in the first
+        place; instead, the next login simply falls back to OTP again.
+        """
+        if not SETTINGS_FILE.exists():
+            logger.warning(
+                f"Cannot save device token for '{nas_name}': {SETTINGS_FILE} does not exist "
+                "(legacy .env configuration does not support persistent device tokens — "
+                "migrate to settings.json)."
+            )
+            return False
+
+        try:
+            data = json.loads(SETTINGS_FILE.read_text())
+        except (json.JSONDecodeError, OSError) as e:
+            logger.warning(f"Cannot save device token for '{nas_name}': {e}")
+            return False
+
+        synology_section = data.get("synology", {})
+        if nas_name not in synology_section or not isinstance(synology_section[nas_name], dict):
+            logger.warning(f"Cannot save device token: '{nas_name}' not found in {SETTINGS_FILE}")
+            return False
+
+        synology_section[nas_name]["device_id"] = device_id
+        if not self._atomic_write_settings(data):
+            return False
+
+        if nas_name in self.nas_configs:
+            self.nas_configs[nas_name]["device_id"] = device_id
+        return True
 
     def _load_settings(self):
         """Load all settings from XDG config directory (~/.config/synology-mcp/settings.json)."""

@@ -357,6 +357,78 @@ class TestFilePermissions:
                 assert "test_nas" in cfg.nas_configs
 
 
+class TestSaveDeviceId:
+    """Test SynologyConfig.save_device_id()'s atomic, permission-safe write."""
+
+    def test_save_device_id_writes_restricted_file_and_preserves_other_fields(self, tmp_path):
+        """The settings file must never sit at default-umask permissions,
+        not even momentarily via an intermediate temp file — and fields
+        this class doesn't know about (here, `note`) must survive the
+        read-modify-write untouched."""
+        secrets_data = {
+            "synology": {
+                "nas1": {
+                    "host": "192.168.1.100",
+                    "port": 5001,
+                    "username": "admin",
+                    "password": "pass123",
+                    "note": "primary",
+                }
+            }
+        }
+        secrets_file = tmp_path / "secrets.json"
+        secrets_file.write_text(json.dumps(secrets_data))
+        os.chmod(str(secrets_file), 0o600)
+
+        reload_config()
+
+        with patch.dict(os.environ, {}, clear=True):
+            with patch("config.SETTINGS_FILE", secrets_file):
+                from config import SynologyConfig
+
+                cfg = SynologyConfig()
+                assert cfg.save_device_id("nas1", "DID_test123") is True
+
+        if hasattr(os, "getuid"):
+            import stat
+
+            mode = stat.S_IMODE(secrets_file.stat().st_mode)
+            assert mode == 0o600
+
+        on_disk = json.loads(secrets_file.read_text())
+        nas1 = on_disk["synology"]["nas1"]
+        assert nas1["device_id"] == "DID_test123"
+        assert nas1["password"] == "pass123"
+        assert nas1["note"] == "primary"
+
+        # In-memory config reflects the write immediately, no restart needed.
+        assert cfg.nas_configs["nas1"]["device_id"] == "DID_test123"
+
+    def test_save_device_id_returns_false_for_unknown_nas(self, tmp_path):
+        secrets_data = {
+            "synology": {
+                "nas1": {
+                    "host": "192.168.1.100",
+                    "port": 5001,
+                    "username": "admin",
+                    "password": "pass123",
+                }
+            }
+        }
+        secrets_file = tmp_path / "secrets.json"
+        secrets_file.write_text(json.dumps(secrets_data))
+        os.chmod(str(secrets_file), 0o600)
+
+        reload_config()
+
+        with patch.dict(os.environ, {}, clear=True):
+            with patch("config.SETTINGS_FILE", secrets_file):
+                from config import SynologyConfig
+
+                cfg = SynologyConfig()
+                assert cfg.save_device_id("does_not_exist", "DID_x") is False
+
+
 def test_config_str_representation():
     """Test string representation of config."""
     reload_config()
