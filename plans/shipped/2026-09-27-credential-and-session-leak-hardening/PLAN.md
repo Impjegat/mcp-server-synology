@@ -40,6 +40,17 @@ The remediation review (see repo root `REMEDIATION_PLAN.md`) found that DSM sess
 
 The original design listed an `omitted port defaults to 5001` test under this PR's tests. That fix (`config.py`'s `port = nas_info.get("port", 5000)` → `5001`) is `REMEDIATION_PLAN.md` §4 scope, assigned to PR 3 (`connection-defaults-and-bounds`), not this one — PR1 doesn't touch the port default. Adding the test here without the fix would ship a deliberately red test, so it's deferred to land together with its fix in PR 3.
 
+## Review round 1 (GitHub PR review, `@claude review this`)
+
+Two real findings, both fixed and pushed (commit `c13d6ff`):
+
+- `logout()` (`src/auth/synology_auth.py`) still sent `_sid` via a GET query string — the PR gave `login()` the POST fix and only a timeout/redaction backstop to `logout()`, missing the actual source fix. Switched to POST.
+- `_atomic_write_settings()` (`src/config.py`) created its temp file via `write_text()` (default umask) and `chmod`'d it to 0600 only afterward, leaving a brief window where the full settings file — every configured NAS's password — sat at ambient-umask permissions. Now creates the temp file already restricted via `os.open(..., 0o600)`.
+
+Also folded in a non-blocking nit from the same review: `redact.py`'s `_PARAM_PATTERN` now anchors to a key-name boundary so an unrelated key merely ending in `_sid` etc. isn't over-redacted.
+
+New tests: `test_logout_sends_session_id_via_post_not_url`, a boundary-anchoring case in `test_redact.py`, and `save_device_id()` gets test coverage for the first time (permission + field-preservation). Full suite: 83 passed, 3 skipped, same 2 pre-existing unrelated failures.
+
 ## Result
 
 All changes above are implemented, tested, and committed. See the top-level `REMEDIATION_PLAN.md` for how this fits into the overall roadmap.
