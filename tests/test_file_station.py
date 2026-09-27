@@ -399,12 +399,21 @@ def test_delete_uses_the_consolidated_helper_not_a_separate_denylist():
         ("/volume1/photo/../../../etc", "/etc"),
         ("/homes/../etc", "/etc"),
         ("/a/./b/../c", "/a/c"),
+        # Double (or more) leading slashes: posixpath.normpath alone
+        # preserves exactly two leading slashes verbatim (a POSIX quirk),
+        # which would otherwise let "//etc/passwd" survive unresolved even
+        # though the filesystem treats "//" the same as "/".
+        ("//etc/passwd", "/etc/passwd"),
+        ("///etc/passwd", "/etc/passwd"),
+        ("//homes/../../etc/shadow", "/etc/shadow"),
     ],
 )
 def test_format_path_resolves_dot_dot_before_any_check_runs(raw_path, expected_formatted):
-    """`_format_path` must resolve `.`/`..` segments itself — a prefix-based
-    critical-path check downstream only ever sees the literal string, so an
-    unresolved `/share/../etc/passwd` would sail past a check for `/etc`."""
+    """`_format_path` must resolve `.`/`..` segments (and collapse repeated
+    leading slashes) itself — a prefix-based critical-path check downstream
+    only ever sees the literal string, so an unresolved
+    `/share/../etc/passwd` or `//etc/passwd` would sail past a check for
+    `/etc`."""
     from filestation.synology_filestation import SynologyFileStation
 
     fs = SynologyFileStation("https://nas.example.test:5001", "sid")
@@ -418,12 +427,14 @@ def test_format_path_resolves_dot_dot_before_any_check_runs(raw_path, expected_f
         ("get_file_info", ("/homes/alice/../../etc/passwd",)),
         ("search_files", ("/volume1/../../etc", "*.conf")),
         ("create_directory", ("/homes/../etc", "newdir")),
+        ("get_file_info", ("//etc/passwd",)),
+        ("list_directory", ("///etc",)),
     ],
 )
 def test_dot_dot_traversal_cannot_bypass_the_critical_path_check(method_name, args):
-    """A `..`-bearing path that resolves to a critical path must still be
-    rejected — the denylist check must see the resolved path, not the raw
-    string the caller supplied."""
+    """A `..`-bearing or double-slash-prefixed path that resolves to a
+    critical path must still be rejected — the denylist check must see the
+    resolved path, not the raw string the caller supplied."""
     from filestation.synology_filestation import SynologyFileStation
 
     fs = SynologyFileStation("https://nas.example.test:5001", "sid")

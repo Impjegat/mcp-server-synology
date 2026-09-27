@@ -159,6 +159,14 @@ class SynologyFileStation:
         if not path.startswith("/"):
             path = "/" + path
 
+        # Collapse any run of leading slashes to exactly one *before*
+        # normpath: posixpath.normpath has a POSIX quirk where it preserves
+        # exactly two leading slashes verbatim (three or more collapse to
+        # one), so "//etc/passwd" would otherwise survive unchanged and
+        # bypass a "/etc" prefix check even though the filesystem treats
+        # "//" the same as "/".
+        path = "/" + path.lstrip("/")
+
         # Resolve "." / ".." segments (POSIX-style, regardless of the host
         # OS this process runs on) before anything downstream — otherwise
         # e.g. "/share/../etc/passwd" never matches _check_critical_path's
