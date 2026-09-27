@@ -486,7 +486,8 @@ class SynologyMCPServer:
         # Add login/logout tools only if not using auto-login or no credentials configured
         if not config.auto_login or not config.has_synology_credentials():
             tools.extend(
-                [
+                self._annotate_tool(t)
+                for t in [
                     types.Tool(
                         name="synology_login",
                         description=(
@@ -550,7 +551,7 @@ class SynologyMCPServer:
                 ]
             )
 
-        return [self._annotate_tool(t) for t in tools]
+        return tools
 
     async def _dispatch_tool_call(self, name: str, arguments: dict) -> list[types.TextContent]:
         """Look up and invoke `name` in `self._tool_registry` — the single
