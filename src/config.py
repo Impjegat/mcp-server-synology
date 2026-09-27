@@ -32,7 +32,7 @@ def _parse_verify_ssl(value: str) -> Any:
         return True
     if lowered == "false":
         return False
-    return value
+    return value.strip()
 
 
 # XDG Base Directory Specification: ~/.config/synology-mcp/

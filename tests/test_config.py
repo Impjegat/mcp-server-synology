@@ -165,6 +165,20 @@ class TestSynologyConfig:
 
                     assert SynologyConfig().verify_ssl == "/etc/ssl/certs/my-ca.pem"
 
+    def test_verify_ssl_ca_bundle_path_strips_incidental_whitespace(self):
+        """Env vars sourced from files/Docker/K8s secrets commonly carry
+        incidental leading/trailing whitespace — left in, the path would
+        silently fail to resolve, producing a confusing error deep inside
+        `requests` rather than a clear config error."""
+        reload_config()
+
+        with patch.dict(os.environ, {"VERIFY_SSL": "  /etc/ssl/certs/my-ca.pem  "}, clear=True):
+            with patch("config.SETTINGS_FILE", Path("/nonexistent/secrets.json")):
+                with patch.object(Path, "exists", return_value=False):
+                    from config import SynologyConfig
+
+                    assert SynologyConfig().verify_ssl == "/etc/ssl/certs/my-ca.pem"
+
     def test_verify_ssl_settings_json_accepts_ca_bundle_path(self, tmp_path):
         secrets_data = {
             "synology": {
