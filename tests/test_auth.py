@@ -197,6 +197,7 @@ class TestSynologyAuth:
 
 
 # Quick connectivity test
+@pytest.mark.real_nas
 def test_auth_connectivity(env_check):
     """Quick test to verify auth service is reachable."""
     from auth.synology_auth import SynologyAuth

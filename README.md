@@ -36,14 +36,13 @@ AUTO_LOGIN=true
 VERIFY_SSL=true
 ```
 
-### 3️⃣ Run with Docker
+### 3️⃣ Build the Image
 
 ```bash
-docker-compose up -d
-
-# Build and run
-docker-compose up -d --build
+docker-compose build
 ```
+
+There's nothing to start or leave running here: this is a per-session stdio process, not a background service. Your MCP client launches it itself via `docker-compose run --rm` — see the "Client Setup" section below for the exact config each client uses.
 
 ### 4️⃣ Alternative: Local Python
 
@@ -54,6 +53,35 @@ pip install -r requirements.txt
 # Run with environment control
 python main.py
 ```
+
+## 🪟 Windows Installation
+
+Docker Desktop (with the WSL2 backend) is the easiest path on Windows — the `docker-compose.yml` config works the same as on macOS/Linux, and Docker Desktop's own installer handles WSL2 for you. Local Python works too, without WSL:
+
+```powershell
+# Clone repository
+git clone https://github.com/atom2ueki/mcp-server-synology.git
+cd mcp-server-synology
+
+# Create environment file
+copy env.example .env
+
+# Create a virtual environment and install dependencies
+python -m venv .venv
+.venv\Scripts\activate
+pip install -r requirements.txt
+
+# Run
+python main.py
+```
+
+Edit `.env` with a text editor the same way as on macOS/Linux — the file format doesn't change.
+
+**Where settings.json lives:** `~/.config/synology-mcp/settings.json` resolves to `%USERPROFILE%\.config\synology-mcp\settings.json` (e.g. `C:\Users\<you>\.config\synology-mcp\settings.json`) by default — Python's `Path.home()` maps to `%USERPROFILE%` on Windows, and the server uses a literal `.config` subdirectory there rather than a Windows-native location like `%APPDATA%`, so tooling and instructions stay identical across platforms. Set the `XDG_CONFIG_HOME` environment variable (System Properties → Environment Variables, or `setx XDG_CONFIG_HOME "C:\path\you\want"` in a new shell) to store it elsewhere.
+
+**File permissions:** Windows has no POSIX file-mode bits, so the server can't `chmod 600` `settings.json` the way it does on macOS/Linux. It instead shells out to `icacls` to strip inherited permissions and grant only the current user full control, best-effort (a failure to do so is logged as a warning, not a startup error — restrict access to the file yourself if that warning appears).
+
+**Docker Desktop note:** the `docker-compose.yml` volume mount (`${XDG_CONFIG_HOME:-$HOME/.config}/synology-mcp:...`) is expanded by Docker Compose itself, not your shell, so it resolves the same way whether you run `docker-compose` from PowerShell, cmd, or WSL2 — as long as `HOME` or `XDG_CONFIG_HOME` is set in the environment Compose sees (WSL2 sets `HOME` automatically; from native PowerShell/cmd, set `XDG_CONFIG_HOME` explicitly first).
 
 ## 🔌 Client Setup
 

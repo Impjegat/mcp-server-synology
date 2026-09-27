@@ -55,12 +55,25 @@ class TestSynologyConfig:
                 "SYNOLOGY_PASSWORD": "testpass",
             },
         ):
-            with patch("config.SETTINGS_FILE", Path("/nonexistent/secrets.json")):
-                with patch.object(Path, "exists", return_value=False):
-                    from config import InsecureURLError, SynologyConfig
+            # config.py constructs a module-level `config = SynologyConfig()`
+            # singleton at import time, and _load_env_settings() (which
+            # validates SYNOLOGY_URL) runs before _load_settings() (which
+            # touches SETTINGS_FILE) — so the fresh import below (sys.modules
+            # was cleared by reload_config() above) raises here, under this
+            # patched env, before SETTINGS_FILE is ever read. No need to mock
+            # it: patch("config.SETTINGS_FILE", ...) would itself trigger
+            # this same fresh import via its own string-based target
+            # resolution, outside of any pytest.raises context.
+            #
+            # Match on ValueError (InsecureURLError's stable base class)
+            # rather than InsecureURLError itself: a fresh reimport defines a
+            # brand-new class object each time, so any reference obtained
+            # only after a *successful* import wouldn't be the same class
+            # this raise actually uses.
+            with pytest.raises(ValueError, match="https://") as exc_info:
+                import config  # noqa: F401
 
-                    with pytest.raises(InsecureURLError, match="https://"):
-                        SynologyConfig()
+            assert exc_info.value.__class__.__name__ == "InsecureURLError"
 
     def test_default_values(self):
         """Test default configuration values."""
@@ -544,6 +557,13 @@ class TestFilePermissions:
         # actually running this test (raising=False: a no-op on platforms
         # where it's already absent, e.g. Windows).
         monkeypatch.delattr(os, "getuid", raising=False)
+        # On real Windows, Path.home() never touches os.getuid() at all —
+        # ntpath.expanduser() resolves "~" from USERPROFILE/HOME instead.
+        # Deleting os.getuid() to simulate that here would otherwise also
+        # break config.py's own unrelated module-level Path.home() call
+        # (used to default XDG_CONFIG_HOME), which does depend on getuid()
+        # via posixpath.expanduser() on this POSIX test runner.
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
         reload_config()
 

@@ -223,6 +223,7 @@ class TestRealDownloadStation:
 
 
 # Simple connectivity test that can run quickly
+@pytest.mark.real_nas
 def test_basic_connectivity(download_station):
     """Quick test to verify basic Download Station connectivity."""
     try:

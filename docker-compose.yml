@@ -14,9 +14,13 @@ services:
       # On macOS: ~/.config/synology-mcp -> /home/mcpuser/.config/synology-mcp
       # On Linux: ~/.config/synology-mcp -> /home/mcpuser/.config/synology-mcp
       - ${XDG_CONFIG_HOME:-$HOME/.config}/synology-mcp:/home/mcpuser/.config/synology-mcp:ro
+    # stdin_open (no tty): every client config in the README launches this
+    # via `docker-compose run --rm`, speaking JSON-RPC over stdin/stdout —
+    # a TTY would add terminal semantics (echo, line buffering) that don't
+    # suit a binary/line-oriented RPC stream. No restart policy either:
+    # restart policies are for a long-running service started with `up`,
+    # not a one-off, auto-removed container tied to the client's process.
     stdin_open: true
-    tty: true
-    restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import sys; sys.exit(0)"]
       interval: 30s
