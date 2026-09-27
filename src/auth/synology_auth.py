@@ -233,6 +233,17 @@ class SynologyAuth:
                 # different API version.
                 last_exception = e
                 break
+            except OSError as e:
+                # requests' HTTPAdapter.cert_verify() raises a bare OSError
+                # (not requests.exceptions.SSLError) when a VERIFY_SSL
+                # CA-bundle path doesn't exist on disk — arguably the most
+                # likely misconfiguration for that feature. This must be
+                # its own clause *after* the requests.exceptions ones above:
+                # SSLError/ConnectionError/Timeout are themselves OSError
+                # subclasses, so listing this first would swallow all of
+                # them under the wrong classification.
+                last_exception = e
+                break
             except Exception as e:
                 last_exception = e
                 continue
@@ -267,6 +278,23 @@ class SynologyAuth:
                     "message": redact(
                         f"Could not connect to {self.base_url}: {last_exception}. "
                         "Check the host and port, and that DSM is reachable over HTTPS.",
+                        live_secrets=(password,),
+                    ),
+                },
+            }
+        # A bare OSError that isn't one of the requests.exceptions types
+        # above — checked last, since those are all OSError subclasses too
+        # and are meant to take the more specific branches. This is the
+        # VERIFY_SSL-points-to-a-missing-CA-bundle-file case.
+        if isinstance(last_exception, OSError):
+            return {
+                "success": False,
+                "error": {
+                    "code": "certificate_error",
+                    "message": redact(
+                        f"Invalid VERIFY_SSL configuration for {self.base_url}: "
+                        f"{last_exception}. If VERIFY_SSL is set to a CA bundle file "
+                        "path, confirm that path exists and is readable by this process.",
                         live_secrets=(password,),
                     ),
                 },

@@ -675,3 +675,27 @@ def test_unexpected_transport_exception_still_retries_other_versions(monkeypatch
     assert result["success"] is False
     assert result["error"]["code"] == "unknown"
     assert len(calls) == 4, "an unrecognized exception should still try every API version"
+
+
+def test_missing_ca_bundle_path_is_classified_as_certificate_error(monkeypatch):
+    """requests' HTTPAdapter.cert_verify() raises a bare OSError (NOT
+    requests.exceptions.SSLError) when VERIFY_SSL points at a CA-bundle
+    path that doesn't exist on disk — arguably the most likely
+    misconfiguration for that feature. Since requests.exceptions.SSLError/
+    ConnectionError/Timeout are themselves OSError subclasses, this must
+    still classify as certificate_error and stop immediately, not fall
+    through to the generic "unknown" bucket."""
+    calls = _patch_requests_post_raises(
+        monkeypatch,
+        OSError("Could not find a suitable TLS CA certificate bundle, invalid path: /nope.pem"),
+    )
+
+    from auth.synology_auth import SynologyAuth
+
+    auth = SynologyAuth("https://nas.example.test:5001")
+    result = auth.login("alice", "hunter2")
+
+    assert result["success"] is False
+    assert result["error"]["code"] == "certificate_error"
+    assert "hunter2" not in result["error"]["message"]
+    assert len(calls) == 1, "a bad CA-bundle path must not retry other API versions"
