@@ -453,3 +453,246 @@ def test_dot_dot_traversal_cannot_bypass_the_critical_path_check(method_name, ar
 
     with pytest.raises(Exception, match="critical system path"):
         getattr(fs, method_name)(*args)
+
+
+# ---------------------------------------------------------------------------
+# Connection defaults and bounds (PR 3): search_files gets a polling
+# deadline, get_file_content enforces a size cap checked via metadata.
+# ---------------------------------------------------------------------------
+
+
+def test_search_files_times_out_instead_of_polling_forever(monkeypatch):
+    """search_files previously polled with `while True` and no deadline —
+    an unresponsive NAS would hang this call indefinitely."""
+    import time
+
+    from filestation.synology_filestation import SynologyFileStation
+
+    fs = SynologyFileStation("https://nas.example.test:5001", "sid")
+
+    def fake_make_request(api, version, method, use_post=False, **params):
+        if method == "start":
+            return {"taskid": "task123"}
+        if method == "status":
+            return {"finished": False}  # never finishes
+        if method == "stop":
+            return {}
+        raise AssertionError(f"unexpected method {method}")
+
+    monkeypatch.setattr(fs, "_make_request", fake_make_request)
+    monkeypatch.setattr(time, "sleep", lambda _seconds: None)
+
+    with pytest.raises(Exception, match="timed out"):
+        fs.search_files("/share", "*.txt")
+
+
+def test_search_files_still_returns_results_when_it_finishes_in_time(monkeypatch):
+    from filestation.synology_filestation import SynologyFileStation
+
+    fs = SynologyFileStation("https://nas.example.test:5001", "sid")
+
+    calls = {"status_calls": 0}
+
+    def fake_make_request(api, version, method, use_post=False, **params):
+        if method == "start":
+            return {"taskid": "task123"}
+        if method == "status":
+            calls["status_calls"] += 1
+            return {"finished": calls["status_calls"] >= 2}
+        if method == "list":
+            return {"files": [{"name": "a.txt", "path": "/share/a.txt", "isdir": False, "size": 3}]}
+        if method == "stop":
+            return {}
+        raise AssertionError(f"unexpected method {method}")
+
+    monkeypatch.setattr(fs, "_make_request", fake_make_request)
+    monkeypatch.setattr("time.sleep", lambda _seconds: None)
+
+    results = fs.search_files("/share", "*.txt")
+    assert results == [{"name": "a.txt", "path": "/share/a.txt", "type": "file", "size": 3}]
+
+
+def test_get_file_content_rejects_oversized_file_before_downloading(monkeypatch):
+    """The size cap must be enforced via file metadata (get_file_info),
+    before any download request is made — not after reading the whole file
+    into memory."""
+    from filestation.synology_filestation import SynologyFileStation
+
+    fs = SynologyFileStation("https://nas.example.test:5001", "sid", max_file_content_size=100)
+
+    monkeypatch.setattr(
+        fs,
+        "get_file_info",
+        lambda path: {"name": "big.bin", "path": path, "type": "file", "size": 200},
+    )
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("get_file_content must not download when the size cap is exceeded")
+
+    monkeypatch.setattr("filestation.synology_filestation.requests.get", fail_if_called)
+
+    with pytest.raises(Exception, match="exceeds the configured limit"):
+        fs.get_file_content("/share/big.bin")
+
+
+def _fake_download_response(content_bytes, encoding=None):
+    fake_response = MagicMock()
+    fake_response.raise_for_status = MagicMock()
+    fake_response.headers = {}
+    fake_response.encoding = encoding
+    fake_response.iter_content = lambda chunk_size=None: iter([content_bytes])
+    return fake_response
+
+
+def test_get_file_content_allows_file_within_size_cap(monkeypatch):
+    from filestation.synology_filestation import SynologyFileStation
+
+    fs = SynologyFileStation("https://nas.example.test:5001", "sid", max_file_content_size=100)
+
+    monkeypatch.setattr(
+        fs,
+        "get_file_info",
+        lambda path: {"name": "small.txt", "path": path, "type": "file", "size": 10},
+    )
+
+    fake_response = _fake_download_response(b"hi there!!")
+    monkeypatch.setattr(
+        "filestation.synology_filestation.requests.get", lambda *a, **k: fake_response
+    )
+
+    assert fs.get_file_content("/share/small.txt") == "hi there!!"
+
+
+def test_get_file_content_aborts_mid_download_if_actual_bytes_exceed_the_cap(monkeypatch):
+    """The size cap must also be enforced against the bytes actually
+    streamed back, not just the get_file_info() pre-check — that check can
+    be stale (the file grows between the two requests) or silently absent
+    (a response missing a size field fails open to 0). A response that
+    claims to be small but streams back more than the cap must still be
+    rejected, and before the oversized body is fully buffered."""
+    from filestation.synology_filestation import SynologyFileStation
+
+    fs = SynologyFileStation("https://nas.example.test:5001", "sid", max_file_content_size=10)
+
+    monkeypatch.setattr(
+        fs,
+        "get_file_info",
+        lambda path: {"name": "lied.txt", "path": path, "type": "file", "size": 1},
+    )
+
+    fake_response = _fake_download_response(b"this is way more than ten bytes")
+    monkeypatch.setattr(
+        "filestation.synology_filestation.requests.get", lambda *a, **k: fake_response
+    )
+
+    with pytest.raises(Exception, match="exceeds the configured limit"):
+        fs.get_file_content("/share/lied.txt")
+
+
+def test_get_file_content_honors_declared_response_encoding(monkeypatch):
+    """A declared response.encoding (from a Content-Type charset, when DSM
+    sends one) must be used as-is, not overridden by auto-detection."""
+    from filestation.synology_filestation import SynologyFileStation
+
+    fs = SynologyFileStation("https://nas.example.test:5001", "sid", max_file_content_size=1000)
+    monkeypatch.setattr(
+        fs, "get_file_info", lambda path: {"name": "f", "path": path, "type": "file", "size": 5}
+    )
+
+    fake_response = _fake_download_response("café".encode("latin-1"), encoding="latin-1")
+    monkeypatch.setattr(
+        "filestation.synology_filestation.requests.get", lambda *a, **k: fake_response
+    )
+
+    assert fs.get_file_content("/share/f") == "café"
+
+
+def test_decode_downloaded_text_uses_declared_encoding_when_present():
+    from filestation.synology_filestation import _decode_downloaded_text
+
+    assert _decode_downloaded_text("café".encode("latin-1"), "latin-1") == "café"
+
+
+def test_decode_downloaded_text_auto_detects_when_no_declared_encoding(monkeypatch):
+    """response.encoding is None for DSM's download endpoint (it never
+    sends a charset) — the common case here, not an edge case. This must
+    auto-detect rather than blindly assume UTF-8, which would silently
+    mangle non-UTF-8 text via errors="replace" — the regression this
+    replaces."""
+    import charset_normalizer
+
+    from filestation.synology_filestation import _decode_downloaded_text
+
+    monkeypatch.setattr(charset_normalizer, "detect", lambda _content: {"encoding": "latin-1"})
+
+    assert _decode_downloaded_text("café".encode("latin-1"), None) == "café"
+
+
+def test_decode_downloaded_text_falls_back_to_utf8_if_detection_fails(monkeypatch):
+    import charset_normalizer
+
+    from filestation.synology_filestation import _decode_downloaded_text
+
+    def _boom(_content):
+        raise RuntimeError("no detector available")
+
+    monkeypatch.setattr(charset_normalizer, "detect", _boom)
+
+    assert _decode_downloaded_text(b"hello", None) == "hello"
+
+
+def _fake_files_response(size):
+    """DSM's SYNO.FileStation.List response shape: "size" (like time/owner/
+    perm) is nested under the file object's "additional" key, not at its
+    top level."""
+    return {
+        "files": [
+            {
+                "name": "f",
+                "path": "/share/f",
+                "isdir": False,
+                "additional": {"size": size},
+            }
+        ]
+    }
+
+
+def test_get_file_info_reads_size_from_additional_not_top_level(monkeypatch):
+    """DSM nests the requested "size" additional field under
+    file["additional"]["size"], same as time/owner/perm — not at the file
+    object's top level. Without reading it from there, get_file_content's
+    size cap never fires against a real NAS."""
+    from filestation.synology_filestation import SynologyFileStation
+
+    fs = SynologyFileStation("https://nas.example.test:5001", "sid")
+    monkeypatch.setattr(fs, "_make_request", lambda *a, **k: _fake_files_response(5_000_000))
+
+    assert fs.get_file_info("/share/f")["size"] == 5_000_000
+
+
+def test_list_directory_reads_size_from_additional_not_top_level(monkeypatch):
+    from filestation.synology_filestation import SynologyFileStation
+
+    fs = SynologyFileStation("https://nas.example.test:5001", "sid")
+    monkeypatch.setattr(fs, "_make_request", lambda *a, **k: _fake_files_response(42))
+
+    assert fs.list_directory("/share")[0]["size"] == 42
+
+
+def test_get_file_content_size_cap_fires_against_a_realistic_dsm_response(monkeypatch):
+    """End-to-end version of the size-cap test that does NOT monkeypatch
+    get_file_info directly — exercises the real _make_request →
+    additional["size"] parsing path, which the earlier size-cap tests
+    skipped by mocking get_file_info wholesale."""
+    from filestation.synology_filestation import SynologyFileStation
+
+    fs = SynologyFileStation("https://nas.example.test:5001", "sid", max_file_content_size=100)
+    monkeypatch.setattr(fs, "_make_request", lambda *a, **k: _fake_files_response(5_000_000))
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("get_file_content must not download when the size cap is exceeded")
+
+    monkeypatch.setattr("filestation.synology_filestation.requests.get", fail_if_called)
+
+    with pytest.raises(Exception, match="exceeds the configured limit"):
+        fs.get_file_content("/share/f")

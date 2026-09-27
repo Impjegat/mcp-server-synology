@@ -28,6 +28,29 @@ _CRITICAL_PATHS_EXACT = ("/homes",)
 _CRITICAL_PATHS_PREFIX = ("/var", "/etc", "/usr", "/bin", "/sbin")
 
 
+def _decode_downloaded_text(content: bytes, declared_encoding: Optional[str]) -> str:
+    """Decode a downloaded file's bytes the way `requests.Response.text`
+    would: use the declared encoding if the server sent one, otherwise
+    auto-detect (mirroring `Response.apparent_encoding`) instead of
+    assuming UTF-8. DSM's download endpoint doesn't send a charset, so the
+    auto-detect path is the common case here, not an edge case.
+
+    This can't just call `response.apparent_encoding` — that reads
+    `response.content`, which raises once the body has already been
+    consumed via `iter_content()` (needed here to enforce the size cap
+    against the actual bytes read, not just pre-download metadata).
+    """
+    if declared_encoding:
+        return content.decode(declared_encoding, errors="replace")
+    try:
+        import charset_normalizer
+
+        detected = charset_normalizer.detect(content)["encoding"]
+    except Exception:
+        detected = None
+    return content.decode(detected or "utf-8", errors="replace")
+
+
 class SynologyFileStation:
     """Handles Synology FileStation API operations."""
 
@@ -37,12 +60,16 @@ class SynologyFileStation:
         session_id: str,
         verify_ssl: bool = True,
         syno_token: Optional[str] = None,
+        max_file_content_size: int = 1_000_000,
     ):
         self.base_url = base_url.rstrip("/")
         self.session_id = session_id
         self.verify_ssl = verify_ssl
         self.syno_token = syno_token
         self.api_url = f"{self.base_url}/webapi/entry.cgi"
+        # get_file_content refuses to download a file larger than this,
+        # checked via file metadata before any download request is made.
+        self.max_file_content_size = max_file_content_size
 
     def _csrf_headers(self, *, post: bool) -> Dict[str, str]:
         """Build request headers, including X-SYNO-TOKEN for DSM 7.3.2+ CSRF.
@@ -222,6 +249,12 @@ class SynologyFileStation:
             if "additional" in file_info:
                 additional = file_info["additional"]
 
+                # DSM returns the requested "size" additional field nested
+                # here, same as time/owner/perm below — not at the file
+                # object's top level, despite the fallback above.
+                if "size" in additional:
+                    item["size"] = additional["size"]
+
                 if "time" in additional:
                     time_info = additional["time"]
                     item.update(
@@ -279,6 +312,14 @@ class SynologyFileStation:
         if "additional" in file_info:
             additional = file_info["additional"]
 
+            # DSM returns the requested "size" additional field nested
+            # here, same as time/owner/perm below — not at the file
+            # object's top level, despite the fallback above. Without this,
+            # get_file_content's size cap (checked via this method's "size")
+            # never fires against a real NAS.
+            if "size" in additional:
+                result["size"] = additional["size"]
+
             if "time" in additional:
                 time_info = additional["time"]
                 result.update(
@@ -322,7 +363,10 @@ class SynologyFileStation:
             # Wait for search to complete
             import time
 
-            while True:
+            max_wait_time = 120  # Maximum wait time (2 minutes)
+            wait_time = 0.0
+
+            while wait_time < max_wait_time:
                 status_data = self._make_request(
                     "SYNO.FileStation.Search", "2", "status", taskid=task_id
                 )
@@ -331,6 +375,9 @@ class SynologyFileStation:
                     break
 
                 time.sleep(0.5)
+                wait_time += 0.5
+            else:
+                raise Exception(f"Search operation timed out after {max_wait_time} seconds")
 
             # Get results
             result_data = self._make_request("SYNO.FileStation.Search", "2", "list", taskid=task_id)
@@ -672,6 +719,18 @@ class SynologyFileStation:
         # Check for critical paths
         self._check_critical_path(formatted_path)
 
+        # Enforce the size cap via file metadata, before any download
+        # request is made — not after reading the whole file into memory.
+        # File contents are sent to the MCP client's AI provider, and this
+        # tool stays enabled even in restricted mode.
+        info = self.get_file_info(formatted_path)
+        size = info.get("size", 0)
+        if size > self.max_file_content_size:
+            raise Exception(
+                f"File '{path}' is {size} bytes, which exceeds the configured "
+                f"limit of {self.max_file_content_size} bytes (max_file_content_size)."
+            )
+
         # Use the download API to get file content
         download_headers = {"X-SYNO-TOKEN": self.syno_token} if self.syno_token else None
         try:
@@ -701,9 +760,31 @@ class SynologyFileStation:
                     error_code = error_data.get("error", {}).get("code", "unknown")
                     raise Exception(f"Synology API error: {error_code}")
 
-            # Assuming the content is text, read it
+            # Enforce the cap on the bytes actually read too, not just on
+            # the get_file_info() pre-check above: that check can be stale
+            # (the file can grow between the two requests) or silently
+            # absent (info.get("size", 0) fails open to 0 if DSM's response
+            # doesn't carry a size for some reason). Streaming (already
+            # requested via stream=True) lets this abort mid-download
+            # instead of buffering an oversized body into memory first.
+            chunks = []
+            total_bytes = 0
+            for chunk in response.iter_content(chunk_size=65536):
+                if not chunk:
+                    continue
+                total_bytes += len(chunk)
+                if total_bytes > self.max_file_content_size:
+                    response.close()
+                    raise Exception(
+                        f"File '{path}' exceeds the configured limit of "
+                        f"{self.max_file_content_size} bytes (max_file_content_size) "
+                        "while downloading."
+                    )
+                chunks.append(chunk)
+
+            # Assuming the content is text, decode it
             # For binary files, this would need to be handled differently
-            return response.text
+            return _decode_downloaded_text(b"".join(chunks), response.encoding)
         except requests.RequestException as e:
             # This GET request's URL carries `_sid=<session_id>` directly —
             # redact before a RequestException's str() (which commonly

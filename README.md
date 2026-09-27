@@ -172,9 +172,12 @@ If you prefer not to use Docker:
   - `path` (required): Directory path starting with `/`
 - **`get_file_info`** - Get detailed file/directory information
   - `path` (required): File path starting with `/`
-- **`search_files`** - Search files matching pattern
+- **`search_files`** - Search files matching pattern (times out after 2 minutes rather than polling indefinitely)
   - `path` (required): Search directory
   - `pattern` (required): Search pattern (e.g., `*.pdf`)
+- **`get_file_content`** - Read a text file's contents (sent to the MCP client's AI provider)
+  - `path` (required): File path starting with `/`
+  - Refuses files larger than `MAX_FILE_CONTENT_SIZE` (default 1,000,000 bytes), checked via file metadata before downloading
 - **`create_file`** - Create new files with content
   - `path` (required): Full file path starting with `/`
   - `content` (optional): File content (default: empty string)
@@ -354,7 +357,8 @@ The skill is purely additive — it works alongside the MCP and only triggers on
 | `SYNOLOGY_USERNAME` | Yes* | - | Username for authentication |
 | `SYNOLOGY_PASSWORD` | Yes* | - | Password for authentication |
 | `AUTO_LOGIN` | No | `true` | Auto-login on server start |
-| `VERIFY_SSL` | No | `true` | Verify SSL certificates |
+| `VERIFY_SSL` | No | `true` | Verify SSL certificates; `false` disables verification (avoid), or set to a CA bundle file path to trust a private CA/self-signed cert |
+| `MAX_FILE_CONTENT_SIZE` | No | `1000000` | `get_file_content` refuses files larger than this (bytes) |
 | `DEBUG` | No | `false` | Enable debug logging |
 
 *Required for auto-login and default operations
@@ -432,6 +436,8 @@ The docker-compose.yml automatically mounts your `~/.config/synology-mcp` direct
 **SSL Certificate Verification (VERIFY_SSL):**
 - Default is `true` — certificates are verified against the system trust store
 - Setting `VERIFY_SSL=false` disables certificate verification and makes your connection vulnerable to man-in-the-middle (MITM) attacks; only do this if your NAS uses a self-signed certificate you can't add to your trust store
+- **Prefer a CA bundle path instead of disabling verification**: if your NAS uses a self-signed certificate or a private/internal CA, set `VERIFY_SSL` to that CA's bundle file path (e.g. `VERIFY_SSL=/etc/ssl/certs/my-ca.pem`, or `"verify_ssl": "/etc/ssl/certs/my-ca.pem"` under `"server"` in `settings.json`) instead of `false` — this keeps verification on while trusting your specific CA. `REQUESTS_CA_BUNDLE` also works as a global override for the whole process.
+- On Windows, `requests` uses its own bundled CA store rather than the OS trust store, so a private CA must be supplied explicitly via one of the options above — adding it to Windows' certificate store alone is not enough.
 - Never disable SSL verification on untrusted networks
 - Note this is separate from the HTTPS-only transport requirement above — HTTPS is always required; `VERIFY_SSL` only controls whether the server's certificate is validated
 
