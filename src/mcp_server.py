@@ -82,12 +82,11 @@ _CONTAINER_ALL_SUFFIXES = (
 
 # Tools that browse files/shares or read NAS/container monitoring data — the
 # initial installation target REMEDIATION_PLAN.md describes ("file browsing
-# and NAS monitoring"). A tool name absent from this set is treated as
-# modifying and is unavailable whenever config.restricted_mode is on: hidden
-# from `list_tools` and rejected in `call_tool` before any handler runs (see
-# `SynologyMCPServer._is_tool_allowed`). Session tools (login/logout) are
-# handled separately below, since they must always be reachable to
-# establish a session in the first place.
+# and NAS monitoring"). This is the semantic truth used for the MCP
+# `readOnlyHint` annotation (metadata only — see _annotate_tool): every tool
+# here genuinely performs no writes. It is NOT by itself the restricted-mode
+# allowlist; see _ACCOUNT_ENUMERATION_TOOLS and _is_tool_allowed below for
+# the one carve-out.
 _READ_ONLY_TOOLS = frozenset(
     {
         "synology_status",
@@ -121,6 +120,23 @@ _READ_ONLY_TOOLS = frozenset(
         "synology_get_user_permissions",
     }
     | {f"synology_container_{suffix}" for suffix in _CONTAINER_READ_ONLY_SUFFIXES}
+)
+
+# These perform no writes (they stay in _READ_ONLY_TOOLS for the MCP
+# annotation), but full enumeration of every local account, its group
+# memberships, and its per-share permissions is a different trust tier than
+# file browsing or NAS health monitoring — the kind of read DSM itself
+# normally access-controls. Restricted mode's default install therefore
+# excludes them too, alongside genuinely modifying tools; see
+# _is_tool_allowed.
+_ACCOUNT_ENUMERATION_TOOLS = frozenset(
+    {
+        "synology_list_users",
+        "synology_get_user",
+        "synology_list_groups",
+        "synology_list_group_members",
+        "synology_get_user_permissions",
+    }
 )
 
 # Session-management tools: always reachable regardless of restricted mode
@@ -245,17 +261,24 @@ class SynologyMCPServer:
 
     def _is_tool_allowed(self, name: str) -> bool:
         """Whether `name` may run under restricted mode (browsing and
-        monitoring only). Irrelevant when config.restricted_mode is False —
-        every registered tool is allowed then."""
+        monitoring only — plus session tools, since otherwise nothing else
+        could ever be used). Account/permission enumeration is carved out
+        even though it's read-only: see _ACCOUNT_ENUMERATION_TOOLS. Irrelevant
+        when config.restricted_mode is False — every registered tool is
+        allowed then."""
+        if name in _ACCOUNT_ENUMERATION_TOOLS:
+            return False
         return name in _SESSION_TOOLS or name in _READ_ONLY_TOOLS
 
     @staticmethod
     def _annotate_tool(tool: "types.Tool") -> "types.Tool":
-        """Attach MCP readOnlyHint/destructiveHint annotations, derived from
-        this server's own restricted-mode classification so the two can
-        never silently drift apart. Annotations are descriptive metadata
-        for MCP clients, not an access control in themselves — the actual
-        enforcement is _is_tool_allowed, consulted in handle_call_tool."""
+        """Attach MCP readOnlyHint/destructiveHint annotations. This is
+        purely descriptive metadata for MCP clients about whether a tool
+        performs writes — not an access control, and not the same question
+        as "is this tool allowed under restricted mode" (that's
+        _is_tool_allowed; the two diverge for _ACCOUNT_ENUMERATION_TOOLS,
+        which are read-only but excluded from restricted mode's default set
+        on trust-tier grounds)."""
         read_only = tool.name in _READ_ONLY_TOOLS
         tool.annotations = types.ToolAnnotations(
             readOnlyHint=read_only,

@@ -45,8 +45,6 @@ def test_every_tool_definition_has_a_registry_entry_and_vice_versa():
         "get_file_content",
         "synology_system_info",
         "synology_disk_health",
-        "synology_list_users",
-        "synology_get_user_permissions",
         "synology_container_list",
         "synology_container_logs",
     ],
@@ -81,6 +79,28 @@ def test_modifying_tools_are_classified_disallowed(name):
     assert server._is_tool_allowed(name) is False
 
 
+@pytest.mark.parametrize(
+    "name",
+    [
+        "synology_list_users",
+        "synology_get_user",
+        "synology_list_groups",
+        "synology_list_group_members",
+        "synology_get_user_permissions",
+    ],
+)
+def test_account_enumeration_tools_are_read_only_but_disallowed(name):
+    """These perform no writes (readOnlyHint stays True — the annotation is
+    a separate question from restricted-mode eligibility), but full account/
+    group/permission enumeration is a different trust tier than file
+    browsing or NAS monitoring, so restricted mode's default install
+    excludes them too."""
+    server = _server()
+    assert server._is_tool_allowed(name) is False
+    definitions = {t.name: t for t in server._get_tool_definitions()}
+    assert definitions[name].annotations.readOnlyHint is True
+
+
 @pytest.mark.asyncio
 async def test_restricted_mode_hides_modifying_tools_from_discovery():
     server = _server()
@@ -94,6 +114,8 @@ async def test_restricted_mode_hides_modifying_tools_from_discovery():
     assert "get_file_content" in names
     assert "delete" not in names
     assert "synology_create_user" not in names
+    # Read-only, but a different trust tier — hidden by default too.
+    assert "synology_list_users" not in names
 
 
 @pytest.mark.asyncio
