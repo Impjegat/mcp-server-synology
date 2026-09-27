@@ -159,9 +159,6 @@ class SynologyFileStation:
 
     def _format_path(self, path: str) -> str:
         """Format path for Synology API."""
-        if not path.startswith("/"):
-            path = "/" + path
-
         # Collapse any run of leading slashes to exactly one *before*
         # normpath: posixpath.normpath has a POSIX quirk where it preserves
         # exactly two leading slashes verbatim (three or more collapse to
