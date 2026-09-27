@@ -372,7 +372,7 @@ class SynologyConfig:
                     if "restricted_mode" in server_section:
                         self.restricted_mode = server_section["restricted_mode"]
                     if "max_file_content_size" in server_section:
-                        self.max_file_content_size = server_section["max_file_content_size"]
+                        self.max_file_content_size = int(server_section["max_file_content_size"])
 
             except json.JSONDecodeError as e:
                 logger.error(f"Failed to parse {SETTINGS_FILE}: {e}")

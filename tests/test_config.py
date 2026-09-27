@@ -118,6 +118,35 @@ class TestSynologyConfig:
 
                 assert SynologyConfig().max_file_content_size == 42
 
+    def test_max_file_content_size_settings_json_coerces_quoted_number(self, tmp_path):
+        """Unlike the MAX_FILE_CONTENT_SIZE env var (always a string, always
+        int()-cast), a settings.json author could quote the number. Coerce
+        it the same way, so a quoted value fails fast here with a clear
+        error if it's ever non-numeric, rather than raising deep inside
+        get_file_content's size comparison."""
+        secrets_data = {
+            "synology": {
+                "nas1": {
+                    "host": "192.168.1.100",
+                    "port": 5001,
+                    "username": "admin",
+                    "password": "pass123",
+                }
+            },
+            "server": {"max_file_content_size": "42"},
+        }
+        secrets_file = tmp_path / "secrets.json"
+        secrets_file.write_text(json.dumps(secrets_data))
+        os.chmod(str(secrets_file), 0o600)
+
+        reload_config()
+
+        with patch.dict(os.environ, {}, clear=True):
+            with patch("config.SETTINGS_FILE", secrets_file):
+                from config import SynologyConfig
+
+                assert SynologyConfig().max_file_content_size == 42
+
     def test_restricted_mode_env_var_disables_it(self):
         reload_config()
 
