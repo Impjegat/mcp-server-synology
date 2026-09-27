@@ -317,8 +317,15 @@ def test_make_request_redacts_session_id_from_network_error():
 
 
 # ---------------------------------------------------------------------------
-# Critical-path check consolidation (PR 2): one prefix-matching helper,
-# applied consistently across every path-taking method.
+# Critical-path check consolidation (PR 2): one helper, applied consistently
+# across every path-taking method. True OS-level paths are prefix-matched
+# (the path and everything under it is blocked); /volume1 and /homes are
+# exact-matched only — they're the raw volume mount and the aggregate
+# home-directories share, not places real files live directly, so a real
+# share/subfolder underneath (e.g. /volume1/photo, /homes/alice) must stay
+# reachable. An earlier version of this PR prefix-matched them too, which
+# blocked browsing/reading almost everything on a real NAS — caught in
+# review and fixed before merge.
 # ---------------------------------------------------------------------------
 
 
@@ -335,6 +342,21 @@ def test_check_critical_path_blocks_exact_and_nested_paths():
         fs._check_critical_path("/etc/passwd")
     # A share that merely starts with the same characters must NOT match.
     fs._check_critical_path("/etchome")  # no exception
+
+
+@pytest.mark.parametrize("root", ["/volume1", "/homes"])
+def test_check_critical_path_blocks_volume_and_homes_root_only(root):
+    """/volume1 and /homes are the raw volume mount and the aggregate
+    home-directories share — block the bare root, but a real share or
+    subfolder underneath must stay reachable (unlike /etc, these are not
+    prefix-matched)."""
+    from filestation.synology_filestation import SynologyFileStation
+
+    fs = SynologyFileStation("https://nas.example.test:5001", "sid")
+
+    with pytest.raises(Exception, match="critical system path"):
+        fs._check_critical_path(root)
+    fs._check_critical_path(f"{root}/some-share-or-user")  # no exception
 
 
 @pytest.mark.parametrize(

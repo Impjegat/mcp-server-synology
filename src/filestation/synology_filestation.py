@@ -10,9 +10,18 @@ import requests
 
 from utils.redact import redact
 
-# Paths no path-taking method below may touch, read or write — DSM system
-# directories, not user shared folders. See _check_critical_path.
-_CRITICAL_PATHS = ("/volume1", "/homes", "/var", "/etc", "/usr", "/bin", "/sbin")
+# Paths no path-taking method below may touch, read or write. See
+# _check_critical_path.
+#
+# /volume1 and /homes are blocked only as exact matches: they're the raw
+# volume mount and the aggregate home-directories share, not places real
+# files live directly — but /volume1/photo or /homes/alice are ordinary
+# user shares/subfolders and must stay reachable, so these two are NOT
+# prefix-matched.
+_CRITICAL_PATHS_EXACT = ("/volume1", "/homes")
+# True OS-level directories have no legitimate DSM share overlap at all, so
+# every path under them is blocked too (e.g. /etc/passwd, not just /etc).
+_CRITICAL_PATHS_PREFIX = ("/var", "/etc", "/usr", "/bin", "/sbin")
 
 
 class SynologyFileStation:
@@ -619,14 +628,15 @@ class SynologyFileStation:
             raise e
 
     def _check_critical_path(self, path: str) -> None:
-        """Check if path is, or is inside, a critical system path — raise if so.
+        """Check if path is a critical system path, or inside one — raise if so.
 
-        Prefix-matched (path == cp, or path starts with cp + "/"), not just
-        exact, so e.g. `/etc/passwd` is blocked too, not just `/etc` itself.
-        This is the one denylist check every path-taking method below calls;
-        it used to be exact-match-only here and separately duplicated with
-        prefix-matching in `delete()` — consolidated so there is one
-        definition of "critical path" instead of two that could drift apart.
+        `_CRITICAL_PATHS_EXACT` entries block only the literal path itself
+        (a real share/subfolder underneath is unaffected); `_CRITICAL_PATHS_PREFIX`
+        entries block the path and everything under it. This is the one
+        denylist check every path-taking method below calls; it used to be
+        exact-match-only here and separately duplicated with prefix-matching
+        in `delete()` — consolidated so there is one definition of "critical
+        path" instead of two that could drift apart.
 
         Args:
             path: Formatted path to check
@@ -634,7 +644,9 @@ class SynologyFileStation:
         Raises:
             Exception: If path is or is inside a critical system path
         """
-        for cp in _CRITICAL_PATHS:
+        if path in _CRITICAL_PATHS_EXACT:
+            raise Exception(f"Cannot access critical system path: {path}")
+        for cp in _CRITICAL_PATHS_PREFIX:
             if path == cp or path.startswith(cp + "/"):
                 raise Exception(f"Cannot access critical system path: {path}")
 
