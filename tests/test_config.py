@@ -179,6 +179,32 @@ class TestSynologyConfig:
 
                     assert SynologyConfig().verify_ssl == "/etc/ssl/certs/my-ca.pem"
 
+    @pytest.mark.parametrize("value,expected", [("1", True), ("yes", True), ("On", True)])
+    def test_verify_ssl_recognizes_truthy_aliases(self, value, expected):
+        reload_config()
+
+        with patch.dict(os.environ, {"VERIFY_SSL": value}, clear=True):
+            with patch("config.SETTINGS_FILE", Path("/nonexistent/secrets.json")):
+                with patch.object(Path, "exists", return_value=False):
+                    from config import SynologyConfig
+
+                    assert SynologyConfig().verify_ssl is expected
+
+    @pytest.mark.parametrize("value", ["0", "no", "Off"])
+    def test_verify_ssl_recognizes_falsy_aliases(self, value):
+        """Before CA-bundle-path support, any non-"true" value silently
+        meant "disabled" (`.lower() == "true"`) — these common boolean
+        aliases must keep working rather than being treated as a CA-bundle
+        path and failing hard the first time DSM is contacted."""
+        reload_config()
+
+        with patch.dict(os.environ, {"VERIFY_SSL": value}, clear=True):
+            with patch("config.SETTINGS_FILE", Path("/nonexistent/secrets.json")):
+                with patch.object(Path, "exists", return_value=False):
+                    from config import SynologyConfig
+
+                    assert SynologyConfig().verify_ssl is False
+
     def test_verify_ssl_settings_json_accepts_ca_bundle_path(self, tmp_path):
         secrets_data = {
             "synology": {

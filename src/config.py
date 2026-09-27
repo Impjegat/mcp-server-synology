@@ -21,6 +21,17 @@ class InsecureURLError(ValueError):
     """Raised at startup when a configured NAS URL does not use HTTPS."""
 
 
+# Before CA-bundle-path support, VERIFY_SSL's parsing was
+# `.lower() == "true"`, so any other value — including these common
+# boolean aliases — silently meant "disabled". Recognizing them here keeps
+# that working rather than turning a working (if insecure) upgrade into a
+# hard failure the first time DSM is contacted, while any other string is
+# now treated as a CA-bundle path instead of silently disabling
+# verification.
+_VERIFY_SSL_TRUTHY = {"true", "1", "yes", "on"}
+_VERIFY_SSL_FALSY = {"false", "0", "no", "off"}
+
+
 def _parse_verify_ssl(value: str) -> Any:
     """Parse VERIFY_SSL's env-var string form into what `requests`' own
     `verify=` parameter accepts: True, False, or a path to a CA bundle file
@@ -28,9 +39,9 @@ def _parse_verify_ssl(value: str) -> Any:
     verification outright). `REQUESTS_CA_BUNDLE` already works as a global
     override today; this is the equivalent per-server setting."""
     lowered = value.strip().lower()
-    if lowered == "true":
+    if lowered in _VERIFY_SSL_TRUTHY:
         return True
-    if lowered == "false":
+    if lowered in _VERIFY_SSL_FALSY:
         return False
     return value.strip()
 
