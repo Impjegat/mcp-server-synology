@@ -82,6 +82,41 @@ class TestSynologyConfig:
                     # remediation objective is an installation limited to
                     # browsing and monitoring unless deliberately widened.
                     assert config.restricted_mode is True
+                    assert config.max_file_content_size == 1_000_000
+
+    def test_max_file_content_size_env_var_override(self):
+        reload_config()
+
+        with patch.dict(os.environ, {"MAX_FILE_CONTENT_SIZE": "5000"}, clear=True):
+            with patch("config.SETTINGS_FILE", Path("/nonexistent/secrets.json")):
+                with patch.object(Path, "exists", return_value=False):
+                    from config import SynologyConfig
+
+                    assert SynologyConfig().max_file_content_size == 5000
+
+    def test_max_file_content_size_settings_json_overrides_env(self, tmp_path):
+        secrets_data = {
+            "synology": {
+                "nas1": {
+                    "host": "192.168.1.100",
+                    "port": 5001,
+                    "username": "admin",
+                    "password": "pass123",
+                }
+            },
+            "server": {"max_file_content_size": 42},
+        }
+        secrets_file = tmp_path / "secrets.json"
+        secrets_file.write_text(json.dumps(secrets_data))
+        os.chmod(str(secrets_file), 0o600)
+
+        reload_config()
+
+        with patch.dict(os.environ, {"MAX_FILE_CONTENT_SIZE": "5000"}, clear=True):
+            with patch("config.SETTINGS_FILE", secrets_file):
+                from config import SynologyConfig
+
+                assert SynologyConfig().max_file_content_size == 42
 
     def test_restricted_mode_env_var_disables_it(self):
         reload_config()
@@ -117,6 +152,43 @@ class TestSynologyConfig:
 
                 assert SynologyConfig().restricted_mode is False
 
+    def test_verify_ssl_env_var_accepts_ca_bundle_path(self):
+        """VERIFY_SSL isn't just true/false — a value that isn't either
+        literal string is a CA-bundle path, passed straight through to
+        requests' own `verify=` parameter (which already accepts a path)."""
+        reload_config()
+
+        with patch.dict(os.environ, {"VERIFY_SSL": "/etc/ssl/certs/my-ca.pem"}, clear=True):
+            with patch("config.SETTINGS_FILE", Path("/nonexistent/secrets.json")):
+                with patch.object(Path, "exists", return_value=False):
+                    from config import SynologyConfig
+
+                    assert SynologyConfig().verify_ssl == "/etc/ssl/certs/my-ca.pem"
+
+    def test_verify_ssl_settings_json_accepts_ca_bundle_path(self, tmp_path):
+        secrets_data = {
+            "synology": {
+                "nas1": {
+                    "host": "192.168.1.100",
+                    "port": 5001,
+                    "username": "admin",
+                    "password": "pass123",
+                }
+            },
+            "server": {"verify_ssl": "/etc/ssl/certs/my-ca.pem"},
+        }
+        secrets_file = tmp_path / "secrets.json"
+        secrets_file.write_text(json.dumps(secrets_data))
+        os.chmod(str(secrets_file), 0o600)
+
+        reload_config()
+
+        with patch.dict(os.environ, {}, clear=True):
+            with patch("config.SETTINGS_FILE", secrets_file):
+                from config import SynologyConfig
+
+                assert SynologyConfig().verify_ssl == "/etc/ssl/certs/my-ca.pem"
+
     def test_has_credentials_with_secrets(self, tmp_path):
         """Test credential detection with secrets.json."""
         secrets_data = {
@@ -146,6 +218,33 @@ class TestSynologyConfig:
                 assert "test_nas" in cfg.nas_configs
                 # HTTPS is forced regardless of port — no silent http fallback.
                 assert cfg.nas_configs["test_nas"]["base_url"] == "https://192.168.1.100:5000"
+
+    def test_omitted_port_defaults_to_5001(self, tmp_path):
+        """5001 is DSM's default HTTPS port; the old default (5000, HTTP-only)
+        would fail outright since base_url is always forced to https://."""
+        secrets_data = {
+            "synology": {
+                "test_nas": {
+                    "host": "192.168.1.100",
+                    "username": "admin",
+                    "password": "pass123",
+                }
+            }
+        }
+
+        secrets_file = tmp_path / "secrets.json"
+        secrets_file.write_text(json.dumps(secrets_data))
+        os.chmod(str(secrets_file), 0o600)  # config refuses insecure-perm files
+
+        reload_config()
+
+        with patch.dict(os.environ, {}, clear=True):
+            with patch("config.SETTINGS_FILE", secrets_file):
+                from config import SynologyConfig
+
+                cfg = SynologyConfig()
+
+                assert cfg.nas_configs["test_nas"]["base_url"] == "https://192.168.1.100:5001"
 
     def test_get_nas_names(self, tmp_path):
         """Test getting NAS names from secrets.json."""

@@ -453,3 +453,106 @@ def test_dot_dot_traversal_cannot_bypass_the_critical_path_check(method_name, ar
 
     with pytest.raises(Exception, match="critical system path"):
         getattr(fs, method_name)(*args)
+
+
+# ---------------------------------------------------------------------------
+# Connection defaults and bounds (PR 3): search_files gets a polling
+# deadline, get_file_content enforces a size cap checked via metadata.
+# ---------------------------------------------------------------------------
+
+
+def test_search_files_times_out_instead_of_polling_forever(monkeypatch):
+    """search_files previously polled with `while True` and no deadline —
+    an unresponsive NAS would hang this call indefinitely."""
+    import time
+
+    from filestation.synology_filestation import SynologyFileStation
+
+    fs = SynologyFileStation("https://nas.example.test:5001", "sid")
+
+    def fake_make_request(api, version, method, use_post=False, **params):
+        if method == "start":
+            return {"taskid": "task123"}
+        if method == "status":
+            return {"finished": False}  # never finishes
+        if method == "stop":
+            return {}
+        raise AssertionError(f"unexpected method {method}")
+
+    monkeypatch.setattr(fs, "_make_request", fake_make_request)
+    monkeypatch.setattr(time, "sleep", lambda _seconds: None)
+
+    with pytest.raises(Exception, match="timed out"):
+        fs.search_files("/share", "*.txt")
+
+
+def test_search_files_still_returns_results_when_it_finishes_in_time(monkeypatch):
+    from filestation.synology_filestation import SynologyFileStation
+
+    fs = SynologyFileStation("https://nas.example.test:5001", "sid")
+
+    calls = {"status_calls": 0}
+
+    def fake_make_request(api, version, method, use_post=False, **params):
+        if method == "start":
+            return {"taskid": "task123"}
+        if method == "status":
+            calls["status_calls"] += 1
+            return {"finished": calls["status_calls"] >= 2}
+        if method == "list":
+            return {"files": [{"name": "a.txt", "path": "/share/a.txt", "isdir": False, "size": 3}]}
+        if method == "stop":
+            return {}
+        raise AssertionError(f"unexpected method {method}")
+
+    monkeypatch.setattr(fs, "_make_request", fake_make_request)
+    monkeypatch.setattr("time.sleep", lambda _seconds: None)
+
+    results = fs.search_files("/share", "*.txt")
+    assert results == [{"name": "a.txt", "path": "/share/a.txt", "type": "file", "size": 3}]
+
+
+def test_get_file_content_rejects_oversized_file_before_downloading(monkeypatch):
+    """The size cap must be enforced via file metadata (get_file_info),
+    before any download request is made — not after reading the whole file
+    into memory."""
+    from filestation.synology_filestation import SynologyFileStation
+
+    fs = SynologyFileStation("https://nas.example.test:5001", "sid", max_file_content_size=100)
+
+    monkeypatch.setattr(
+        fs,
+        "get_file_info",
+        lambda path: {"name": "big.bin", "path": path, "type": "file", "size": 200},
+    )
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("get_file_content must not download when the size cap is exceeded")
+
+    monkeypatch.setattr("filestation.synology_filestation.requests.get", fail_if_called)
+
+    with pytest.raises(Exception, match="exceeds the configured limit"):
+        fs.get_file_content("/share/big.bin")
+
+
+def test_get_file_content_allows_file_within_size_cap(monkeypatch):
+    from filestation.synology_filestation import SynologyFileStation
+
+    fs = SynologyFileStation("https://nas.example.test:5001", "sid", max_file_content_size=100)
+
+    monkeypatch.setattr(
+        fs,
+        "get_file_info",
+        lambda path: {"name": "small.txt", "path": path, "type": "file", "size": 10},
+    )
+
+    fake_response = MagicMock()
+    fake_response.raise_for_status = MagicMock()
+    fake_response.headers = {}
+    fake_response.text = "hi there!!"
+
+    monkeypatch.setattr(
+        "filestation.synology_filestation.requests.get", lambda *a, **k: fake_response
+    )
+
+    assert fs.get_file_content("/share/small.txt") == "hi there!!"

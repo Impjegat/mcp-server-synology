@@ -21,6 +21,20 @@ class InsecureURLError(ValueError):
     """Raised at startup when a configured NAS URL does not use HTTPS."""
 
 
+def _parse_verify_ssl(value: str) -> Any:
+    """Parse VERIFY_SSL's env-var string form into what `requests`' own
+    `verify=` parameter accepts: True, False, or a path to a CA bundle file
+    (e.g. for a private CA or self-signed certificate, without disabling
+    verification outright). `REQUESTS_CA_BUNDLE` already works as a global
+    override today; this is the equivalent per-server setting."""
+    lowered = value.strip().lower()
+    if lowered == "true":
+        return True
+    if lowered == "false":
+        return False
+    return value
+
+
 # XDG Base Directory Specification: ~/.config/synology-mcp/
 XDG_CONFIG_HOME: Path = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
 CONFIG_DIR = XDG_CONFIG_HOME / "synology-mcp"
@@ -51,7 +65,8 @@ SETTINGS_JSON_EXAMPLE = """
     "session_timeout": 3600,
     "debug": false,
     "log_level": "INFO",
-    "restricted_mode": true
+    "restricted_mode": true,
+    "max_file_content_size": 1000000
   }
 }
 """
@@ -77,7 +92,7 @@ class SynologyConfig:
         self.server_version = os.getenv("MCP_SERVER_VERSION", "1.0.0")
         self.default_session_timeout = int(os.getenv("SESSION_TIMEOUT", "3600"))
         self.auto_login = os.getenv("AUTO_LOGIN", "true").lower() == "true"
-        self.verify_ssl = os.getenv("VERIFY_SSL", "true").lower() == "true"
+        self.verify_ssl = _parse_verify_ssl(os.getenv("VERIFY_SSL", "true"))
         # Restricted mode: the server exposes only browsing and monitoring
         # tools by default (REMEDIATION_PLAN.md's stated objective for the
         # initial installation). Modifying tools (file writes/deletes, user
@@ -87,6 +102,11 @@ class SynologyConfig:
         self.restricted_mode = os.getenv("RESTRICTED_MODE", "true").lower() == "true"
         self.debug = os.getenv("DEBUG", "false").lower() == "true"
         self.log_level = os.getenv("LOG_LEVEL", "INFO").upper()
+        # get_file_content refuses to download a file larger than this (checked
+        # via file metadata before any download request is made) — file
+        # contents are sent to the MCP client's AI provider, and this tool is
+        # exposed even in restricted mode.
+        self.max_file_content_size = int(os.getenv("MAX_FILE_CONTENT_SIZE", str(1_000_000)))
 
         # Legacy single-NAS env vars (still supported as fallback)
         self.synology_url = os.getenv("SYNOLOGY_URL")
@@ -275,7 +295,9 @@ class SynologyConfig:
                         continue
 
                     host = nas_info.get("host", "")
-                    port = nas_info.get("port", 5000)
+                    # 5001 is DSM's default HTTPS port; 5000 is HTTP-only and
+                    # would fail outright given the HTTPS-only base_url below.
+                    port = nas_info.get("port", 5001)
                     username = nas_info.get("username", "")
                     password = nas_info.get("password", "")
                     # Optional 2FA/OTP support (DSM Login Web API Guide):
@@ -326,7 +348,10 @@ class SynologyConfig:
                     if "auto_login" in server_section:
                         self.auto_login = server_section["auto_login"]
                     if "verify_ssl" in server_section:
-                        self.verify_ssl = server_section["verify_ssl"]
+                        value = server_section["verify_ssl"]
+                        self.verify_ssl = (
+                            _parse_verify_ssl(value) if isinstance(value, str) else value
+                        )
                     if "session_timeout" in server_section:
                         self.default_session_timeout = server_section["session_timeout"]
                     if "debug" in server_section:
@@ -335,6 +360,8 @@ class SynologyConfig:
                         self.log_level = server_section["log_level"].upper()
                     if "restricted_mode" in server_section:
                         self.restricted_mode = server_section["restricted_mode"]
+                    if "max_file_content_size" in server_section:
+                        self.max_file_content_size = server_section["max_file_content_size"]
 
             except json.JSONDecodeError as e:
                 logger.error(f"Failed to parse {SETTINGS_FILE}: {e}")

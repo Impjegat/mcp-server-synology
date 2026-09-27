@@ -144,6 +144,12 @@ class SynologyAuth:
         # Try common API versions (start with newer versions)
         api_versions = ["7", "6", "3", "2"]
 
+        # Set when a transport-level failure (as opposed to a DSM-returned
+        # auth failure) stops the loop early, so the final return can give a
+        # specific, distinguished error instead of a generic
+        # "Authentication failed" for every kind of connection problem.
+        last_exception: Optional[Exception] = None
+
         for version in api_versions:
             payload = {
                 "api": "SYNO.API.Auth",
@@ -215,10 +221,59 @@ class SynologyAuth:
                     # exception, below) is worth retrying.
                     if error_code in _AUTH_OUTCOME_ERROR_CODES:
                         return result
-            except Exception:
+            except requests.exceptions.SSLError as e:
+                # A certificate problem is about the connection itself, not
+                # the API version being tried — every version would hit the
+                # same failure, so stop instead of retrying three more times.
+                last_exception = e
+                break
+            except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+                # Same reasoning: an unreachable host or a connection that
+                # doesn't answer within the timeout isn't fixed by trying a
+                # different API version.
+                last_exception = e
+                break
+            except Exception as e:
+                last_exception = e
                 continue
 
-        # If all versions failed, return the last result
+        if isinstance(last_exception, requests.exceptions.SSLError):
+            return {
+                "success": False,
+                "error": {
+                    "code": "certificate_error",
+                    "message": redact(
+                        f"TLS certificate verification failed for {self.base_url}: "
+                        f"{last_exception}. If this NAS uses a self-signed certificate "
+                        "or a private CA, set VERIFY_SSL to that CA bundle's file path "
+                        "instead of disabling verification.",
+                        live_secrets=(password,),
+                    ),
+                },
+            }
+        if isinstance(last_exception, requests.exceptions.Timeout):
+            return {
+                "success": False,
+                "error": {
+                    "code": "connection_timeout",
+                    "message": f"Connection to {self.base_url} timed out.",
+                },
+            }
+        if isinstance(last_exception, requests.exceptions.ConnectionError):
+            return {
+                "success": False,
+                "error": {
+                    "code": "connection_error",
+                    "message": redact(
+                        f"Could not connect to {self.base_url}: {last_exception}. "
+                        "Check the host and port, and that DSM is reachable over HTTPS.",
+                        live_secrets=(password,),
+                    ),
+                },
+            }
+
+        # If every version was tried and none succeeded for a DSM-level
+        # reason (not a transport error), return a generic failure.
         return {"success": False, "error": {"code": "unknown", "message": "Authentication failed"}}
 
     def login_download_station(

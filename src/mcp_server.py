@@ -298,6 +298,7 @@ class SynologyMCPServer:
                 session_id,
                 verify_ssl=config.verify_ssl,
                 syno_token=self.syno_tokens.get(base_url),
+                max_file_content_size=config.max_file_content_size,
             )
 
         return self.filestation_instances[base_url]

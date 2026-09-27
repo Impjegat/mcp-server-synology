@@ -37,12 +37,16 @@ class SynologyFileStation:
         session_id: str,
         verify_ssl: bool = True,
         syno_token: Optional[str] = None,
+        max_file_content_size: int = 1_000_000,
     ):
         self.base_url = base_url.rstrip("/")
         self.session_id = session_id
         self.verify_ssl = verify_ssl
         self.syno_token = syno_token
         self.api_url = f"{self.base_url}/webapi/entry.cgi"
+        # get_file_content refuses to download a file larger than this,
+        # checked via file metadata before any download request is made.
+        self.max_file_content_size = max_file_content_size
 
     def _csrf_headers(self, *, post: bool) -> Dict[str, str]:
         """Build request headers, including X-SYNO-TOKEN for DSM 7.3.2+ CSRF.
@@ -322,7 +326,10 @@ class SynologyFileStation:
             # Wait for search to complete
             import time
 
-            while True:
+            max_wait_time = 120  # Maximum wait time (2 minutes)
+            wait_time = 0.0
+
+            while wait_time < max_wait_time:
                 status_data = self._make_request(
                     "SYNO.FileStation.Search", "2", "status", taskid=task_id
                 )
@@ -331,6 +338,9 @@ class SynologyFileStation:
                     break
 
                 time.sleep(0.5)
+                wait_time += 0.5
+            else:
+                raise Exception(f"Search operation timed out after {max_wait_time} seconds")
 
             # Get results
             result_data = self._make_request("SYNO.FileStation.Search", "2", "list", taskid=task_id)
@@ -671,6 +681,18 @@ class SynologyFileStation:
 
         # Check for critical paths
         self._check_critical_path(formatted_path)
+
+        # Enforce the size cap via file metadata, before any download
+        # request is made — not after reading the whole file into memory.
+        # File contents are sent to the MCP client's AI provider, and this
+        # tool stays enabled even in restricted mode.
+        info = self.get_file_info(formatted_path)
+        size = info.get("size", 0)
+        if size > self.max_file_content_size:
+            raise Exception(
+                f"File '{path}' is {size} bytes, which exceeds the configured "
+                f"limit of {self.max_file_content_size} bytes (max_file_content_size)."
+            )
 
         # Use the download API to get file content
         download_headers = {"X-SYNO-TOKEN": self.syno_token} if self.syno_token else None

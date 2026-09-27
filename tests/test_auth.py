@@ -585,3 +585,93 @@ def test_unsupported_version_error_retries_next_api_version(monkeypatch):
 
     assert result["success"] is True
     assert len(calls) == 2, "an unsupported-API error should fall back to the next API version"
+
+
+# ---------------------------------------------------------------------------
+# Distinguished connection errors (PR 3): certificate/unreachable/timeout
+# failures get a specific, sanitized message instead of a blanket
+# "Authentication failed" — and none of them retry other API versions,
+# since a transport-level failure isn't fixed by changing the payload.
+# ---------------------------------------------------------------------------
+
+
+def _patch_requests_post_raises(monkeypatch, exception):
+    """Make every requests.post call in synology_auth raise `exception`."""
+    import auth.synology_auth as mod
+
+    calls = []
+
+    def _fake_post(url, data=None, verify=None, timeout=None, **kwargs):
+        calls.append({"url": url, "data": dict(data or {})})
+        raise exception
+
+    monkeypatch.setattr(mod.requests, "post", _fake_post)
+    return calls
+
+
+def test_certificate_error_stops_immediately_with_a_specific_message(monkeypatch):
+    import requests
+
+    from auth.synology_auth import SynologyAuth
+
+    calls = _patch_requests_post_raises(
+        monkeypatch, requests.exceptions.SSLError("certificate verify failed")
+    )
+
+    auth = SynologyAuth("https://nas.example.test:5001")
+    result = auth.login("alice", "hunter2")
+
+    assert result["success"] is False
+    assert result["error"]["code"] == "certificate_error"
+    assert "certificate" in result["error"]["message"].lower()
+    assert "hunter2" not in result["error"]["message"]
+    assert len(calls) == 1, "a certificate error must not retry other API versions"
+
+
+def test_connection_error_stops_immediately_with_a_specific_message(monkeypatch):
+    import requests
+
+    from auth.synology_auth import SynologyAuth
+
+    calls = _patch_requests_post_raises(
+        monkeypatch, requests.exceptions.ConnectionError("Connection refused")
+    )
+
+    auth = SynologyAuth("https://nas.example.test:5001")
+    result = auth.login("alice", "hunter2")
+
+    assert result["success"] is False
+    assert result["error"]["code"] == "connection_error"
+    assert "hunter2" not in result["error"]["message"]
+    assert len(calls) == 1, "a connection error must not retry other API versions"
+
+
+def test_timeout_error_stops_immediately_with_a_specific_message(monkeypatch):
+    import requests
+
+    from auth.synology_auth import SynologyAuth
+
+    calls = _patch_requests_post_raises(monkeypatch, requests.exceptions.Timeout("timed out"))
+
+    auth = SynologyAuth("https://nas.example.test:5001")
+    result = auth.login("alice", "pw")
+
+    assert result["success"] is False
+    assert result["error"]["code"] == "connection_timeout"
+    assert "timed out" in result["error"]["message"].lower()
+    assert len(calls) == 1, "a timeout must not retry other API versions"
+
+
+def test_unexpected_transport_exception_still_retries_other_versions(monkeypatch):
+    """A non-SSL/connection/timeout exception (e.g. a malformed response)
+    keeps the old fall-through-to-next-version behavior."""
+    from auth.synology_auth import SynologyAuth
+
+    calls = _patch_requests_post_raises(monkeypatch, ValueError("unexpected"))
+
+    auth = SynologyAuth("https://nas.example.test:5001")
+    result = auth.login("alice", "pw")
+
+    assert result["success"] is False
+    assert result["error"]["code"] == "unknown"
+    assert len(calls) == 4, "an unrecognized exception should still try every API version"
