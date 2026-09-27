@@ -2,6 +2,7 @@
 
 Status: Implemented
 Initiated: 2026-09-27
+GitHub PR: [Impjegat/mcp-server-synology#2](https://github.com/Impjegat/mcp-server-synology/pull/2)
 Implements: `REMEDIATION_PLAN.md` §1 (Remove credentials and tokens from output), plus the timeout/retry-rule portion of §4 that's specific to `src/auth/synology_auth.py`.
 
 ## Why
