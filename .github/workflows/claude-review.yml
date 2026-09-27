@@ -15,9 +15,16 @@ name: PR Review
 #   - fork PRs: the job is SKIPPED — no failing check, zero token spend, no
 #     secret exposure. Review a fork PR on demand by commenting `@claude`
 #     (claude.yml, gated to OWNER/MEMBER/COLLABORATOR).
+#
+# `synchronize` (new commits pushed to an existing PR) is included alongside
+# `opened` so pushed fixes get re-reviewed automatically instead of only ever
+# reviewing the PR's first commit. The prompt below reviews the PR as a whole
+# each time (`gh pr diff` against the base branch), not just what changed
+# since the last run, so a review after a small follow-up push may re-surface
+# earlier, already-addressed context — that's expected, not a bug.
 on:
   pull_request:
-    types: [opened]
+    types: [opened, synchronize]
 
 permissions:
   contents: read
