@@ -535,6 +535,15 @@ def test_get_file_content_rejects_oversized_file_before_downloading(monkeypatch)
         fs.get_file_content("/share/big.bin")
 
 
+def _fake_download_response(content_bytes, encoding=None):
+    fake_response = MagicMock()
+    fake_response.raise_for_status = MagicMock()
+    fake_response.headers = {}
+    fake_response.encoding = encoding
+    fake_response.iter_content = lambda chunk_size=None: iter([content_bytes])
+    return fake_response
+
+
 def test_get_file_content_allows_file_within_size_cap(monkeypatch):
     from filestation.synology_filestation import SynologyFileStation
 
@@ -546,16 +555,38 @@ def test_get_file_content_allows_file_within_size_cap(monkeypatch):
         lambda path: {"name": "small.txt", "path": path, "type": "file", "size": 10},
     )
 
-    fake_response = MagicMock()
-    fake_response.raise_for_status = MagicMock()
-    fake_response.headers = {}
-    fake_response.text = "hi there!!"
-
+    fake_response = _fake_download_response(b"hi there!!")
     monkeypatch.setattr(
         "filestation.synology_filestation.requests.get", lambda *a, **k: fake_response
     )
 
     assert fs.get_file_content("/share/small.txt") == "hi there!!"
+
+
+def test_get_file_content_aborts_mid_download_if_actual_bytes_exceed_the_cap(monkeypatch):
+    """The size cap must also be enforced against the bytes actually
+    streamed back, not just the get_file_info() pre-check — that check can
+    be stale (the file grows between the two requests) or silently absent
+    (a response missing a size field fails open to 0). A response that
+    claims to be small but streams back more than the cap must still be
+    rejected, and before the oversized body is fully buffered."""
+    from filestation.synology_filestation import SynologyFileStation
+
+    fs = SynologyFileStation("https://nas.example.test:5001", "sid", max_file_content_size=10)
+
+    monkeypatch.setattr(
+        fs,
+        "get_file_info",
+        lambda path: {"name": "lied.txt", "path": path, "type": "file", "size": 1},
+    )
+
+    fake_response = _fake_download_response(b"this is way more than ten bytes")
+    monkeypatch.setattr(
+        "filestation.synology_filestation.requests.get", lambda *a, **k: fake_response
+    )
+
+    with pytest.raises(Exception, match="exceeds the configured limit"):
+        fs.get_file_content("/share/lied.txt")
 
 
 def _fake_files_response(size):

@@ -737,9 +737,31 @@ class SynologyFileStation:
                     error_code = error_data.get("error", {}).get("code", "unknown")
                     raise Exception(f"Synology API error: {error_code}")
 
-            # Assuming the content is text, read it
+            # Enforce the cap on the bytes actually read too, not just on
+            # the get_file_info() pre-check above: that check can be stale
+            # (the file can grow between the two requests) or silently
+            # absent (info.get("size", 0) fails open to 0 if DSM's response
+            # doesn't carry a size for some reason). Streaming (already
+            # requested via stream=True) lets this abort mid-download
+            # instead of buffering an oversized body into memory first.
+            chunks = []
+            total_bytes = 0
+            for chunk in response.iter_content(chunk_size=65536):
+                if not chunk:
+                    continue
+                total_bytes += len(chunk)
+                if total_bytes > self.max_file_content_size:
+                    response.close()
+                    raise Exception(
+                        f"File '{path}' exceeds the configured limit of "
+                        f"{self.max_file_content_size} bytes (max_file_content_size) "
+                        "while downloading."
+                    )
+                chunks.append(chunk)
+
+            # Assuming the content is text, decode it
             # For binary files, this would need to be handled differently
-            return response.text
+            return b"".join(chunks).decode(response.encoding or "utf-8", errors="replace")
         except requests.RequestException as e:
             # This GET request's URL carries `_sid=<session_id>` directly —
             # redact before a RequestException's str() (which commonly
