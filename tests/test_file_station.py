@@ -344,12 +344,13 @@ def test_check_critical_path_blocks_exact_and_nested_paths():
     fs._check_critical_path("/etchome")  # no exception
 
 
-@pytest.mark.parametrize("root", ["/volume1", "/homes"])
+@pytest.mark.parametrize("root", ["/volume1", "/volume2", "/volume3", "/volume42", "/homes"])
 def test_check_critical_path_blocks_volume_and_homes_root_only(root):
-    """/volume1 and /homes are the raw volume mount and the aggregate
+    """Any /volumeN root and /homes are raw volume mounts and the aggregate
     home-directories share — block the bare root, but a real share or
     subfolder underneath must stay reachable (unlike /etc, these are not
-    prefix-matched)."""
+    prefix-matched). Synology NAS units commonly expose more than one
+    storage volume, so this must not be hardcoded to /volume1 alone."""
     from filestation.synology_filestation import SynologyFileStation
 
     fs = SynologyFileStation("https://nas.example.test:5001", "sid")
@@ -357,6 +358,17 @@ def test_check_critical_path_blocks_volume_and_homes_root_only(root):
     with pytest.raises(Exception, match="critical system path"):
         fs._check_critical_path(root)
     fs._check_critical_path(f"{root}/some-share-or-user")  # no exception
+
+
+def test_check_critical_path_volume_regex_does_not_overmatch():
+    """A share that merely starts with "volume" (not a bare /volumeN root)
+    must not match — e.g. /volume1backup or /volumes."""
+    from filestation.synology_filestation import SynologyFileStation
+
+    fs = SynologyFileStation("https://nas.example.test:5001", "sid")
+
+    fs._check_critical_path("/volume1backup")  # no exception
+    fs._check_critical_path("/volumes")  # no exception
 
 
 @pytest.mark.parametrize(

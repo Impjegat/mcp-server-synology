@@ -3,6 +3,7 @@
 import json
 import os
 import posixpath
+import re
 import tempfile
 import unicodedata
 from typing import Any, Dict, List, Optional
@@ -14,12 +15,14 @@ from utils.redact import redact
 # Paths no path-taking method below may touch, read or write. See
 # _check_critical_path.
 #
-# /volume1 and /homes are blocked only as exact matches: they're the raw
-# volume mount and the aggregate home-directories share, not places real
-# files live directly — but /volume1/photo or /homes/alice are ordinary
-# user shares/subfolders and must stay reachable, so these two are NOT
-# prefix-matched.
-_CRITICAL_PATHS_EXACT = ("/volume1", "/homes")
+# Volume roots and /homes are blocked only as exact matches: they're raw
+# volume mounts and the aggregate home-directories share, not places real
+# files live directly — but /volume2/photo or /homes/alice are ordinary
+# user shares/subfolders and must stay reachable, so these are NOT
+# prefix-matched. Synology NAS units commonly expose more than one storage
+# volume (/volume1, /volume2, ...), so this is a pattern, not a fixed name.
+_VOLUME_ROOT_RE = re.compile(r"/volume\d+")
+_CRITICAL_PATHS_EXACT = ("/homes",)
 # True OS-level directories have no legitimate DSM share overlap at all, so
 # every path under them is blocked too (e.g. /etc/passwd, not just /etc).
 _CRITICAL_PATHS_PREFIX = ("/var", "/etc", "/usr", "/bin", "/sbin")
@@ -644,13 +647,14 @@ class SynologyFileStation:
     def _check_critical_path(self, path: str) -> None:
         """Check if path is a critical system path, or inside one — raise if so.
 
-        `_CRITICAL_PATHS_EXACT` entries block only the literal path itself
-        (a real share/subfolder underneath is unaffected); `_CRITICAL_PATHS_PREFIX`
-        entries block the path and everything under it. This is the one
-        denylist check every path-taking method below calls; it used to be
-        exact-match-only here and separately duplicated with prefix-matching
-        in `delete()` — consolidated so there is one definition of "critical
-        path" instead of two that could drift apart.
+        `_CRITICAL_PATHS_EXACT`/`_VOLUME_ROOT_RE` entries block only the
+        literal path itself (a real share/subfolder underneath is
+        unaffected); `_CRITICAL_PATHS_PREFIX` entries block the path and
+        everything under it. This is the one denylist check every
+        path-taking method below calls; it used to be exact-match-only here
+        and separately duplicated with prefix-matching in `delete()` —
+        consolidated so there is one definition of "critical path" instead
+        of two that could drift apart.
 
         Args:
             path: Formatted path to check
@@ -658,7 +662,7 @@ class SynologyFileStation:
         Raises:
             Exception: If path is or is inside a critical system path
         """
-        if path in _CRITICAL_PATHS_EXACT:
+        if path in _CRITICAL_PATHS_EXACT or _VOLUME_ROOT_RE.fullmatch(path):
             raise Exception(f"Cannot access critical system path: {path}")
         for cp in _CRITICAL_PATHS_PREFIX:
             if path == cp or path.startswith(cp + "/"):
