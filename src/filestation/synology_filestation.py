@@ -2,6 +2,7 @@
 
 import json
 import os
+import posixpath
 import tempfile
 import unicodedata
 from typing import Any, Dict, List, Optional
@@ -157,8 +158,13 @@ class SynologyFileStation:
         """Format path for Synology API."""
         if not path.startswith("/"):
             path = "/" + path
-        if path != "/" and path.endswith("/"):
-            path = path.rstrip("/")
+
+        # Resolve "." / ".." segments (POSIX-style, regardless of the host
+        # OS this process runs on) before anything downstream — otherwise
+        # e.g. "/share/../etc/passwd" never matches _check_critical_path's
+        # prefix check on the literal, unresolved string, even though it
+        # names a critical path once resolved.
+        path = posixpath.normpath(path)
 
         # Normalize Unicode characters to NFC form (most common for filesystems)
         path = unicodedata.normalize("NFC", path)

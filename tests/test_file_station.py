@@ -389,3 +389,44 @@ def test_delete_uses_the_consolidated_helper_not_a_separate_denylist():
 
     with pytest.raises(Exception, match="critical system path"):
         fs.delete("/var/log/nested/deep")
+
+
+@pytest.mark.parametrize(
+    "raw_path,expected_formatted",
+    [
+        ("/share/../etc/passwd", "/etc/passwd"),
+        ("/homes/alice/../../etc/passwd", "/etc/passwd"),
+        ("/volume1/photo/../../../etc", "/etc"),
+        ("/homes/../etc", "/etc"),
+        ("/a/./b/../c", "/a/c"),
+    ],
+)
+def test_format_path_resolves_dot_dot_before_any_check_runs(raw_path, expected_formatted):
+    """`_format_path` must resolve `.`/`..` segments itself — a prefix-based
+    critical-path check downstream only ever sees the literal string, so an
+    unresolved `/share/../etc/passwd` would sail past a check for `/etc`."""
+    from filestation.synology_filestation import SynologyFileStation
+
+    fs = SynologyFileStation("https://nas.example.test:5001", "sid")
+    assert fs._format_path(raw_path) == expected_formatted
+
+
+@pytest.mark.parametrize(
+    "method_name,args",
+    [
+        ("list_directory", ("/share/../etc",)),
+        ("get_file_info", ("/homes/alice/../../etc/passwd",)),
+        ("search_files", ("/volume1/../../etc", "*.conf")),
+        ("create_directory", ("/homes/../etc", "newdir")),
+    ],
+)
+def test_dot_dot_traversal_cannot_bypass_the_critical_path_check(method_name, args):
+    """A `..`-bearing path that resolves to a critical path must still be
+    rejected — the denylist check must see the resolved path, not the raw
+    string the caller supplied."""
+    from filestation.synology_filestation import SynologyFileStation
+
+    fs = SynologyFileStation("https://nas.example.test:5001", "sid")
+
+    with pytest.raises(Exception, match="critical system path"):
+        getattr(fs, method_name)(*args)
