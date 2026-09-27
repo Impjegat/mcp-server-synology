@@ -160,6 +160,7 @@ def test_restricted_login_allows_configured_base_url():
     with patch("mcp_server.config") as fake_config:
         fake_config.restricted_mode = True
         fake_config.nas_configs = {"nas1": {"base_url": "https://nas.example.test:5001"}}
+        fake_config.synology_url = None
         error = server._restricted_login_error("https://nas.example.test:5001")
     assert error is None
 
@@ -169,6 +170,7 @@ def test_restricted_login_blocks_unconfigured_base_url():
     with patch("mcp_server.config") as fake_config:
         fake_config.restricted_mode = True
         fake_config.nas_configs = {"nas1": {"base_url": "https://nas.example.test:5001"}}
+        fake_config.synology_url = None
         error = server._restricted_login_error("https://attacker.example:5001")
     assert error is not None
     assert "attacker.example" in error
@@ -180,6 +182,7 @@ def test_restricted_login_unrestricted_when_no_nas_configured_yet():
     with patch("mcp_server.config") as fake_config:
         fake_config.restricted_mode = True
         fake_config.nas_configs = {}
+        fake_config.synology_url = None
         error = server._restricted_login_error("https://anything.example:5001")
     assert error is None
 
@@ -189,5 +192,29 @@ def test_restricted_login_no_op_when_restricted_mode_off():
     with patch("mcp_server.config") as fake_config:
         fake_config.restricted_mode = False
         fake_config.nas_configs = {"nas1": {"base_url": "https://nas.example.test:5001"}}
+        fake_config.synology_url = None
         error = server._restricted_login_error("https://attacker.example:5001")
     assert error is None
+
+
+def test_restricted_login_allows_legacy_env_configured_base_url():
+    """The legacy single-NAS .env path (SYNOLOGY_URL) never populates
+    nas_configs — it must still pin synology_login, not silently no-op."""
+    server = _server()
+    with patch("mcp_server.config") as fake_config:
+        fake_config.restricted_mode = True
+        fake_config.nas_configs = {}
+        fake_config.synology_url = "https://nas.example.test:5001"
+        error = server._restricted_login_error("https://nas.example.test:5001")
+    assert error is None
+
+
+def test_restricted_login_blocks_unconfigured_base_url_with_legacy_env_only():
+    server = _server()
+    with patch("mcp_server.config") as fake_config:
+        fake_config.restricted_mode = True
+        fake_config.nas_configs = {}
+        fake_config.synology_url = "https://nas.example.test:5001"
+        error = server._restricted_login_error("https://attacker.example:5001")
+    assert error is not None
+    assert "attacker.example" in error

@@ -698,25 +698,28 @@ class SynologyMCPServer:
 
     def _restricted_login_error(self, base_url: str) -> Optional[str]:
         """In restricted mode, only allow login to a NAS already configured
-        in settings.json — otherwise the model could point admin
-        credentials at an arbitrary host of its choosing. Returns an error
-        message, or None if the login may proceed.
+        in settings.json or the legacy single-NAS .env vars — otherwise the
+        model could point admin credentials at an arbitrary host of its
+        choosing. Returns an error message, or None if the login may
+        proceed.
 
         When no NAS is configured yet (a fresh install using synology_login
-        directly rather than settings.json), there is nothing to check
+        directly rather than settings.json/.env), there is nothing to check
         against, so login is left unrestricted — restricted mode's tool
         classification still governs everything else.
         """
         if not config.restricted_mode:
             return None
         configured_urls = {cfg["base_url"] for cfg in config.nas_configs.values()}
+        if config.synology_url:
+            configured_urls.add(config.synology_url)
         if not configured_urls:
             return None
         if base_url not in configured_urls:
             return (
                 f"Restricted mode: '{base_url}' is not one of the NAS units already "
-                "configured in settings.json. Add it there first, or set "
-                "restricted_mode to false to allow logging in to an arbitrary host."
+                "configured in settings.json or SYNOLOGY_URL. Add it there first, or "
+                "set restricted_mode to false to allow logging in to an arbitrary host."
             )
         return None
 
