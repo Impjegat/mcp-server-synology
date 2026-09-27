@@ -17,9 +17,11 @@ _MASK = "***REDACTED***"
 # Matches `key=value` for known-sensitive query/body parameter names, stopping
 # at the next `&`, whitespace, or end of string. Covers values we weren't
 # told about in advance (e.g. a stale SID baked into a cached exception, or a
-# URL assembled by hand rather than through a params dict).
+# URL assembled by hand rather than through a params dict). The negative
+# lookbehind anchors each key to a boundary so e.g. `foo_sid=` doesn't also
+# match on the `_sid=` suffix of an unrelated key name.
 _PARAM_PATTERN = re.compile(
-    r"(_sid|passwd|password|synotoken|device_id|otp_code)=([^&\s\"']*)",
+    r"(?<![A-Za-z0-9_])(_sid|passwd|password|synotoken|device_id|otp_code)=([^&\s\"']*)",
     re.IGNORECASE,
 )
 

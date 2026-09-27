@@ -173,16 +173,24 @@ class SynologyConfig:
 
         Writes to a temp file in the same directory (so the final
         `os.replace` is on the same filesystem and therefore atomic),
-        restricts its permissions before the swap so the file is never
-        briefly world-readable, then replaces the original. Returns True on
-        success, False on any failure (logged, never raised — a failed
-        settings write must never crash the server or fall back to
-        printing what it was trying to save).
+        created already restricted to the owner (POSIX 0600) rather than
+        written with default-umask permissions and chmod'd afterward — the
+        latter leaves a window where the temp file (which holds every
+        configured NAS's password, not just the field being updated) is
+        readable at whatever the ambient umask allows. `_restrict_file_permissions`
+        is still called afterward: it's a no-op on POSIX (already 0600) but
+        is where the real restriction happens on Windows, whose `os.open`
+        mode argument doesn't set NTFS ACLs. Returns True on success, False
+        on any failure (logged, never raised — a failed settings write must
+        never crash the server or fall back to printing what it was trying
+        to save).
         """
         try:
             CONFIG_DIR.mkdir(parents=True, exist_ok=True)
             tmp_path = SETTINGS_FILE.with_suffix(".json.tmp")
-            tmp_path.write_text(json.dumps(data, indent=2))
+            fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w") as f:
+                f.write(json.dumps(data, indent=2))
             self._restrict_file_permissions(tmp_path)
             os.replace(tmp_path, SETTINGS_FILE)
             return True

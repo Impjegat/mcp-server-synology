@@ -45,6 +45,14 @@ def test_redact_leaves_non_secret_text_untouched():
     assert redact(text, live_secrets=["irrelevant"]) == text
 
 
+def test_redact_does_not_match_unrelated_key_ending_in_sid():
+    """The `_sid=` pattern is anchored to a key-name boundary — it must not
+    also match on an unrelated key that merely ends with `_sid`."""
+    text = "foo_sid=not_a_session_id&other=fine"
+    result = redact(text, live_secrets=[])
+    assert result == text
+
+
 def test_redact_passes_through_non_string_and_none():
     assert redact(None) is None
     assert redact(42) == 42  # type: ignore[arg-type]

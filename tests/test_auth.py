@@ -290,13 +290,13 @@ def _patch_requests_get(monkeypatch, payloads):
     """Replace requests.get AND requests.post in synology_auth with a recorder.
 
     `payloads` is a list of dicts; each call (whichever verb the code under
-    test used) pops the head in call order. Login sends its payload via POST
-    (`data=`); logout still uses GET (`params=`) — both are recorded under
-    the same `params` key in the returned call record, plus a `method` key,
-    so existing assertions like `calls[i]["params"][...]` keep working
-    regardless of which verb was used, while a test can also assert on
-    `calls[i]["method"]` when the verb itself matters (e.g. confirming login
-    no longer sends credentials as a URL query string).
+    test used) pops the head in call order. Both login and logout send their
+    payload via POST (`data=`) — both are recorded under the same `params`
+    key in the returned call record, plus a `method` key, so existing
+    assertions like `calls[i]["params"][...]` keep working regardless of
+    which verb was used, while a test can also assert on `calls[i]["method"]`
+    when the verb itself matters (e.g. confirming login/logout no longer
+    send credentials/session ids as a URL query string).
     """
     import auth.synology_auth as mod
 
@@ -524,6 +524,27 @@ def test_login_sends_credentials_via_post_not_url(monkeypatch):
     assert "passwd=" not in calls[0]["url"]
     # The password is still sent — just in the body, not the URL.
     assert calls[0]["params"]["passwd"] == "hunter2"
+
+
+def test_logout_sends_session_id_via_post_not_url(monkeypatch):
+    """logout() must carry `_sid` in the POST body too — the same leak
+    vector login() was fixed for (visible in DSM's own access log and any
+    intermediate proxy's log) applies equally to logout's session id."""
+    from auth.synology_auth import SynologyAuth
+
+    login_payload = {"success": True, "data": {"sid": "SID_to_logout", "synotoken": "T"}}
+    logout_payload = {"success": True}
+    calls = _patch_requests_get(monkeypatch, [login_payload, logout_payload])
+
+    auth = SynologyAuth("https://nas.example.test:5001")
+    auth.login("alice", "pw")
+    auth.logout()
+
+    assert len(calls) == 2
+    assert calls[1]["method"] == "POST"
+    assert "SID_to_logout" not in calls[1]["url"]
+    assert "_sid=" not in calls[1]["url"]
+    assert calls[1]["params"]["_sid"] == "SID_to_logout"
 
 
 def test_auth_outcome_error_does_not_retry_other_api_versions(monkeypatch):

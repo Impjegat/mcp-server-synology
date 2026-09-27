@@ -318,8 +318,12 @@ class SynologyAuth:
             }
 
             try:
-                response = requests.get(
-                    logout_url, params=payload, verify=self.verify_ssl, timeout=_AUTH_TIMEOUT
+                # POST, not GET: same reasoning as login() — the payload
+                # carries `_sid`, and a GET would put it in the URL query
+                # string, visible in DSM's own access log and any
+                # intermediate proxy's log.
+                response = requests.post(
+                    logout_url, data=payload, verify=self.verify_ssl, timeout=_AUTH_TIMEOUT
                 )
                 response.raise_for_status()
                 result = response.json()
@@ -348,11 +352,11 @@ class SynologyAuth:
                         break
 
             except requests.RequestException as e:
-                # `str(e)` on a RequestException commonly embeds the full
-                # request URL — which carries `_sid=<logout_session_id>` on
-                # this GET request — so redact before it's returned to the
-                # caller (redaction here is a backstop; the tool-response
-                # boundary in mcp_server.py also redacts).
+                # `str(e)` on a RequestException can still embed request
+                # details (e.g. the resolved host on a connection failure);
+                # redact defensively before returning it to the caller
+                # (redaction here is a backstop; the tool-response boundary
+                # in mcp_server.py also redacts).
                 last_error = {
                     "success": False,
                     "error": {
