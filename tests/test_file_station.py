@@ -589,6 +589,58 @@ def test_get_file_content_aborts_mid_download_if_actual_bytes_exceed_the_cap(mon
         fs.get_file_content("/share/lied.txt")
 
 
+def test_get_file_content_honors_declared_response_encoding(monkeypatch):
+    """A declared response.encoding (from a Content-Type charset, when DSM
+    sends one) must be used as-is, not overridden by auto-detection."""
+    from filestation.synology_filestation import SynologyFileStation
+
+    fs = SynologyFileStation("https://nas.example.test:5001", "sid", max_file_content_size=1000)
+    monkeypatch.setattr(
+        fs, "get_file_info", lambda path: {"name": "f", "path": path, "type": "file", "size": 5}
+    )
+
+    fake_response = _fake_download_response("café".encode("latin-1"), encoding="latin-1")
+    monkeypatch.setattr(
+        "filestation.synology_filestation.requests.get", lambda *a, **k: fake_response
+    )
+
+    assert fs.get_file_content("/share/f") == "café"
+
+
+def test_decode_downloaded_text_uses_declared_encoding_when_present():
+    from filestation.synology_filestation import _decode_downloaded_text
+
+    assert _decode_downloaded_text("café".encode("latin-1"), "latin-1") == "café"
+
+
+def test_decode_downloaded_text_auto_detects_when_no_declared_encoding(monkeypatch):
+    """response.encoding is None for DSM's download endpoint (it never
+    sends a charset) — the common case here, not an edge case. This must
+    auto-detect rather than blindly assume UTF-8, which would silently
+    mangle non-UTF-8 text via errors="replace" — the regression this
+    replaces."""
+    import charset_normalizer
+
+    from filestation.synology_filestation import _decode_downloaded_text
+
+    monkeypatch.setattr(charset_normalizer, "detect", lambda _content: {"encoding": "latin-1"})
+
+    assert _decode_downloaded_text("café".encode("latin-1"), None) == "café"
+
+
+def test_decode_downloaded_text_falls_back_to_utf8_if_detection_fails(monkeypatch):
+    import charset_normalizer
+
+    from filestation.synology_filestation import _decode_downloaded_text
+
+    def _boom(_content):
+        raise RuntimeError("no detector available")
+
+    monkeypatch.setattr(charset_normalizer, "detect", _boom)
+
+    assert _decode_downloaded_text(b"hello", None) == "hello"
+
+
 def _fake_files_response(size):
     """DSM's SYNO.FileStation.List response shape: "size" (like time/owner/
     perm) is nested under the file object's "additional" key, not at its

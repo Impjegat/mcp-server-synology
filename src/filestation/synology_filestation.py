@@ -28,6 +28,29 @@ _CRITICAL_PATHS_EXACT = ("/homes",)
 _CRITICAL_PATHS_PREFIX = ("/var", "/etc", "/usr", "/bin", "/sbin")
 
 
+def _decode_downloaded_text(content: bytes, declared_encoding: Optional[str]) -> str:
+    """Decode a downloaded file's bytes the way `requests.Response.text`
+    would: use the declared encoding if the server sent one, otherwise
+    auto-detect (mirroring `Response.apparent_encoding`) instead of
+    assuming UTF-8. DSM's download endpoint doesn't send a charset, so the
+    auto-detect path is the common case here, not an edge case.
+
+    This can't just call `response.apparent_encoding` — that reads
+    `response.content`, which raises once the body has already been
+    consumed via `iter_content()` (needed here to enforce the size cap
+    against the actual bytes read, not just pre-download metadata).
+    """
+    if declared_encoding:
+        return content.decode(declared_encoding, errors="replace")
+    try:
+        import charset_normalizer
+
+        detected = charset_normalizer.detect(content)["encoding"]
+    except Exception:
+        detected = None
+    return content.decode(detected or "utf-8", errors="replace")
+
+
 class SynologyFileStation:
     """Handles Synology FileStation API operations."""
 
@@ -761,7 +784,7 @@ class SynologyFileStation:
 
             # Assuming the content is text, decode it
             # For binary files, this would need to be handled differently
-            return b"".join(chunks).decode(response.encoding or "utf-8", errors="replace")
+            return _decode_downloaded_text(b"".join(chunks), response.encoding)
         except requests.RequestException as e:
             # This GET request's URL carries `_sid=<session_id>` directly —
             # redact before a RequestException's str() (which commonly
