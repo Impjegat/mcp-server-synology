@@ -516,9 +516,14 @@ class SynologyMCPServer:
                         name="synology_login",
                         description=(
                             "Authenticate with Synology NAS and establish session.\n\n"
-                            "2FA/OTP accounts: pass `otp_code` on the first login only; "
-                            "DSM will issue a `device_id` in the response, which you can "
-                            "persist into settings.json to skip OTP on future logins. If "
+                            "2FA/OTP accounts: pass `otp_code` on the first login only. "
+                            "DSM issues a device token on success, but this tool never "
+                            "returns or logs it (credential-handling policy) — there is "
+                            "no way to retrieve it from this call, so do not retry "
+                            "expecting one. To get a persistent trusted-device token, "
+                            "configure this NAS with `otp_code` in settings.json and "
+                            "enable auto-login instead; the server saves the token to "
+                            "settings.json itself on the first successful auto-login. If "
                             "you already have a `device_id`, pass it instead of `otp_code` "
                             "— DSM treats trusted devices as already authenticated."
                         ),

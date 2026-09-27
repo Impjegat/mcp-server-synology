@@ -482,7 +482,7 @@ The MCP server supports DSM accounts with 2FA enabled. There are two ways to use
    ```json
    { "base_url": "https://nas.lan:5001", "username": "alice", "password": "…", "otp_code": "123456" }
    ```
-   DSM will return a `did` (device token) in the response — copy that value into `settings.json` (below) to skip OTP on future process restarts.
+   DSM issues a device token on success, but this tool never returns, logs, or persists it (credential-handling policy) — there's no way to retrieve it from this call. Every future interactive login needs a fresh OTP code. For a token that's actually persisted to skip OTP, use the auto-login workflow below instead.
 
 2. **Persistent trusted-device token** (recommended for `AUTO_LOGIN=true`):
 
@@ -503,10 +503,8 @@ The MCP server supports DSM accounts with 2FA enabled. There are two ways to use
 
    **Workflow:**
    1. Set `otp_code` to a fresh 6-digit code from your authenticator and start the server.
-   2. On the first successful login, the server logs a warning line like:
-      `nas1: 2FA bootstrap — copy this device_id into settings.json to skip OTP on future starts: <did>`
-      Copy the `<did>` value.
-   3. Paste it into `device_id` and delete `otp_code`.
+   2. On the first successful auto-login, the server saves the device token straight into `settings.json` for you (no manual copy step — the token itself is never logged or printed, per the credential-handling policy) and logs a confirmation once it's done.
+   3. `otp_code` is now redundant; you may delete it from `settings.json`.
    4. From now on, DSM treats this process as a trusted device — restarts, relogins after DSM error 119, and container-manager sessions all skip OTP.
 
    When `device_id` is present, it takes precedence over `otp_code` (trusted-device path). Legacy `.env` users can set the one-shot `SYNOLOGY_OTP_CODE` env var; for persistent `device_id`, migrate to `settings.json` (long opaque token doesn't fit an env var cleanly).
