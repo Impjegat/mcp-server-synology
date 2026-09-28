@@ -15,7 +15,7 @@ from mcp.server import Server
 from mcp.server.lowlevel import NotificationOptions
 from mcp.server.models import InitializationOptions
 
-from auth import SynologyAuth, iter_live_secrets
+from auth import SynologyAuth, iter_all_secrets
 from config import config
 from container import SynologyContainer
 from downloadstation import SynologyDownloadStation
@@ -24,16 +24,6 @@ from health import SynologyHealth
 from nfs import SynologyNFS
 from usermanagement import SynologyUserManager
 from utils.redact import redact
-
-
-def _iter_all_secrets():
-    """Live secrets (post-login: session IDs, SynoTokens, device IDs) plus
-    configured-but-not-yet-live ones (passwords, OTP codes, trusted-device
-    tokens), so a configured secret is redacted from tool output even
-    before any login using it has happened."""
-    yield from iter_live_secrets()
-    yield from config.iter_configured_secrets()
-
 
 # Container Manager tool suffixes (paired with the "synology_container_"
 # prefix) that are read-only/monitoring-shaped: listing, inspecting, logs,
@@ -629,7 +619,7 @@ class SynologyMCPServer:
             return self._redact_tool_result(result)
         except Exception as e:
             error_text = redact(
-                f"Error executing {name}: {str(e)}", live_secrets=list(_iter_all_secrets())
+                f"Error executing {name}: {str(e)}", live_secrets=list(iter_all_secrets())
             )
             return [types.TextContent(type="text", text=error_text)]
 
@@ -642,7 +632,7 @@ class SynologyMCPServer:
         that embedded a `_sid=`-bearing URL, ...) is caught here rather than
         needing a fix at every individual call site.
         """
-        live_secrets = list(_iter_all_secrets())
+        live_secrets = list(iter_all_secrets())
         return [
             (
                 types.TextContent(type="text", text=redact(item.text, live_secrets=live_secrets))

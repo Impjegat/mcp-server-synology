@@ -58,6 +58,32 @@ def test_redact_passes_through_non_string_and_none():
     assert redact(42) == 42  # type: ignore[arg-type]
 
 
+def test_redact_does_not_blanket_replace_a_short_live_secret():
+    """A short/common live secret — most concretely a DSM 2FA code, always
+    exactly 6 digits — must not be masked as a bare substring: doing so
+    risks corrupting unrelated legitimate output that happens to contain
+    the same digits (a file size, a port number, a timestamp fragment,
+    ...). The key=value pattern pass still catches it in that specific
+    shape, which is the actual leak vector for a value like this."""
+    text = "File size: 123456 bytes, port 123456"
+    result = redact(text, live_secrets=["123456"])
+    assert result == text  # untouched — not masked as a bare substring
+
+    # But still caught via the key=value pattern when it's actually in a
+    # leak-shaped position, independent of the live_secrets list.
+    result2 = redact("otp_code=123456&api=SYNO.API.Auth", live_secrets=[])
+    assert "123456" not in result2
+
+
+def test_redact_still_blanket_replaces_a_long_live_secret():
+    """A real session ID/SynoToken/device ID/typical password is always far
+    longer than the short-value guard's threshold, so this doesn't weaken
+    that redaction path."""
+    text = "Session ID: SID_abcdefgh123"
+    result = redact(text, live_secrets=["SID_abcdefgh123"])
+    assert "SID_abcdefgh123" not in result
+
+
 def test_redacting_filter_scrubs_log_message_and_args():
     secrets = ["LIVE_SID"]
     filt = RedactingFilter(lambda: secrets)
@@ -169,3 +195,67 @@ def test_redacting_filter_never_raises_on_broken_provider():
     )
     assert filt.filter(record) is True
     assert "hunter2" not in record.msg
+
+
+def test_redacting_filter_suppresses_traceback_rather_than_render_it_raw_on_failure():
+    """If rendering the traceback itself fails, leaving exc_text unset would
+    fail open: Formatter.format() only calls formatException() itself when
+    exc_text is still falsy at format time, which would emit the raw,
+    unredacted traceback — silently reproducing the exact `_sid=` leak this
+    filter exists to close. It must instead suppress the traceback and
+    clear exc_info so nothing downstream can recompute the raw version."""
+    from unittest.mock import patch
+
+    import utils.redact as redact_module
+
+    filt = RedactingFilter(lambda: ["LIVE_SID"])
+
+    try:
+        raise ConnectionError("GET https://nas:5001/webapi/?_sid=LIVE_SID failed")
+    except ConnectionError:
+        exc_info = sys.exc_info()
+
+    record = logging.LogRecord(
+        name="test",
+        level=logging.ERROR,
+        pathname=__file__,
+        lineno=1,
+        msg="unexpected error",
+        args=None,
+        exc_info=exc_info,
+    )
+    with patch.object(
+        redact_module._TRACEBACK_FORMATTER,
+        "formatException",
+        side_effect=RuntimeError("boom"),
+    ):
+        assert filt.filter(record) is True
+
+    assert record.exc_info is None
+    assert record.exc_text  # a placeholder, not falsy
+    assert "LIVE_SID" not in record.exc_text
+
+
+def test_redacting_filter_suppresses_message_rather_than_leave_it_unredacted_on_failure():
+    """If redact() itself somehow raises while scrubbing the rendered
+    message, the record must not fall back to the original (potentially
+    secret-bearing) text — a redaction path failing must never mean the
+    unredacted version gets emitted instead."""
+    from unittest.mock import patch
+
+    import utils.redact as redact_module
+
+    filt = RedactingFilter(lambda: ["LIVE_SID"])
+    record = logging.LogRecord(
+        name="test",
+        level=logging.WARNING,
+        pathname=__file__,
+        lineno=1,
+        msg="token: LIVE_SID",
+        args=None,
+        exc_info=None,
+    )
+    with patch.object(redact_module, "redact", side_effect=RuntimeError("boom")):
+        assert filt.filter(record) is True
+
+    assert "LIVE_SID" not in record.msg

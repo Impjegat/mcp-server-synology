@@ -14,6 +14,18 @@ from typing import Iterable, Optional
 
 _MASK = "***REDACTED***"
 
+# A live-secret value shorter than this is excluded from the verbatim
+# substring pass in redact() below (the key=value pattern pass further down
+# still catches it in that specific shape, e.g. `otp_code=123456`). DSM's
+# 2FA codes are always exactly 6 digits, and a configured password can be
+# short too — masking every occurrence of a short/common value as a bare
+# substring risks corrupting unrelated legitimate output that happens to
+# contain the same digits or characters (a file size, a port number, a
+# filename, ...), rather than actually protecting anything: session
+# IDs/SynoTokens/device IDs are always much longer than this in practice,
+# so this doesn't weaken redaction of those.
+_MIN_LIVE_SECRET_LENGTH = 8
+
 # Matches `key=value` for known-sensitive query/body parameter names, stopping
 # at the next `&`, whitespace, or end of string. Covers values we weren't
 # told about in advance (e.g. a stale SID baked into a cached exception, or a
@@ -51,7 +63,7 @@ def redact(text: Optional[str], *, live_secrets: Iterable[Optional[str]] = ()) -
 
     result = text
     for secret in live_secrets:
-        if secret:
+        if secret and len(secret) >= _MIN_LIVE_SECRET_LENGTH:
             result = result.replace(secret, _MASK)
 
     result = _mask_known_params(result)
@@ -63,6 +75,28 @@ def redact(text: Optional[str], *, live_secrets: Iterable[Optional[str]] = ()) -
 # called here, just this one helper method, which doesn't depend on any
 # per-formatter state like fmt/datefmt).
 _TRACEBACK_FORMATTER = logging.Formatter()
+
+_REDACTION_FAILED_PLACEHOLDER = "<redaction failed — content suppressed>"
+
+
+def _safe_redact(text: Optional[str], live_secrets: Iterable[Optional[str]]) -> Optional[str]:
+    """Like `redact()`, but never raises and never lets unredacted text
+    through on failure — a placeholder is returned instead.
+
+    `redact()` itself isn't expected to raise on a plain string (its only
+    operations are str.replace and a regex sub, both total functions), but
+    if it ever does, letting that exception propagate out of a logging
+    filter is one failure mode, and quietly catching it and using the
+    original *unredacted* text would be a worse one: a redaction path must
+    fail closed, not open. None passes through unchanged, matching
+    `redact()`'s own contract for non-string input.
+    """
+    if text is None:
+        return None
+    try:
+        return redact(text, live_secrets=live_secrets)
+    except Exception:
+        return _REDACTION_FAILED_PLACEHOLDER
 
 
 class RedactingFilter(logging.Filter):
@@ -96,25 +130,29 @@ class RedactingFilter(logging.Filter):
         # module's own formatter from re-applying % substitution to a
         # message that's already fully rendered.
         try:
-            record.msg = redact(record.getMessage(), live_secrets=live_secrets)
-            record.args = None
+            formatted = record.getMessage()
         except Exception:
             # getMessage() can raise on a malformed format string (e.g. a
             # %s with no matching arg). Fall back to redacting msg/args
-            # independently rather than losing the record's redaction.
+            # independently rather than losing the record's redaction —
+            # _safe_redact() never lets unredacted text through even if
+            # this fallback hits its own edge case.
             if isinstance(record.msg, str):
-                record.msg = redact(record.msg, live_secrets=live_secrets)
+                record.msg = _safe_redact(record.msg, live_secrets)
             if record.args:
                 if isinstance(record.args, dict):
                     record.args = {
-                        k: redact(v, live_secrets=live_secrets) if isinstance(v, str) else v
+                        k: _safe_redact(v, live_secrets) if isinstance(v, str) else v
                         for k, v in record.args.items()
                     }
                 else:
                     record.args = tuple(
-                        redact(a, live_secrets=live_secrets) if isinstance(a, str) else a
+                        _safe_redact(a, live_secrets) if isinstance(a, str) else a
                         for a in record.args
                     )
+        else:
+            record.msg = _safe_redact(formatted, live_secrets)
+            record.args = None
 
         # A traceback (exc_info=True) or an explicit stack trace
         # (stack_info=True) is appended by Formatter.format() separately
@@ -122,16 +160,22 @@ class RedactingFilter(logging.Filter):
         # commonly a `requests` exception's str(), which often embeds the
         # full request URL including `_sid=`. Pre-render and redact it here
         # into record.exc_text; the stdlib formatter uses that pre-filled
-        # value instead of re-rendering the raw (unredacted) traceback.
+        # value instead of re-rendering the raw (unredacted) traceback. If
+        # rendering the traceback itself fails, exc_info is cleared rather
+        # than left set with exc_text empty: Formatter.format() only calls
+        # formatException() itself when exc_text is still falsy at format
+        # time, which would render the raw, unredacted traceback — leaving
+        # this failure silent would fail open into exactly the leak this
+        # exists to prevent.
         if record.exc_info and not record.exc_text:
             try:
-                record.exc_text = redact(
-                    _TRACEBACK_FORMATTER.formatException(record.exc_info),
-                    live_secrets=live_secrets,
-                )
+                traceback_text = _TRACEBACK_FORMATTER.formatException(record.exc_info)
             except Exception:
-                pass
+                record.exc_text = _REDACTION_FAILED_PLACEHOLDER
+                record.exc_info = None
+            else:
+                record.exc_text = _safe_redact(traceback_text, live_secrets)
         if record.stack_info:
-            record.stack_info = redact(record.stack_info, live_secrets=live_secrets)
+            record.stack_info = _safe_redact(record.stack_info, live_secrets)
 
         return True
