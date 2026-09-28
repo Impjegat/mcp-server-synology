@@ -872,6 +872,40 @@ class TestIterConfiguredSecrets:
 
                     assert list(SynologyConfig().iter_configured_secrets()) == []
 
+    def test_coerces_a_bare_json_number_to_a_string(self, tmp_path):
+        """settings.json is user-edited JSON, and nothing stops otp_code
+        from being written as a bare number (`"otp_code": 123456`) rather
+        than a quoted string — valid JSON, but redact()'s len()/str.replace
+        calls would raise on a non-string value, which would surface as an
+        unhandled exception from inside an error handler wherever this
+        feeds redact() (see mcp_server.py's _dispatch_tool_call)."""
+        secrets_data = {
+            "synology": {
+                "nas1": {
+                    "host": "192.168.1.100",
+                    "port": 5001,
+                    "username": "admin",
+                    "password": "pass123",
+                    "otp_code": 654321,  # bare JSON number, not a string
+                }
+            }
+        }
+        secrets_file = tmp_path / "secrets.json"
+        secrets_file.write_text(json.dumps(secrets_data))
+        os.chmod(str(secrets_file), 0o600)
+
+        reload_config()
+
+        with patch.dict(os.environ, {}, clear=True):
+            with patch("config.SETTINGS_FILE", secrets_file):
+                from config import SynologyConfig
+
+                cfg = SynologyConfig()
+                secrets = list(cfg.iter_configured_secrets())
+
+        assert all(isinstance(s, str) for s in secrets)
+        assert "654321" in secrets
+
 
 def test_config_str_representation():
     """Test string representation of config."""

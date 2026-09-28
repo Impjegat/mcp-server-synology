@@ -14,17 +14,20 @@ from typing import Iterable, Optional
 
 _MASK = "***REDACTED***"
 
-# A live-secret value shorter than this is excluded from the verbatim
-# substring pass in redact() below (the key=value pattern pass further down
-# still catches it in that specific shape, e.g. `otp_code=123456`). DSM's
-# 2FA codes are always exactly 6 digits, and a configured password can be
-# short too — masking every occurrence of a short/common value as a bare
-# substring risks corrupting unrelated legitimate output that happens to
-# contain the same digits or characters (a file size, a port number, a
-# filename, ...), rather than actually protecting anything: session
-# IDs/SynoTokens/device IDs are always much longer than this in practice,
-# so this doesn't weaken redaction of those.
-_MIN_LIVE_SECRET_LENGTH = 8
+# A purely-numeric live-secret value shorter than this is excluded from the
+# verbatim substring pass in redact() below (the key=value pattern pass
+# further down still catches it in that specific shape, e.g.
+# `otp_code=123456`). DSM's 2FA code is always exactly 6 digits, and
+# legitimate numeric output (a file size, a port number, a timestamp
+# fragment, ...) commonly contains the same digits by pure chance — masking
+# every occurrence corrupts that output rather than protecting anything.
+# This is deliberately narrower than "any short secret": a short
+# *non-numeric* value (a short configured password, say) doesn't have the
+# same collision risk against arbitrary text, and is exactly the kind of
+# value this module exists to protect, so it's still masked regardless of
+# length. Session IDs/SynoTokens/device IDs are both non-numeric and always
+# far longer than this in practice, so neither exclusion affects them.
+_MIN_NUMERIC_SECRET_LENGTH = 8
 
 # Matches `key=value` for known-sensitive query/body parameter names, stopping
 # at the next `&`, whitespace, or end of string. Covers values we weren't
@@ -63,8 +66,11 @@ def redact(text: Optional[str], *, live_secrets: Iterable[Optional[str]] = ()) -
 
     result = text
     for secret in live_secrets:
-        if secret and len(secret) >= _MIN_LIVE_SECRET_LENGTH:
-            result = result.replace(secret, _MASK)
+        if not secret:
+            continue
+        if secret.isdigit() and len(secret) < _MIN_NUMERIC_SECRET_LENGTH:
+            continue
+        result = result.replace(secret, _MASK)
 
     result = _mask_known_params(result)
     return result

@@ -485,12 +485,20 @@ class SynologyConfig:
         established. Used to redact these from logs and tool output even
         before login makes them "live" (see `auth.iter_live_secrets`, which
         covers session IDs/SynoTokens/device IDs that only exist post-login).
+
+        Always yields `str`: settings.json is user-edited JSON, and nothing
+        stops `otp_code` (or any of these) from being written as a bare
+        JSON number (`"otp_code": 123456`) rather than a quoted string —
+        valid JSON, but redact()'s `len()`/`str.replace()` calls would raise
+        on a non-string value, which would surface as an unhandled
+        exception from inside an error handler wherever this feeds
+        `redact()` (see `_dispatch_tool_call`'s except clause).
         """
         for nas_cfg in self.nas_configs.values():
             for key in ("password", "otp_code", "device_id"):
                 value = nas_cfg.get(key)
                 if value:
-                    yield value
+                    yield str(value)
         if self.synology_password:
             yield self.synology_password
         if self.synology_otp_code:
