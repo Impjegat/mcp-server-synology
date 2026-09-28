@@ -195,6 +195,18 @@ class RedactingFilter(logging.Filter):
                 record.exc_info = None
             else:
                 record.exc_text = _safe_redact(traceback_text, live_secrets)
+        elif record.exc_text:
+            # exc_text can already be populated before this filter ever
+            # runs: Formatter.format() caches it on the record the first
+            # time ANY handler formats it, so if a different handler
+            # (without this filter attached) formatted the record first —
+            # e.g. a second handler added later without remembering to
+            # attach the filter, though today main.py's setup_logging()
+            # attaches it to every handler on the root logger — the cached
+            # value would be the raw, unredacted traceback. Redacting it
+            # here too closes that gap; redacting already-redacted text is
+            # a safe no-op.
+            record.exc_text = _safe_redact(record.exc_text, live_secrets)
         if record.stack_info:
             record.stack_info = _safe_redact(record.stack_info, live_secrets)
 

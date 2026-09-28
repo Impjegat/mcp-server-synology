@@ -314,6 +314,35 @@ def test_redacting_filter_suppresses_traceback_rather_than_render_it_raw_on_fail
     assert "LIVE_SID" not in record.exc_text
 
 
+def test_redacting_filter_redacts_an_exc_text_already_populated_before_it_runs():
+    """exc_text can be populated on the record before this filter ever sees
+    it: Formatter.format() caches it the first time ANY handler formats the
+    record, so a different handler (without this filter attached) running
+    first would leave the raw, unredacted traceback cached there. This
+    filter must redact an already-present exc_text too, not just render
+    and redact its own — skipping it because exc_info/exc_text already
+    looks "handled" would fail open into the leak this filter exists to
+    close."""
+    filt = RedactingFilter(lambda: ["LIVE_SID"])
+
+    record = logging.LogRecord(
+        name="test",
+        level=logging.ERROR,
+        pathname=__file__,
+        lineno=1,
+        msg="unexpected error",
+        args=None,
+        exc_info=None,
+    )
+    # Simulate a prior handler's Formatter.format() having already cached
+    # the raw traceback text onto the shared record object.
+    record.exc_text = "Traceback (most recent call last):\n...?_sid=LIVE_SID failed"
+
+    assert filt.filter(record) is True
+    assert "LIVE_SID" not in record.exc_text
+    assert "***REDACTED***" in record.exc_text
+
+
 def test_redacting_filter_suppresses_message_rather_than_leave_it_unredacted_on_failure():
     """If redact() itself somehow raises while scrubbing the rendered
     message, the record must not fall back to the original (potentially
