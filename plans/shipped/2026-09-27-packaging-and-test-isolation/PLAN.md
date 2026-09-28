@@ -1,8 +1,8 @@
 # PR 4: Packaging and test isolation
 
-Status: In progress
+Status: Shipped — PR #6
 Initiated: 2026-09-27
-Implements: `REMEDIATION_PLAN.md` §2 (Keep credentials out of Docker images) and §5 (Validate and prepare installation)
+Implements: [remediation roadmap](../2026-09-27-remediation-roadmap/PLAN.md) §2 (Keep credentials out of Docker images) and §5 (Validate and prepare installation)
 
 ## Why
 

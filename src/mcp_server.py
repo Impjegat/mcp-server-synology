@@ -81,8 +81,9 @@ _CONTAINER_ALL_SUFFIXES = (
 )
 
 # Tools that browse files/shares or read NAS/container monitoring data — the
-# initial installation target REMEDIATION_PLAN.md describes ("file browsing
-# and NAS monitoring"). This is the semantic truth used for the MCP
+# initial installation target plans/shipped/2026-09-27-remediation-roadmap/
+# PLAN.md describes ("file browsing and NAS monitoring"). This is the
+# semantic truth used for the MCP
 # `readOnlyHint` annotation (metadata only — see _annotate_tool): every tool
 # here genuinely performs no writes. It is NOT by itself the restricted-mode
 # allowlist; see _ACCOUNT_ENUMERATION_TOOLS and _is_tool_allowed below for

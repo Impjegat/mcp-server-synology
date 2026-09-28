@@ -1,8 +1,8 @@
 # PR 2: Restricted-mode tool registry
 
-Status: In progress
+Status: Shipped — PR #4
 Initiated: 2026-09-27
-Implements: `REMEDIATION_PLAN.md` §3 (Enforce a restricted operating mode)
+Implements: [remediation roadmap](../2026-09-27-remediation-roadmap/PLAN.md) §3 (Enforce a restricted operating mode)
 
 ## Why
 

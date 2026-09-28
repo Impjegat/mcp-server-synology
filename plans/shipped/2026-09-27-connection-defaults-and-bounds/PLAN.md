@@ -1,8 +1,8 @@
 # PR 3: Connection defaults and bounds
 
-Status: In progress
+Status: Shipped — PR #5
 Initiated: 2026-09-27
-Implements: `REMEDIATION_PLAN.md` §4 (remainder — the auth-specific timeout/retry-rule portion already shipped in PR 1)
+Implements: [remediation roadmap](../2026-09-27-remediation-roadmap/PLAN.md) §4 (remainder — the auth-specific timeout/retry-rule portion already shipped in PR 1)
 
 ## Why
 

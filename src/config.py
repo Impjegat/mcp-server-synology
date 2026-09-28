@@ -105,8 +105,9 @@ class SynologyConfig:
         self.auto_login = os.getenv("AUTO_LOGIN", "true").lower() == "true"
         self.verify_ssl = _parse_verify_ssl(os.getenv("VERIFY_SSL", "true"))
         # Restricted mode: the server exposes only browsing and monitoring
-        # tools by default (REMEDIATION_PLAN.md's stated objective for the
-        # initial installation). Modifying tools (file writes/deletes, user
+        # tools by default (plans/shipped/2026-09-27-remediation-roadmap/
+        # PLAN.md's stated objective for the initial installation).
+        # Modifying tools (file writes/deletes, user
         # and container management, ...) are hidden from discovery and
         # rejected before any NAS request is made. Set to false deliberately
         # to enable the full tool set.
