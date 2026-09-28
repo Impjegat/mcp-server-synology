@@ -76,6 +76,25 @@ def test_redact_masks_a_short_live_secret_unconditionally():
     assert "***REDACTED***" in result
 
 
+def test_redact_does_not_leave_a_partial_remainder_when_one_secret_is_a_substring_of_another():
+    """If one live secret is a substring of another (e.g. a cached device_id
+    that's a prefix of a newer one during a relogin transition), replacing
+    the shorter one first would fragment the longer one's literal text,
+    leaving the non-overlapping remainder of the longer secret exposed as
+    plaintext — since the longer secret's own replacement pass then finds
+    nothing (its literal text no longer exists verbatim in the already-
+    modified result). redact() must process longest-first regardless of
+    the order live_secrets is given in."""
+    text = "token: SID_abc123"
+    result = redact(text, live_secrets=["SID_abc", "SID_abc123"])
+    assert result == "token: ***REDACTED***"
+    assert "123" not in result
+
+    # Order-independent: the same result regardless of which comes first.
+    result2 = redact(text, live_secrets=["SID_abc123", "SID_abc"])
+    assert result2 == "token: ***REDACTED***"
+
+
 def test_redact_still_blanket_replaces_a_long_live_secret():
     """A real session ID/SynoToken/device ID/typical password is always far
     longer than a 2FA code, but this path doesn't depend on length at all —

@@ -55,9 +55,17 @@ def redact(text: Optional[str], *, live_secrets: Iterable[Optional[str]] = ()) -
         return text
 
     result = text
-    for secret in live_secrets:
-        if secret:
-            result = result.replace(secret, _MASK)
+    # Longest first: if one live secret happens to be a substring of
+    # another (e.g. a cached device_id that's a prefix of a newer one
+    # during a relogin transition), replacing the shorter one first would
+    # fragment the longer one's literal text in `result` — and the longer
+    # secret's own replacement pass then finds nothing, since its literal
+    # text no longer exists verbatim, leaving a partial, unredacted
+    # remainder behind. Processing longest-first means a secret's full
+    # span is always masked before any of its substrings get a chance to
+    # split it.
+    for secret in sorted((s for s in live_secrets if s), key=len, reverse=True):
+        result = result.replace(secret, _MASK)
 
     result = _mask_known_params(result)
     return result
