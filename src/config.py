@@ -203,7 +203,8 @@ class SynologyConfig:
             return False
 
     def _restrict_file_permissions(self, path: Path) -> bool:
-        """Best-effort: restrict `path` to the current user only.
+        """Attempt to restrict `path` to the current user only, and report
+        whether that attempt is known to have succeeded.
 
         POSIX: chmod 0600. Windows: shell out to `icacls` to strip
         inherited permissions and grant the current user Full Control,
