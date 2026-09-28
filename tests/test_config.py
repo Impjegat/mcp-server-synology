@@ -194,6 +194,70 @@ class TestSynologyConfig:
 
                 assert SynologyConfig().restricted_mode is False
 
+    @pytest.mark.parametrize("value", ["1", "yes", "true ", "TRUE", "garbage"])
+    def test_restricted_mode_env_var_unrecognized_or_truthy_values_stay_restricted(self, value):
+        """RESTRICTED_MODE must fail closed: before this fix, only the exact
+        string "true" was treated as "on" (a bare `.lower() == "true"`
+        comparison), so `1`, `yes`, or a value with incidental whitespace
+        all silently disabled restricted mode — the only barrier against
+        write actions from the (necessarily administrator) account this
+        server runs as. A value this parser doesn't recognize at all must
+        also stay restricted, not fail open."""
+        reload_config()
+
+        with patch.dict(os.environ, {"RESTRICTED_MODE": value}, clear=True):
+            with patch("config.SETTINGS_FILE", Path("/nonexistent/secrets.json")):
+                with patch.object(Path, "exists", return_value=False):
+                    from config import SynologyConfig
+
+                    assert SynologyConfig().restricted_mode is True
+
+    @pytest.mark.parametrize("value", ["false", "0", "no", " Off "])
+    def test_restricted_mode_env_var_recognizes_falsy_aliases(self, value):
+        reload_config()
+
+        with patch.dict(os.environ, {"RESTRICTED_MODE": value}, clear=True):
+            with patch("config.SETTINGS_FILE", Path("/nonexistent/secrets.json")):
+                with patch.object(Path, "exists", return_value=False):
+                    from config import SynologyConfig
+
+                    assert SynologyConfig().restricted_mode is False
+
+    @pytest.mark.parametrize(
+        "restricted_mode_value,expected",
+        [
+            (None, True),  # JSON null — not a recognized false value
+            ("false", False),  # string form, parsed the same as the env var
+            (False, False),  # JSON boolean, used as-is
+            ("nonsense", True),  # unrecognized string — fails closed
+        ],
+    )
+    def test_restricted_mode_settings_json_value_types(
+        self, tmp_path, restricted_mode_value, expected
+    ):
+        secrets_data = {
+            "synology": {
+                "nas1": {
+                    "host": "192.168.1.100",
+                    "port": 5001,
+                    "username": "admin",
+                    "password": "pass123",
+                }
+            },
+            "server": {"restricted_mode": restricted_mode_value},
+        }
+        secrets_file = tmp_path / "secrets.json"
+        secrets_file.write_text(json.dumps(secrets_data))
+        os.chmod(str(secrets_file), 0o600)
+
+        reload_config()
+
+        with patch.dict(os.environ, {}, clear=True):
+            with patch("config.SETTINGS_FILE", secrets_file):
+                from config import SynologyConfig
+
+                assert SynologyConfig().restricted_mode is expected
+
     def test_verify_ssl_env_var_accepts_ca_bundle_path(self):
         """VERIFY_SSL isn't just true/false — a value that isn't either
         literal string is a CA-bundle path, passed straight through to
@@ -653,6 +717,160 @@ class TestSaveDeviceId:
 
                 cfg = SynologyConfig()
                 assert cfg.save_device_id("does_not_exist", "DID_x") is False
+
+    def test_atomic_write_settings_refuses_when_permission_restriction_fails(self, tmp_path):
+        """If restricting the temp file's permissions fails (e.g. `icacls`
+        erroring on Windows), the write must not proceed — writing the
+        secret-bearing content first and restricting afterward, regardless
+        of whether that restriction succeeded, is exactly the gap that let
+        every configured NAS's password sit in a world/group-readable file.
+        The original settings file must survive untouched, and no
+        half-written or insecurely-permissioned temp file may be left
+        behind."""
+        original_data = {
+            "synology": {
+                "nas1": {
+                    "host": "192.168.1.100",
+                    "port": 5001,
+                    "username": "admin",
+                    "password": "pass123",
+                    "note": "primary",
+                }
+            }
+        }
+        secrets_file = tmp_path / "secrets.json"
+        secrets_file.write_text(json.dumps(original_data))
+        os.chmod(str(secrets_file), 0o600)
+        original_bytes = secrets_file.read_bytes()
+
+        reload_config()
+
+        with patch.dict(os.environ, {}, clear=True):
+            with patch("config.SETTINGS_FILE", secrets_file):
+                from config import SynologyConfig
+
+                cfg = SynologyConfig()
+                with patch.object(cfg, "_restrict_file_permissions", return_value=False):
+                    assert cfg.save_device_id("nas1", "DID_should_not_be_saved") is False
+
+        # Original file untouched — not even the new device_id present.
+        assert secrets_file.read_bytes() == original_bytes
+        assert "device_id" not in json.loads(secrets_file.read_text())["synology"]["nas1"]
+        # No stray temp file left in the directory.
+        leftover = [p for p in tmp_path.iterdir() if p.name != "secrets.json"]
+        assert leftover == []
+
+    def test_atomic_write_settings_uses_unique_temp_filenames(self, tmp_path):
+        """A fixed temp filename (the previous `settings.json.tmp`) lets two
+        concurrent writers collide; each write must use its own unique
+        name."""
+        secrets_data = {
+            "synology": {
+                "nas1": {
+                    "host": "192.168.1.100",
+                    "port": 5001,
+                    "username": "admin",
+                    "password": "pass123",
+                }
+            }
+        }
+        secrets_file = tmp_path / "secrets.json"
+        secrets_file.write_text(json.dumps(secrets_data))
+        os.chmod(str(secrets_file), 0o600)
+
+        reload_config()
+
+        seen_tmp_names = []
+        with patch.dict(os.environ, {}, clear=True):
+            with patch("config.SETTINGS_FILE", secrets_file):
+                from config import SynologyConfig
+
+                cfg = SynologyConfig()
+                real_replace = os.replace
+
+                def _capture_replace(src, dst):
+                    seen_tmp_names.append(Path(src).name)
+                    return real_replace(src, dst)
+
+                with patch("config.os.replace", side_effect=_capture_replace):
+                    assert cfg.save_device_id("nas1", "DID_1") is True
+                    assert cfg.save_device_id("nas1", "DID_2") is True
+
+        assert len(seen_tmp_names) == 2
+        assert seen_tmp_names[0] != seen_tmp_names[1]
+
+
+class TestIterConfiguredSecrets:
+    """Test SynologyConfig.iter_configured_secrets() — the configured
+    (not-yet-necessarily-live) counterpart to auth.iter_live_secrets(),
+    used to redact a configured password/OTP/device token from logs and
+    tool output even before any login using it has happened."""
+
+    def test_yields_settings_json_secrets_across_multiple_nas(self, tmp_path):
+        secrets_data = {
+            "synology": {
+                "nas1": {
+                    "host": "192.168.1.100",
+                    "port": 5001,
+                    "username": "admin",
+                    "password": "pass123",
+                    "otp_code": "111111",
+                    "device_id": "DID_nas1",
+                },
+                "nas2": {
+                    "host": "192.168.1.200",
+                    "port": 5001,
+                    "username": "admin2",
+                    "password": "pass456",
+                },
+            }
+        }
+        secrets_file = tmp_path / "secrets.json"
+        secrets_file.write_text(json.dumps(secrets_data))
+        os.chmod(str(secrets_file), 0o600)
+
+        reload_config()
+
+        with patch.dict(os.environ, {}, clear=True):
+            with patch("config.SETTINGS_FILE", secrets_file):
+                from config import SynologyConfig
+
+                cfg = SynologyConfig()
+                secrets = set(cfg.iter_configured_secrets())
+
+        assert secrets == {"pass123", "111111", "DID_nas1", "pass456"}
+
+    def test_yields_legacy_env_password_and_otp_code(self):
+        reload_config()
+
+        with patch.dict(
+            os.environ,
+            {
+                "SYNOLOGY_URL": "https://nas.example.com:5001",
+                "SYNOLOGY_USERNAME": "admin",
+                "SYNOLOGY_PASSWORD": "legacy_pass",
+                "SYNOLOGY_OTP_CODE": "222222",
+            },
+            clear=True,
+        ):
+            with patch("config.SETTINGS_FILE", Path("/nonexistent/secrets.json")):
+                with patch.object(Path, "exists", return_value=False):
+                    from config import SynologyConfig
+
+                    cfg = SynologyConfig()
+                    secrets = set(cfg.iter_configured_secrets())
+
+        assert secrets == {"legacy_pass", "222222"}
+
+    def test_yields_nothing_when_unconfigured(self):
+        reload_config()
+
+        with patch.dict(os.environ, {}, clear=True):
+            with patch("config.SETTINGS_FILE", Path("/nonexistent/secrets.json")):
+                with patch.object(Path, "exists", return_value=False):
+                    from config import SynologyConfig
+
+                    assert list(SynologyConfig().iter_configured_secrets()) == []
 
 
 def test_config_str_representation():

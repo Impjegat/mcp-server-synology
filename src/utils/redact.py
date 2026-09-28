@@ -58,6 +58,13 @@ def redact(text: Optional[str], *, live_secrets: Iterable[Optional[str]] = ()) -
     return result
 
 
+# Used only to render exception tracebacks via formatException() below —
+# never for the record's own message formatting (Formatter.format() isn't
+# called here, just this one helper method, which doesn't depend on any
+# per-formatter state like fmt/datefmt).
+_TRACEBACK_FORMATTER = logging.Formatter()
+
+
 class RedactingFilter(logging.Filter):
     """Logging filter that redacts known/likely secrets from log records.
 
@@ -79,20 +86,52 @@ class RedactingFilter(logging.Filter):
             # the app — fall back to pattern-only redaction.
             live_secrets = []
 
-        if isinstance(record.msg, str):
-            record.msg = redact(record.msg, live_secrets=live_secrets)
-        # Args are formatted into msg by the logging module using %-style
-        # substitution; redact each arg too in case one carries a secret
-        # value on its own (e.g. logger.warning("token: %s", did)).
-        if record.args:
-            if isinstance(record.args, dict):
-                record.args = {
-                    k: redact(v, live_secrets=live_secrets) if isinstance(v, str) else v
-                    for k, v in record.args.items()
-                }
-            else:
-                record.args = tuple(
-                    redact(a, live_secrets=live_secrets) if isinstance(a, str) else a
-                    for a in record.args
+        # Render the message fully (this is what getMessage() does: str(msg)
+        # % args) and redact the result, rather than redacting record.msg and
+        # each arg separately. A non-string arg — including an exception
+        # object passed as `logger.warning("token: %s", did)` — only ever
+        # becomes text at this %-substitution step, so redacting the pieces
+        # beforehand can't catch a secret that only appears once they're
+        # combined. Clearing record.args afterward stops the logging
+        # module's own formatter from re-applying % substitution to a
+        # message that's already fully rendered.
+        try:
+            record.msg = redact(record.getMessage(), live_secrets=live_secrets)
+            record.args = None
+        except Exception:
+            # getMessage() can raise on a malformed format string (e.g. a
+            # %s with no matching arg). Fall back to redacting msg/args
+            # independently rather than losing the record's redaction.
+            if isinstance(record.msg, str):
+                record.msg = redact(record.msg, live_secrets=live_secrets)
+            if record.args:
+                if isinstance(record.args, dict):
+                    record.args = {
+                        k: redact(v, live_secrets=live_secrets) if isinstance(v, str) else v
+                        for k, v in record.args.items()
+                    }
+                else:
+                    record.args = tuple(
+                        redact(a, live_secrets=live_secrets) if isinstance(a, str) else a
+                        for a in record.args
+                    )
+
+        # A traceback (exc_info=True) or an explicit stack trace
+        # (stack_info=True) is appended by Formatter.format() separately
+        # from the message above, and can itself carry a secret — most
+        # commonly a `requests` exception's str(), which often embeds the
+        # full request URL including `_sid=`. Pre-render and redact it here
+        # into record.exc_text; the stdlib formatter uses that pre-filled
+        # value instead of re-rendering the raw (unredacted) traceback.
+        if record.exc_info and not record.exc_text:
+            try:
+                record.exc_text = redact(
+                    _TRACEBACK_FORMATTER.formatException(record.exc_info),
+                    live_secrets=live_secrets,
                 )
+            except Exception:
+                pass
+        if record.stack_info:
+            record.stack_info = redact(record.stack_info, live_secrets=live_secrets)
+
         return True

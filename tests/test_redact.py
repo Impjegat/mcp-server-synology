@@ -72,7 +72,12 @@ def test_redacting_filter_scrubs_log_message_and_args():
         exc_info=None,
     )
     assert filt.filter(record) is True
-    assert record.args[0] == "***REDACTED***"
+    # The filter now redacts the fully-rendered message (msg % args) rather
+    # than each arg independently, and clears args so the logging module's
+    # own formatter doesn't re-apply % substitution to already-rendered
+    # text — record.getMessage() is what a handler actually emits.
+    assert record.args is None
+    assert record.getMessage() == "session ***REDACTED*** established"
 
     record2 = logging.LogRecord(
         name="test",
@@ -85,6 +90,64 @@ def test_redacting_filter_scrubs_log_message_and_args():
     )
     assert filt.filter(record2) is True
     assert "LIVE_SID" not in record2.msg
+
+
+def test_redacting_filter_scrubs_a_non_string_arg_like_an_exception_object():
+    """A secret can reach the log only once %-substitution turns a non-string
+    arg into text (e.g. `logger.warning("failed: %s", some_exception)`), so
+    redacting args independently — each of which is skipped for not being a
+    plain string — can't catch this; only redacting the rendered message can."""
+    secrets = ["LIVE_SID"]
+    filt = RedactingFilter(lambda: secrets)
+
+    record = logging.LogRecord(
+        name="test",
+        level=logging.WARNING,
+        pathname=__file__,
+        lineno=1,
+        msg="request failed: %s",
+        args=(ConnectionError("could not reach https://nas:5001/webapi/?_sid=LIVE_SID"),),
+        exc_info=None,
+    )
+    assert filt.filter(record) is True
+    assert "LIVE_SID" not in record.getMessage()
+    assert "***REDACTED***" in record.getMessage()
+
+
+def test_redacting_filter_scrubs_a_chained_exception_traceback():
+    """A traceback logged via exc_info=True is appended by the stdlib
+    Formatter separately from the message, and most commonly carries a
+    secret through a `requests` exception's own str() (which often embeds
+    the full request URL, including `_sid=`) — including when that
+    exception is chained (`raise ... from cause`), which is exactly the
+    shape `raise Exception(...)` from an `except requests.RequestException`
+    block produces throughout this codebase."""
+    secrets = ["LIVE_SID"]
+    filt = RedactingFilter(lambda: secrets)
+
+    try:
+        try:
+            raise ConnectionError("GET https://nas:5001/webapi/?_sid=LIVE_SID failed")
+        except ConnectionError as cause:
+            raise Exception("Network error") from cause
+    except Exception:
+        exc_info = sys.exc_info()
+
+    record = logging.LogRecord(
+        name="test",
+        level=logging.ERROR,
+        pathname=__file__,
+        lineno=1,
+        msg="unexpected error",
+        args=None,
+        exc_info=exc_info,
+    )
+    assert filt.filter(record) is True
+    assert "LIVE_SID" not in record.exc_text
+    assert "***REDACTED***" in record.exc_text
+    # The chained cause's own traceback text is part of the same rendered
+    # block, so it must be scrubbed too, not just the outer exception.
+    assert "ConnectionError" in record.exc_text  # sanity: it's really there
 
 
 def test_redacting_filter_never_raises_on_broken_provider():

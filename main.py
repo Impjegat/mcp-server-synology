@@ -48,9 +48,18 @@ def setup_logging(level: str = "INFO"):
     )
 
     from auth.synology_auth import iter_live_secrets
+    from config import config
     from utils.redact import RedactingFilter
 
-    redacting_filter = RedactingFilter(iter_live_secrets)
+    def _iter_all_secrets():
+        # Live secrets (session IDs, SynoTokens, device IDs — only exist
+        # post-login) plus configured-but-not-yet-live ones (passwords, OTP
+        # codes, trusted-device tokens from settings.json/.env), so a
+        # configured password is redacted even before the first login.
+        yield from iter_live_secrets()
+        yield from config.iter_configured_secrets()
+
+    redacting_filter = RedactingFilter(_iter_all_secrets)
     for handler in logging.getLogger().handlers:
         handler.addFilter(redacting_filter)
 
