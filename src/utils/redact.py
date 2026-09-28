@@ -139,15 +139,21 @@ class RedactingFilter(logging.Filter):
             # this fallback hits its own edge case.
             if isinstance(record.msg, str):
                 record.msg = _safe_redact(record.msg, live_secrets)
+            # Redact every arg regardless of type, not just string ones — a
+            # non-string arg (e.g. an exception object) only ever becomes
+            # text once %-substituted, which is exactly the operation that
+            # just failed; skipping it here (the previous behavior) left it
+            # unredacted, and it can still be a live secret-bearing value
+            # even though getMessage() couldn't render it into the message.
             if record.args:
                 if isinstance(record.args, dict):
                     record.args = {
-                        k: _safe_redact(v, live_secrets) if isinstance(v, str) else v
+                        k: _safe_redact(v if isinstance(v, str) else str(v), live_secrets)
                         for k, v in record.args.items()
                     }
                 else:
                     record.args = tuple(
-                        _safe_redact(a, live_secrets) if isinstance(a, str) else a
+                        _safe_redact(a if isinstance(a, str) else str(a), live_secrets)
                         for a in record.args
                     )
         else:

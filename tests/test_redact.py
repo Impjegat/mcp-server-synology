@@ -6,6 +6,8 @@ import logging
 import sys
 from pathlib import Path
 
+import pytest
+
 # Add src directory to Python path (mirrors conftest.py's own setup, so this
 # file also runs standalone via `pytest tests/test_redact.py`).
 src_path = Path(__file__).parent.parent / "src"
@@ -138,6 +140,32 @@ def test_redacting_filter_scrubs_a_non_string_arg_like_an_exception_object():
     assert filt.filter(record) is True
     assert "LIVE_SID" not in record.getMessage()
     assert "***REDACTED***" in record.getMessage()
+
+
+def test_redacting_filter_scrubs_a_non_string_arg_in_the_malformed_format_fallback():
+    """When getMessage() itself raises (a malformed format string — here,
+    too few args for its placeholders), the filter falls back to redacting
+    msg/args independently. A non-string arg must still be redacted in that
+    fallback, not skipped for failing an `isinstance(a, str)` check — it
+    can carry a live secret in its own str() form regardless of whether
+    %-substitution against the (broken) format string ever succeeds."""
+    secrets = ["LIVE_SID"]
+    filt = RedactingFilter(lambda: secrets)
+
+    record = logging.LogRecord(
+        name="test",
+        level=logging.WARNING,
+        pathname=__file__,
+        lineno=1,
+        msg="count: %d and %s",  # two placeholders
+        args=(ConnectionError("could not reach https://nas:5001/webapi/?_sid=LIVE_SID"),),
+        exc_info=None,
+    )
+    with pytest.raises(TypeError):
+        record.getMessage()  # sanity: this really is the malformed-format case
+
+    assert filt.filter(record) is True
+    assert all("LIVE_SID" not in str(a) for a in record.args)
 
 
 def test_redacting_filter_scrubs_a_chained_exception_traceback():
