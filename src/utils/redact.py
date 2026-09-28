@@ -100,6 +100,23 @@ def _safe_redact(text: Optional[str], live_secrets: Iterable[Optional[str]]) -> 
         return _REDACTION_FAILED_PLACEHOLDER
 
 
+def _safe_str_and_redact(value, live_secrets: Iterable[Optional[str]]) -> Optional[str]:
+    """Like `_safe_redact()`, but also accepts a non-string `value` and
+    converts it first — itself guarded, since a pathological `__str__`
+    (or `__repr__`, which `str()` falls back to) can raise. Used for a log
+    record's non-string args, which only ever become text once %-formatted
+    or explicitly converted, so converting them is unavoidable — but that
+    conversion must not be allowed to raise unguarded any more than
+    `redact()` itself is."""
+    if isinstance(value, str):
+        return _safe_redact(value, live_secrets)
+    try:
+        text = str(value)
+    except Exception:
+        return _REDACTION_FAILED_PLACEHOLDER
+    return _safe_redact(text, live_secrets)
+
+
 class RedactingFilter(logging.Filter):
     """Logging filter that redacts known/likely secrets from log records.
 
@@ -149,14 +166,10 @@ class RedactingFilter(logging.Filter):
             if record.args:
                 if isinstance(record.args, dict):
                     record.args = {
-                        k: _safe_redact(v if isinstance(v, str) else str(v), live_secrets)
-                        for k, v in record.args.items()
+                        k: _safe_str_and_redact(v, live_secrets) for k, v in record.args.items()
                     }
                 else:
-                    record.args = tuple(
-                        _safe_redact(a if isinstance(a, str) else str(a), live_secrets)
-                        for a in record.args
-                    )
+                    record.args = tuple(_safe_str_and_redact(a, live_secrets) for a in record.args)
         else:
             record.msg = _safe_redact(formatted, live_secrets)
             record.args = None

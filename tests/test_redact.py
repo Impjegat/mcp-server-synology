@@ -186,6 +186,38 @@ def test_redacting_filter_scrubs_a_non_string_arg_in_the_malformed_format_fallba
     assert all("LIVE_SID" not in str(a) for a in record.args)
 
 
+def test_redacting_filter_survives_an_arg_whose_str_raises_in_the_malformed_format_fallback():
+    """A non-string arg's own str() (or the __repr__ it falls back to) can
+    itself raise for a pathological object. In the malformed-format-string
+    fallback, that conversion happens before the value reaches redact(), so
+    it must be guarded there too, the same way redact() itself is — a
+    failure here must not raise out of the filter, and must not fall back
+    to some other unredacted representation of the value."""
+    secrets = ["LIVE_SID"]
+    filt = RedactingFilter(lambda: secrets)
+
+    class Unstringable:
+        def __str__(self):
+            raise RuntimeError("boom")
+
+        def __repr__(self):
+            raise RuntimeError("boom")
+
+    record = logging.LogRecord(
+        name="test",
+        level=logging.WARNING,
+        pathname=__file__,
+        lineno=1,
+        msg="count: %d and %s",  # two placeholders, one arg supplied
+        args=(Unstringable(),),
+        exc_info=None,
+    )
+    with pytest.raises(TypeError):
+        record.getMessage()  # sanity: this really is the malformed-format case
+
+    assert filt.filter(record) is True  # must not raise
+
+
 def test_redacting_filter_scrubs_a_chained_exception_traceback():
     """A traceback logged via exc_info=True is appended by the stdlib
     Formatter separately from the message, and most commonly carries a
