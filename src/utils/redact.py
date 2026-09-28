@@ -14,21 +14,6 @@ from typing import Iterable, Optional
 
 _MASK = "***REDACTED***"
 
-# A purely-numeric live-secret value shorter than this is excluded from the
-# verbatim substring pass in redact() below (the key=value pattern pass
-# further down still catches it in that specific shape, e.g.
-# `otp_code=123456`). DSM's 2FA code is always exactly 6 digits, and
-# legitimate numeric output (a file size, a port number, a timestamp
-# fragment, ...) commonly contains the same digits by pure chance — masking
-# every occurrence corrupts that output rather than protecting anything.
-# This is deliberately narrower than "any short secret": a short
-# *non-numeric* value (a short configured password, say) doesn't have the
-# same collision risk against arbitrary text, and is exactly the kind of
-# value this module exists to protect, so it's still masked regardless of
-# length. Session IDs/SynoTokens/device IDs are both non-numeric and always
-# far longer than this in practice, so neither exclusion affects them.
-_MIN_NUMERIC_SECRET_LENGTH = 8
-
 # Matches `key=value` for known-sensitive query/body parameter names, stopping
 # at the next `&`, whitespace, or end of string. Covers values we weren't
 # told about in advance (e.g. a stale SID baked into a cached exception, or a
@@ -51,10 +36,15 @@ def redact(text: Optional[str], *, live_secrets: Iterable[Optional[str]] = ()) -
     Args:
         text: The string to scrub. None passes through unchanged.
         live_secrets: Concrete secret values known to be currently live
-            (session IDs, SynoTokens, device IDs, configured passwords)
-            across all connected NAS units. Each non-empty value is masked
-            wherever it appears verbatim, even outside a `key=value` shape
-            (e.g. in a "Session ID: <sid>" log line).
+            (session IDs, SynoTokens, device IDs, configured passwords —
+            deliberately not one-shot OTP codes, which are always short
+            and purely numeric: see `config.iter_configured_secrets`'s
+            docstring for why blanket-masking those does more harm than
+            good) across all connected NAS units. Each non-empty value is
+            masked wherever it appears verbatim, even outside a `key=value`
+            shape (e.g. in a "Session ID: <sid>" log line). Callers are
+            responsible for not passing a value that's unsafe to
+            blanket-mask this way.
 
     Returns:
         The scrubbed text, or the original value unchanged if it wasn't a
@@ -66,11 +56,8 @@ def redact(text: Optional[str], *, live_secrets: Iterable[Optional[str]] = ()) -
 
     result = text
     for secret in live_secrets:
-        if not secret:
-            continue
-        if secret.isdigit() and len(secret) < _MIN_NUMERIC_SECRET_LENGTH:
-            continue
-        result = result.replace(secret, _MASK)
+        if secret:
+            result = result.replace(secret, _MASK)
 
     result = _mask_known_params(result)
     return result

@@ -75,7 +75,8 @@ def iter_all_secrets():
 
     Chains `iter_live_secrets()` (session IDs, SynoTokens, device IDs —
     only exist post-login) with `config.iter_configured_secrets()`
-    (passwords, OTP codes, trusted-device tokens from settings.json/.env),
+    (passwords and trusted-device tokens from settings.json/.env — see
+    that method's docstring for why OTP codes are deliberately excluded),
     so a configured secret is redacted from logs and tool output even
     before any login using it has happened. The single place both
     `main.py`'s log filter and `mcp_server.py`'s tool-response redaction

@@ -477,32 +477,42 @@ class SynologyConfig:
         )
 
     def iter_configured_secrets(self):
-        """Yield every configured (not necessarily yet-live) secret value.
+        """Yield every configured (not necessarily yet-live) secret value
+        that's safe to blanket-mask as a verbatim substring wherever it
+        appears in logs or tool output.
 
-        Covers passwords, one-shot OTP codes, and trusted-device tokens from
-        settings.json's per-NAS entries, plus the legacy `.env` single-NAS
-        path — across both, whether or not a session has ever been
-        established. Used to redact these from logs and tool output even
-        before login makes them "live" (see `auth.iter_live_secrets`, which
-        covers session IDs/SynoTokens/device IDs that only exist post-login).
+        Covers passwords and trusted-device tokens from settings.json's
+        per-NAS entries, plus the legacy `.env` single-NAS password —
+        across both, whether or not a session has ever been established.
+        Used to redact these even before login makes them "live" (see
+        `auth.iter_live_secrets`, which covers session IDs/SynoTokens/
+        device IDs that only exist post-login).
+
+        Deliberately excludes `otp_code`: DSM's 2FA code is always exactly
+        6 digits, and blanket-masking a short, purely-numeric value as a
+        substring risks corrupting unrelated legitimate output that
+        happens to contain the same digits (a file size, a port number, a
+        timestamp fragment, ...) rather than protecting anything — it's
+        one-shot and typically stale by the time anything would need
+        redacting, and its actual leak vector (a login request's URL/body)
+        is already covered unconditionally by redact()'s own `otp_code=`
+        key=value pattern, independent of this list.
 
         Always yields `str`: settings.json is user-edited JSON, and nothing
-        stops `otp_code` (or any of these) from being written as a bare
-        JSON number (`"otp_code": 123456`) rather than a quoted string —
-        valid JSON, but redact()'s `len()`/`str.replace()` calls would raise
-        on a non-string value, which would surface as an unhandled
-        exception from inside an error handler wherever this feeds
-        `redact()` (see `_dispatch_tool_call`'s except clause).
+        stops `password`/`device_id` from being written as a bare JSON
+        number rather than a quoted string — valid JSON, but redact()'s
+        `str.replace()` would raise on a non-string value, which would
+        surface as an unhandled exception from inside an error handler
+        wherever this feeds `redact()` (see `_dispatch_tool_call`'s except
+        clause).
         """
         for nas_cfg in self.nas_configs.values():
-            for key in ("password", "otp_code", "device_id"):
+            for key in ("password", "device_id"):
                 value = nas_cfg.get(key)
                 if value:
                     yield str(value)
         if self.synology_password:
             yield self.synology_password
-        if self.synology_otp_code:
-            yield self.synology_otp_code
 
     def get_synology_config(self, nas_name: Optional[str] = None) -> Dict[str, Any]:
         """Get connection config for a specific NAS (or the first/legacy one).

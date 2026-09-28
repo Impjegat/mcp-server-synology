@@ -803,8 +803,13 @@ class TestSaveDeviceId:
 class TestIterConfiguredSecrets:
     """Test SynologyConfig.iter_configured_secrets() — the configured
     (not-yet-necessarily-live) counterpart to auth.iter_live_secrets(),
-    used to redact a configured password/OTP/device token from logs and
-    tool output even before any login using it has happened."""
+    used to redact a configured password/device token from logs and tool
+    output even before any login using it has happened. Deliberately
+    excludes otp_code — see the method's own docstring for why blanket
+    substring-masking a value that's always short and purely numeric does
+    more harm (corrupting unrelated legitimate output) than good (its
+    actual leak vector is already covered by redact()'s key=value pattern,
+    independent of this list)."""
 
     def test_yields_settings_json_secrets_across_multiple_nas(self, tmp_path):
         secrets_data = {
@@ -838,9 +843,38 @@ class TestIterConfiguredSecrets:
                 cfg = SynologyConfig()
                 secrets = set(cfg.iter_configured_secrets())
 
-        assert secrets == {"pass123", "111111", "DID_nas1", "pass456"}
+        # otp_code's "111111" is deliberately absent.
+        assert secrets == {"pass123", "DID_nas1", "pass456"}
 
-    def test_yields_legacy_env_password_and_otp_code(self):
+    def test_excludes_otp_code_even_when_it_is_the_only_secret_configured(self, tmp_path):
+        secrets_data = {
+            "synology": {
+                "nas1": {
+                    "host": "192.168.1.100",
+                    "port": 5001,
+                    "username": "admin",
+                    "password": "pass123",
+                    "otp_code": "111111",
+                }
+            }
+        }
+        secrets_file = tmp_path / "secrets.json"
+        secrets_file.write_text(json.dumps(secrets_data))
+        os.chmod(str(secrets_file), 0o600)
+
+        reload_config()
+
+        with patch.dict(os.environ, {}, clear=True):
+            with patch("config.SETTINGS_FILE", secrets_file):
+                from config import SynologyConfig
+
+                cfg = SynologyConfig()
+                secrets = set(cfg.iter_configured_secrets())
+
+        assert "111111" not in secrets
+        assert secrets == {"pass123"}
+
+    def test_yields_legacy_env_password_but_not_otp_code(self):
         reload_config()
 
         with patch.dict(
@@ -860,7 +894,7 @@ class TestIterConfiguredSecrets:
                     cfg = SynologyConfig()
                     secrets = set(cfg.iter_configured_secrets())
 
-        assert secrets == {"legacy_pass", "222222"}
+        assert secrets == {"legacy_pass"}
 
     def test_yields_nothing_when_unconfigured(self):
         reload_config()
@@ -873,12 +907,12 @@ class TestIterConfiguredSecrets:
                     assert list(SynologyConfig().iter_configured_secrets()) == []
 
     def test_coerces_a_bare_json_number_to_a_string(self, tmp_path):
-        """settings.json is user-edited JSON, and nothing stops otp_code
-        from being written as a bare number (`"otp_code": 123456`) rather
-        than a quoted string — valid JSON, but redact()'s len()/str.replace
-        calls would raise on a non-string value, which would surface as an
-        unhandled exception from inside an error handler wherever this
-        feeds redact() (see mcp_server.py's _dispatch_tool_call)."""
+        """settings.json is user-edited JSON, and nothing stops password or
+        device_id from being written as a bare number rather than a quoted
+        string — valid JSON, but redact()'s str.replace() call would raise
+        on a non-string value, which would surface as an unhandled
+        exception from inside an error handler wherever this feeds
+        redact() (see mcp_server.py's _dispatch_tool_call)."""
         secrets_data = {
             "synology": {
                 "nas1": {
@@ -886,7 +920,7 @@ class TestIterConfiguredSecrets:
                     "port": 5001,
                     "username": "admin",
                     "password": "pass123",
-                    "otp_code": 654321,  # bare JSON number, not a string
+                    "device_id": 87654321,  # bare JSON number, not a string
                 }
             }
         }
@@ -904,7 +938,7 @@ class TestIterConfiguredSecrets:
                 secrets = list(cfg.iter_configured_secrets())
 
         assert all(isinstance(s, str) for s in secrets)
-        assert "654321" in secrets
+        assert "87654321" in secrets
 
 
 def test_config_str_representation():

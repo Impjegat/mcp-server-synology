@@ -60,32 +60,16 @@ def test_redact_passes_through_non_string_and_none():
     assert redact(42) == 42  # type: ignore[arg-type]
 
 
-def test_redact_does_not_blanket_replace_a_short_numeric_secret():
-    """A short, purely-numeric live secret — concretely, a DSM 2FA code,
-    always exactly 6 digits — must not be masked as a bare substring: doing
-    so risks corrupting unrelated legitimate output that happens to contain
-    the same digits (a file size, a port number, a timestamp fragment,
-    ...). The key=value pattern pass still catches it in that specific
-    shape, which is the actual leak vector for a value like this."""
-    text = "File size: 123456 bytes, port 123456"
-    result = redact(text, live_secrets=["123456"])
-    assert result == text  # untouched — not masked as a bare substring
-
-    # But still caught via the key=value pattern when it's actually in a
-    # leak-shaped position, independent of the live_secrets list.
-    result2 = redact("otp_code=123456&api=SYNO.API.Auth", live_secrets=[])
-    assert "123456" not in result2
-
-
-def test_redact_still_blanket_replaces_a_short_non_numeric_secret():
-    """The short-value exclusion is deliberately narrow — only a purely
-    numeric value gets it, since only that shape realistically collides
-    with unrelated legitimate output (file sizes, ports, ...). A short
-    *non-numeric* secret, most concretely a weak or short configured
-    password, doesn't have that collision risk and is exactly the kind of
-    value this module exists to protect — it must still be masked
-    regardless of length, everywhere it appears, not only in a key=value
-    shape."""
+def test_redact_masks_a_short_live_secret_unconditionally():
+    """redact() itself applies no length or shape exception to live_secrets
+    — every non-empty value is masked verbatim, however short. A DSM 2FA
+    code (always exactly 6 digits) has the same collision risk as any other
+    short value pasted into arbitrary text, but that risk is handled by
+    callers choosing what to pass, not by redact() second-guessing them:
+    see `config.iter_configured_secrets`, which deliberately never yields
+    an otp_code for exactly this reason. redact() staying unconditional
+    keeps every other short secret (a short configured password, say) — the
+    values this module actually exists to protect — fully covered."""
     text = "Login attempt with note: pw1"
     result = redact(text, live_secrets=["pw1"])
     assert "pw1" not in result
@@ -94,8 +78,8 @@ def test_redact_still_blanket_replaces_a_short_non_numeric_secret():
 
 def test_redact_still_blanket_replaces_a_long_live_secret():
     """A real session ID/SynoToken/device ID/typical password is always far
-    longer than the short-numeric-value guard's threshold (and non-numeric
-    besides), so this doesn't weaken that redaction path."""
+    longer than a 2FA code, but this path doesn't depend on length at all —
+    included for symmetry with the short-secret case above."""
     text = "Session ID: SID_abcdefgh123"
     result = redact(text, live_secrets=["SID_abcdefgh123"])
     assert "SID_abcdefgh123" not in result
