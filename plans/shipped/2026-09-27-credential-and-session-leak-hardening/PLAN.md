@@ -1,13 +1,13 @@
 # PR 1: Credential-and-session-leak hardening
 
-Status: Implemented
+Status: Shipped — PR #2
 Initiated: 2026-09-27
 GitHub PR: [Impjegat/mcp-server-synology#2](https://github.com/Impjegat/mcp-server-synology/pull/2)
-Implements: `REMEDIATION_PLAN.md` §1 (Remove credentials and tokens from output), plus the timeout/retry-rule portion of §4 that's specific to `src/auth/synology_auth.py`.
+Implements: [remediation roadmap](../2026-09-27-remediation-roadmap/PLAN.md) §1 (Remove credentials and tokens from output), plus the timeout/retry-rule portion of §4 that's specific to `src/auth/synology_auth.py`.
 
 ## Why
 
-The remediation review (see repo root `REMEDIATION_PLAN.md`) found that DSM session IDs, SynoTokens, trusted-device tokens, and (via exception text) passwords can all reach MCP tool output and process logs today. Login also sends the password/OTP/device-token in a URL query string, and its API-version-fallback retry treats several genuine authentication-outcome errors (disabled account, IP auto-blocked, 2FA required) as reasons to keep retrying, which resubmits the password each time. This PR closes those paths before any of the other remediation work (restricted mode, connection defaults, packaging) lands, since the account this server runs as is a dedicated NAS administrator — leaking its credentials or session is the highest-severity failure mode in scope.
+The remediation review (see the [remediation roadmap](../2026-09-27-remediation-roadmap/PLAN.md)) found that DSM session IDs, SynoTokens, trusted-device tokens, and (via exception text) passwords can all reach MCP tool output and process logs today. Login also sends the password/OTP/device-token in a URL query string, and its API-version-fallback retry treats several genuine authentication-outcome errors (disabled account, IP auto-blocked, 2FA required) as reasons to keep retrying, which resubmits the password each time. This PR closes those paths before any of the other remediation work (restricted mode, connection defaults, packaging) lands, since the account this server runs as is a dedicated NAS administrator — leaking its credentials or session is the highest-severity failure mode in scope.
 
 ## Changes
 
@@ -38,7 +38,7 @@ The remediation review (see repo root `REMEDIATION_PLAN.md`) found that DSM sess
 
 ## Scope note: one test deferred to PR 3
 
-The original design listed an `omitted port defaults to 5001` test under this PR's tests. That fix (`config.py`'s `port = nas_info.get("port", 5000)` → `5001`) is `REMEDIATION_PLAN.md` §4 scope, assigned to PR 3 (`connection-defaults-and-bounds`), not this one — PR1 doesn't touch the port default. Adding the test here without the fix would ship a deliberately red test, so it's deferred to land together with its fix in PR 3.
+The original design listed an `omitted port defaults to 5001` test under this PR's tests. That fix (`config.py`'s `port = nas_info.get("port", 5000)` → `5001`) is [remediation roadmap](../2026-09-27-remediation-roadmap/PLAN.md) §4 scope, assigned to PR 3 (`connection-defaults-and-bounds`), not this one — PR1 doesn't touch the port default. Adding the test here without the fix would ship a deliberately red test, so it's deferred to land together with its fix in PR 3.
 
 ## Review round 1 (GitHub PR review, `@claude review this`)
 
@@ -53,10 +53,10 @@ New tests: `test_logout_sends_session_id_via_post_not_url`, a boundary-anchoring
 
 ## Result
 
-All changes above are implemented, tested, and committed. See the top-level `REMEDIATION_PLAN.md` for how this fits into the overall roadmap.
+All changes above are implemented, tested, and committed. See the [remediation roadmap](../2026-09-27-remediation-roadmap/PLAN.md) for how this fits into the overall roadmap.
 
 ## Out of scope (tracked separately)
 
-- The tool registry / restricted-mode work (`REMEDIATION_PLAN.md` §3) — separate PR, since it's a larger, independent surface (dispatch unification, deny-by-default enforcement).
+- The tool registry / restricted-mode work ([remediation roadmap](../2026-09-27-remediation-roadmap/PLAN.md) §3) — separate PR, since it's a larger, independent surface (dispatch unification, deny-by-default enforcement).
 - Port defaults, CA-bundle support, `search_files`/`get_file_content` bounds (§4 remainder) — separate PR.
 - Docker/packaging and test-isolation-ordering fixes (§2, §5) — separate PR.
