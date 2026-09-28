@@ -69,7 +69,7 @@ def redact(text: Optional[str], *, live_secrets: Iterable[Optional[str]] = ()) -
 # per-formatter state like fmt/datefmt).
 _TRACEBACK_FORMATTER = logging.Formatter()
 
-_REDACTION_FAILED_PLACEHOLDER = "<redaction failed — content suppressed>"
+_REDACTION_FAILED_PLACEHOLDER = "<redaction failed - content suppressed>"
 
 
 def _safe_redact(text: Optional[str], live_secrets: Iterable[Optional[str]]) -> Optional[str]:
