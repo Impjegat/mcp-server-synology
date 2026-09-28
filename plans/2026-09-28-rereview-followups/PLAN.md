@@ -26,7 +26,7 @@ Not included (scope decisions, not bugs):
 
 ## PRs
 
-1. [`plans/shipped/2026-09-28-rereview-security-fixes/`](../shipped/2026-09-28-rereview-security-fixes/PLAN.md) — findings 3, 1, 2.
+1. [`plans/shipped/2026-09-28-rereview-security-fixes/`](../shipped/2026-09-28-rereview-security-fixes/PLAN.md) — findings 3, 1, 2. PR: [#9](https://github.com/Impjegat/mcp-server-synology/pull/9).
 2. `plans/shipped/2026-09-28-rereview-reliability-fixes/` — findings 4, 5, 6.
 3. `plans/shipped/2026-09-28-windows-test-isolation/` — finding 7.
 

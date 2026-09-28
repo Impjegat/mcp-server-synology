@@ -1,7 +1,8 @@
 # PR: Rereview security fixes
 
-Status: In progress
+Status: Shipped — PR #9
 Initiated: 2026-09-28
+GitHub PR: [Impjegat/mcp-server-synology#9](https://github.com/Impjegat/mcp-server-synology/pull/9)
 Implements: findings 1, 2, 3 from [`REVIEW_REPORT.md`](../../2026-09-28-rereview-followups/REVIEW_REPORT.md) — see [the follow-ups plan](../../2026-09-28-rereview-followups/PLAN.md) for the full verdict table
 
 ## Why
