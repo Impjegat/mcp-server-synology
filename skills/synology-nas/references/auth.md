@@ -24,7 +24,7 @@ Don't preface a workflow with `synology_login`. It's noise 99% of the time and c
 Every operational tool accepts:
 
 - `nas_name` — the identifier from settings.json (e.g., `"nas1"`, `"backup"`). Preferred.
-- `base_url` — full URL like `"http://192.168.1.100:5000"`. Fallback when the NAS isn't configured.
+- `base_url` — full HTTPS URL like `"https://192.168.1.100:5001"`. Fallback when the NAS isn't configured. Plain `http://` is rejected.
 
 ### Picking a target
 
@@ -45,7 +45,7 @@ Lives at `~/.config/synology-mcp/settings.json` (XDG standard). The file require
 {
   "synology": {
     "nas1": {
-      "host": "192.168.1.100", "port": 5000,
+      "host": "192.168.1.100", "port": 5001,
       "username": "...", "password": "...",
       "note": "Primary",
       "otp_code": "123456",
@@ -56,14 +56,14 @@ Lives at `~/.config/synology-mcp/settings.json` (XDG standard). The file require
 }
 ```
 
-`otp_code` and `device_id` are both optional. `device_id` wins over `otp_code`. Workflow: set `otp_code` once → start the server → copy the returned `did` into `device_id` → delete `otp_code`. From then on, OTP is no longer needed.
+`otp_code` and `device_id` are both optional. `device_id` wins over `otp_code`. Workflow: set `otp_code` once → start the server with auto-login enabled → on the first successful login the server saves the device token into `settings.json` itself (it's never logged or returned, per the credential-handling policy — there's nothing to copy by hand) → `otp_code` is now redundant and can be deleted. From then on, OTP is no longer needed.
 
-Port 5001 enables HTTPS; anything else uses HTTP. The `note` is for the user's reference — surface it when listing NAS units to a user, since human-readable notes ("primary", "backup") are easier to reason about than `nas1`/`nas2`.
+Every connection is HTTPS-only regardless of port — there is no HTTP fallback. 5001 is DSM's default HTTPS port (and the default here when `port` is omitted); a custom port still connects over HTTPS. The `note` is for the user's reference — surface it when listing NAS units to a user, since human-readable notes ("primary", "backup") are easier to reason about than `nas1`/`nas2`.
 
 ## Gotchas
 
 - **2FA / OTP**: the server supports DSM accounts with 2FA enabled. Two ways to log in:
-  - Interactive (one-shot): call `synology_login` with an `otp_code` argument. DSM returns a `did` in the response — that value can be pasted into `settings.json` as `device_id` for the next process start.
+  - Interactive (one-shot): call `synology_login` with an `otp_code` argument. DSM issues a device token on success, but the tool never returns, logs, or persists it (credential-handling policy) — there's no way to retrieve it from this call, so don't retry expecting one. Every future interactive login needs a fresh OTP code.
   - Persistent: store `device_id` (long-lived trusted-device token) per-NAS in `settings.json`. Auto-login then skips OTP, and silent re-login after DSM error 119 also uses the device token. When `device_id` is set, `otp_code` is ignored.
   For `.env` legacy single-NAS, `SYNOLOGY_OTP_CODE` is honored as a one-shot code on first login; for ongoing reuse, migrate to `settings.json`.
 - **Session expiry**: long-idle sessions can be invalidated by DSM. If a tool returns a session error, re-running after a `synology_login` usually fixes it. Don't loop on retry — diagnose with `synology_status` first.

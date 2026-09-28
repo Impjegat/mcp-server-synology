@@ -13,7 +13,7 @@ class SynologyContainer:
         self,
         base_url: str,
         session_id: str,
-        verify_ssl: bool = False,
+        verify_ssl: bool = True,
         syno_token: Optional[str] = None,
     ):
         self._api = SynologyAPIClient(base_url, session_id, verify_ssl, syno_token=syno_token)

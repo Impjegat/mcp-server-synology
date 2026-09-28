@@ -6,8 +6,25 @@ from typing import Any, Callable, Dict, Optional, Tuple
 
 import requests
 
+from utils.redact import redact
+
 logger = logging.getLogger(__name__)
 
+
+# DSM login error codes that mean "DSM made an authentication decision" —
+# account disabled (401), permission denied (402), 2SV code required/wrong
+# (403/404/406), IP auto-blocked (407), or password-expiry states (408-410).
+# None of these are fixed by retrying with a different API version, and
+# retrying anyway means resubmitting the password/OTP each time, which is
+# exactly the pattern DSM's Auto Block watches for. Only a
+# parameter/API/method/version-not-supported error (101-104) or a transport
+# exception should fall through to the next API version.
+_AUTH_OUTCOME_ERROR_CODES = {400, 401, 402, 403, 404, 406, 407, 408, 409, 410}
+
+# Connect/read timeout for the login and logout requests: short enough that
+# an unreachable NAS fails fast instead of hanging the server startup, long
+# enough for a slow DSM box to answer.
+_AUTH_TIMEOUT = (5, 10)
 
 # Module-level registry of SynologyAuth instances, keyed by base_url.
 # Used by SynologyAPIClient to perform transparent session re-auth when DSM
@@ -26,10 +43,35 @@ def get_auth_for_url(base_url: str) -> Optional["SynologyAuth"]:
     return _AUTH_REGISTRY.get(base_url.rstrip("/"))
 
 
+def iter_live_secrets():
+    """Yield every currently-live secret value across all registered NAS units.
+
+    Covers session IDs, SynoTokens, device tokens, and cached passwords.
+    Used as the `secrets_provider` for the process-wide log redaction filter
+    (see `src/utils/redact.py`) and by the tool-response redaction wrapper in
+    `mcp_server.py`, so both stay current as sessions are created, refreshed,
+    and torn down over the process lifetime rather than being frozen at
+    startup.
+    """
+    for auth in list(_AUTH_REGISTRY.values()):
+        if auth.current_session_id:
+            yield auth.current_session_id
+        if auth.current_syno_token:
+            yield auth.current_syno_token
+        if auth.current_device_id:
+            yield auth.current_device_id
+        if auth._cached_device_id:
+            yield auth._cached_device_id
+        if auth._credentials:
+            _, password = auth._credentials
+            if password:
+                yield password
+
+
 class SynologyAuth:
     """Handles Synology NAS authentication using simple API calls."""
 
-    def __init__(self, base_url: str, verify_ssl: bool = False):
+    def __init__(self, base_url: str, verify_ssl: bool = True):
         self.base_url = base_url.rstrip("/")
         self.verify_ssl = verify_ssl
         self.current_session_id: Optional[str] = None
@@ -102,6 +144,12 @@ class SynologyAuth:
         # Try common API versions (start with newer versions)
         api_versions = ["7", "6", "3", "2"]
 
+        # Set when a transport-level failure (as opposed to a DSM-returned
+        # auth failure) stops the loop early, so the final return can give a
+        # specific, distinguished error instead of a generic
+        # "Authentication failed" for every kind of connection problem.
+        last_exception: Optional[Exception] = None
+
         for version in api_versions:
             payload = {
                 "api": "SYNO.API.Auth",
@@ -131,7 +179,15 @@ class SynologyAuth:
                 payload["enable_device_token"] = "yes"
 
             try:
-                response = requests.get(login_url, params=payload, verify=self.verify_ssl)
+                # POST, not GET: the payload carries the password, OTP code,
+                # and device token, and a GET would put all of them in the
+                # URL query string — visible in DSM's own access log, any
+                # intermediate proxy's log, and in `requests`' own exception
+                # text if the request fails. `SYNO.API.Auth` accepts POST
+                # for `login` the same way it does for every other method.
+                response = requests.post(
+                    login_url, data=payload, verify=self.verify_ssl, timeout=_AUTH_TIMEOUT
+                )
                 response.raise_for_status()
                 result = response.json()
 
@@ -158,13 +214,104 @@ class SynologyAuth:
                     return result
                 else:
                     error_code = result.get("error", {}).get("code", "unknown")
-                    # Don't try other versions for auth errors
-                    if error_code in [400, 402, 403, 404]:
+                    # An auth-outcome error is DSM's final answer for this
+                    # account/credential — retrying with another API version
+                    # would just resubmit the same password again. Only an
+                    # unsupported-API/version error (or a transport
+                    # exception, below) is worth retrying.
+                    if error_code in _AUTH_OUTCOME_ERROR_CODES:
                         return result
-            except Exception:
+            except requests.exceptions.SSLError as e:
+                # A certificate problem is about the connection itself, not
+                # the API version being tried — every version would hit the
+                # same failure, so stop instead of retrying three more times.
+                last_exception = e
+                break
+            except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+                # Same reasoning: an unreachable host or a connection that
+                # doesn't answer within the timeout isn't fixed by trying a
+                # different API version.
+                last_exception = e
+                break
+            except Exception as e:
+                # requests' HTTPAdapter.cert_verify() raises a bare OSError
+                # (not requests.exceptions.SSLError) when a VERIFY_SSL
+                # CA-bundle path doesn't exist on disk — arguably the most
+                # likely misconfiguration for that feature. Every
+                # requests.exceptions.RequestException (HTTPError from
+                # raise_for_status(), JSONDecodeError from a malformed
+                # response, and the three types already handled above) is
+                # *also* an OSError subclass, so this checks specifically
+                # for a bare one that isn't any of those — otherwise this
+                # would misclassify e.g. an HTTPError from a reverse proxy
+                # in front of DSM as a certificate problem, and stop
+                # retrying other API versions for a reason that has
+                # nothing to do with the CA bundle.
+                if isinstance(e, OSError) and not isinstance(
+                    e, requests.exceptions.RequestException
+                ):
+                    last_exception = e
+                    break
+                last_exception = e
                 continue
 
-        # If all versions failed, return the last result
+        if isinstance(last_exception, requests.exceptions.SSLError):
+            return {
+                "success": False,
+                "error": {
+                    "code": "certificate_error",
+                    "message": redact(
+                        f"TLS certificate verification failed for {self.base_url}: "
+                        f"{last_exception}. If this NAS uses a self-signed certificate "
+                        "or a private CA, set VERIFY_SSL to that CA bundle's file path "
+                        "instead of disabling verification.",
+                        live_secrets=(password,),
+                    ),
+                },
+            }
+        if isinstance(last_exception, requests.exceptions.Timeout):
+            return {
+                "success": False,
+                "error": {
+                    "code": "connection_timeout",
+                    "message": f"Connection to {self.base_url} timed out.",
+                },
+            }
+        if isinstance(last_exception, requests.exceptions.ConnectionError):
+            return {
+                "success": False,
+                "error": {
+                    "code": "connection_error",
+                    "message": redact(
+                        f"Could not connect to {self.base_url}: {last_exception}. "
+                        "Check the host and port, and that DSM is reachable over HTTPS.",
+                        live_secrets=(password,),
+                    ),
+                },
+            }
+        # A bare OSError that isn't a requests.exceptions.RequestException
+        # (every RequestException, including the three special-cased above,
+        # is itself an OSError subclass) — this is the
+        # VERIFY_SSL-points-to-a-missing-CA-bundle-file case specifically,
+        # not an HTTPError/JSONDecodeError/other requests-level failure.
+        if isinstance(last_exception, OSError) and not isinstance(
+            last_exception, requests.exceptions.RequestException
+        ):
+            return {
+                "success": False,
+                "error": {
+                    "code": "certificate_error",
+                    "message": redact(
+                        f"Invalid VERIFY_SSL configuration for {self.base_url}: "
+                        f"{last_exception}. If VERIFY_SSL is set to a CA bundle file "
+                        "path, confirm that path exists and is readable by this process.",
+                        live_secrets=(password,),
+                    ),
+                },
+            }
+
+        # If every version was tried and none succeeded for a DSM-level
+        # reason (not a transport error), return a generic failure.
         return {"success": False, "error": {"code": "unknown", "message": "Authentication failed"}}
 
     def login_download_station(
@@ -264,7 +411,13 @@ class SynologyAuth:
             }
 
             try:
-                response = requests.get(logout_url, params=payload, verify=self.verify_ssl)
+                # POST, not GET: same reasoning as login() — the payload
+                # carries `_sid`, and a GET would put it in the URL query
+                # string, visible in DSM's own access log and any
+                # intermediate proxy's log.
+                response = requests.post(
+                    logout_url, data=payload, verify=self.verify_ssl, timeout=_AUTH_TIMEOUT
+                )
                 response.raise_for_status()
                 result = response.json()
 
@@ -292,15 +445,30 @@ class SynologyAuth:
                         break
 
             except requests.RequestException as e:
+                # `str(e)` on a RequestException can still embed request
+                # details (e.g. the resolved host on a connection failure);
+                # redact defensively before returning it to the caller
+                # (redaction here is a backstop; the tool-response boundary
+                # in mcp_server.py also redacts).
                 last_error = {
                     "success": False,
-                    "error": {"code": "network_error", "message": f"Network error: {str(e)}"},
+                    "error": {
+                        "code": "network_error",
+                        "message": redact(
+                            f"Network error: {str(e)}", live_secrets=[logout_session_id]
+                        ),
+                    },
                 }
                 continue
             except Exception as e:
                 last_error = {
                     "success": False,
-                    "error": {"code": "unknown_error", "message": f"Unexpected error: {str(e)}"},
+                    "error": {
+                        "code": "unknown_error",
+                        "message": redact(
+                            f"Unexpected error: {str(e)}", live_secrets=[logout_session_id]
+                        ),
+                    },
                 }
                 continue
 

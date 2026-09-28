@@ -1,11 +1,13 @@
 # src/config.py - Configuration management
 # Loads all settings from XDG standard config directory (~/.config/synology-mcp/settings.json).
-# Supports multiple NAS, Xiaozhi integration, and server settings.
+# Supports multiple NAS and server settings.
 
 import json
 import logging
 import os
 import stat
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -13,6 +15,36 @@ from dotenv import load_dotenv
 
 # Setup logger
 logger = logging.getLogger("synology-mcp")
+
+
+class InsecureURLError(ValueError):
+    """Raised at startup when a configured NAS URL does not use HTTPS."""
+
+
+# Before CA-bundle-path support, VERIFY_SSL's parsing was
+# `.lower() == "true"`, so any other value — including these common
+# boolean aliases — silently meant "disabled". Recognizing them here keeps
+# that working rather than turning a working (if insecure) upgrade into a
+# hard failure the first time DSM is contacted, while any other string is
+# now treated as a CA-bundle path instead of silently disabling
+# verification.
+_VERIFY_SSL_TRUTHY = {"true", "1", "yes", "on"}
+_VERIFY_SSL_FALSY = {"false", "0", "no", "off"}
+
+
+def _parse_verify_ssl(value: str) -> Any:
+    """Parse VERIFY_SSL's env-var string form into what `requests`' own
+    `verify=` parameter accepts: True, False, or a path to a CA bundle file
+    (e.g. for a private CA or self-signed certificate, without disabling
+    verification outright). `REQUESTS_CA_BUNDLE` already works as a global
+    override today; this is the equivalent per-server setting."""
+    lowered = value.strip().lower()
+    if lowered in _VERIFY_SSL_TRUTHY:
+        return True
+    if lowered in _VERIFY_SSL_FALSY:
+        return False
+    return value.strip()
+
 
 # XDG Base Directory Specification: ~/.config/synology-mcp/
 XDG_CONFIG_HOME: Path = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
@@ -25,7 +57,7 @@ SETTINGS_JSON_EXAMPLE = """
   "synology": {
     "nas1": {
       "host": "192.168.1.100",
-      "port": 5000,
+      "port": 5001,
       "username": "admin",
       "password": "your_password",
       "note": "Primary NAS at home"
@@ -38,17 +70,14 @@ SETTINGS_JSON_EXAMPLE = """
       "note": "Backup NAS"
     }
   },
-  "xiaozhi": {
-    "enabled": false,
-    "token": "your_xiaozhi_token",
-    "endpoint": "wss://api.xiaozhi.me/mcp/"
-  },
   "server": {
     "auto_login": true,
-    "verify_ssl": false,
+    "verify_ssl": true,
     "session_timeout": 3600,
     "debug": false,
-    "log_level": "INFO"
+    "log_level": "INFO",
+    "restricted_mode": true,
+    "max_file_content_size": 1000000
   }
 }
 """
@@ -74,12 +103,30 @@ class SynologyConfig:
         self.server_version = os.getenv("MCP_SERVER_VERSION", "1.0.0")
         self.default_session_timeout = int(os.getenv("SESSION_TIMEOUT", "3600"))
         self.auto_login = os.getenv("AUTO_LOGIN", "true").lower() == "true"
-        self.verify_ssl = os.getenv("VERIFY_SSL", "false").lower() == "true"
+        self.verify_ssl = _parse_verify_ssl(os.getenv("VERIFY_SSL", "true"))
+        # Restricted mode: the server exposes only browsing and monitoring
+        # tools by default (REMEDIATION_PLAN.md's stated objective for the
+        # initial installation). Modifying tools (file writes/deletes, user
+        # and container management, ...) are hidden from discovery and
+        # rejected before any NAS request is made. Set to false deliberately
+        # to enable the full tool set.
+        self.restricted_mode = os.getenv("RESTRICTED_MODE", "true").lower() == "true"
         self.debug = os.getenv("DEBUG", "false").lower() == "true"
         self.log_level = os.getenv("LOG_LEVEL", "INFO").upper()
+        # get_file_content refuses to download a file larger than this (checked
+        # via file metadata before any download request is made) — file
+        # contents are sent to the MCP client's AI provider, and this tool is
+        # exposed even in restricted mode.
+        self.max_file_content_size = int(os.getenv("MAX_FILE_CONTENT_SIZE", str(1_000_000)))
 
         # Legacy single-NAS env vars (still supported as fallback)
         self.synology_url = os.getenv("SYNOLOGY_URL")
+        if self.synology_url and not self.synology_url.lower().startswith("https://"):
+            raise InsecureURLError(
+                f"SYNOLOGY_URL must use HTTPS, got: {self.synology_url!r}. "
+                "Set SYNOLOGY_URL to https://<your-nas>:5001 and ensure DSM has a "
+                "valid TLS certificate (DSM Control Panel > Security > Certificate)."
+            )
         self.synology_username = os.getenv("SYNOLOGY_USERNAME")
         self.synology_password = os.getenv("SYNOLOGY_PASSWORD")
         # One-shot 2FA code for legacy .env single-NAS users on first login.
@@ -93,7 +140,20 @@ class SynologyConfig:
 
         Returns True if permissions are safe, False otherwise.
         Prints warning if permissions are too open.
+
+        POSIX only: os.getuid() and the group/other mode bits this check
+        relies on don't exist on Windows (NTFS uses ACLs, not POSIX mode
+        bits), so on platforms without os.getuid() the check is skipped
+        with a warning instead of raising.
         """
+        if not hasattr(os, "getuid"):
+            logger.warning(
+                f"Skipping file-permission check for {path}: not supported on "
+                "this platform. Restrict access to this file yourself (it "
+                "contains NAS credentials) via your OS's file permissions."
+            )
+            return True
+
         try:
             file_stat = path.stat()
             mode = file_stat.st_mode
@@ -114,14 +174,114 @@ class SynologyConfig:
             logger.warning(f"Could not check permissions for {path}: {e}")
             return False
 
+    def _restrict_file_permissions(self, path: Path) -> None:
+        """Best-effort: restrict `path` to the current user only.
+
+        POSIX: chmod 0600. Windows: shell out to `icacls` to strip
+        inherited permissions and grant the current user Full Control,
+        since Windows has no POSIX mode bits (NTFS uses ACLs) and Python's
+        standard library has no built-in ACL API. Failures are logged and
+        swallowed — this is a hardening step, not a correctness requirement,
+        and must never block writing the file itself.
+        """
+        try:
+            if hasattr(os, "getuid"):
+                os.chmod(path, 0o600)
+            elif sys.platform == "win32":
+                user = os.environ.get("USERNAME") or os.getlogin()
+                subprocess.run(
+                    [
+                        "icacls",
+                        str(path),
+                        "/inheritance:r",
+                        "/grant:r",
+                        f"{user}:F",
+                    ],
+                    capture_output=True,
+                    check=True,
+                    timeout=10,
+                )
+        except Exception as e:
+            logger.warning(
+                f"Could not restrict permissions on {path}: {e}. "
+                "It contains NAS credentials — restrict access to it yourself."
+            )
+
+    def _atomic_write_settings(self, data: Dict[str, Any]) -> bool:
+        """Atomically overwrite SETTINGS_FILE with `data`.
+
+        Writes to a temp file in the same directory (so the final
+        `os.replace` is on the same filesystem and therefore atomic),
+        created already restricted to the owner (POSIX 0600) rather than
+        written with default-umask permissions and chmod'd afterward — the
+        latter leaves a window where the temp file (which holds every
+        configured NAS's password, not just the field being updated) is
+        readable at whatever the ambient umask allows. `_restrict_file_permissions`
+        is still called afterward: it's a no-op on POSIX (already 0600) but
+        is where the real restriction happens on Windows, whose `os.open`
+        mode argument doesn't set NTFS ACLs. Returns True on success, False
+        on any failure (logged, never raised — a failed settings write must
+        never crash the server or fall back to printing what it was trying
+        to save).
+        """
+        try:
+            CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+            tmp_path = SETTINGS_FILE.with_suffix(".json.tmp")
+            fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w") as f:
+                f.write(json.dumps(data, indent=2))
+            self._restrict_file_permissions(tmp_path)
+            os.replace(tmp_path, SETTINGS_FILE)
+            return True
+        except Exception as e:
+            logger.warning(f"Failed to save {SETTINGS_FILE}: {e}")
+            return False
+
+    def save_device_id(self, nas_name: str, device_id: str) -> bool:
+        """Persist a freshly-issued DSM trusted-device token for `nas_name`.
+
+        Reads the settings file fresh from disk (not from the parsed
+        `self.nas_configs`, which only carries the fields this class knows
+        about) so any other keys — other NAS entries, the `server` section,
+        anything a future version added — survive untouched. Updates the
+        in-memory config on success so the running process sees the new
+        token immediately, without needing a restart.
+
+        Returns True on success, False otherwise. Callers must not fall
+        back to logging or printing `device_id` when this returns False —
+        that would defeat the point of storing it out of logs in the first
+        place; instead, the next login simply falls back to OTP again.
+        """
+        if not SETTINGS_FILE.exists():
+            logger.warning(
+                f"Cannot save device token for '{nas_name}': {SETTINGS_FILE} does not exist "
+                "(legacy .env configuration does not support persistent device tokens — "
+                "migrate to settings.json)."
+            )
+            return False
+
+        try:
+            data = json.loads(SETTINGS_FILE.read_text())
+        except (json.JSONDecodeError, OSError) as e:
+            logger.warning(f"Cannot save device token for '{nas_name}': {e}")
+            return False
+
+        synology_section = data.get("synology", {})
+        if nas_name not in synology_section or not isinstance(synology_section[nas_name], dict):
+            logger.warning(f"Cannot save device token: '{nas_name}' not found in {SETTINGS_FILE}")
+            return False
+
+        synology_section[nas_name]["device_id"] = device_id
+        if not self._atomic_write_settings(data):
+            return False
+
+        if nas_name in self.nas_configs:
+            self.nas_configs[nas_name]["device_id"] = device_id
+        return True
+
     def _load_settings(self):
         """Load all settings from XDG config directory (~/.config/synology-mcp/settings.json)."""
         self.nas_configs: Dict[str, Dict[str, Any]] = {}
-
-        # Default values for xiaozhi and server settings
-        self.xiaozhi_enabled = False
-        self.xiaozhi_token = ""
-        self.xiaozhi_endpoint = "wss://api.xiaozhi.me/mcp/"
 
         if SETTINGS_FILE.exists():
             # Check file permissions - refuse to load if insecure
@@ -146,7 +306,9 @@ class SynologyConfig:
                         continue
 
                     host = nas_info.get("host", "")
-                    port = nas_info.get("port", 5000)
+                    # 5001 is DSM's default HTTPS port; 5000 is HTTP-only and
+                    # would fail outright given the HTTPS-only base_url below.
+                    port = nas_info.get("port", 5001)
                     username = nas_info.get("username", "")
                     password = nas_info.get("password", "")
                     # Optional 2FA/OTP support (DSM Login Web API Guide):
@@ -175,8 +337,11 @@ class SynologyConfig:
                         )
                         continue
 
-                    scheme = "https" if port == 5001 else "http"
-                    base_url = f"{scheme}://{host}:{port}"
+                    # HTTPS-only: never fall back to plain http:// based on port
+                    # number. If DSM isn't serving HTTPS on this port, the
+                    # connection will simply fail rather than transmit in the
+                    # clear.
+                    base_url = f"https://{host}:{port}"
 
                     self.nas_configs[nas_name] = {
                         "base_url": base_url,
@@ -188,28 +353,26 @@ class SynologyConfig:
                         "device_id": device_id,
                     }
 
-                # Load Xiaozhi settings
-                xiaozhi_section = data.get("xiaozhi", {})
-                if xiaozhi_section:
-                    self.xiaozhi_enabled = xiaozhi_section.get("enabled", False)
-                    self.xiaozhi_token = xiaozhi_section.get("token", "")
-                    self.xiaozhi_endpoint = xiaozhi_section.get(
-                        "endpoint", "wss://api.xiaozhi.me/mcp/"
-                    )
-
                 # Load server settings (override env vars if present)
                 server_section = data.get("server", {})
                 if server_section:
                     if "auto_login" in server_section:
                         self.auto_login = server_section["auto_login"]
                     if "verify_ssl" in server_section:
-                        self.verify_ssl = server_section["verify_ssl"]
+                        value = server_section["verify_ssl"]
+                        self.verify_ssl = (
+                            _parse_verify_ssl(value) if isinstance(value, str) else value
+                        )
                     if "session_timeout" in server_section:
                         self.default_session_timeout = server_section["session_timeout"]
                     if "debug" in server_section:
                         self.debug = server_section["debug"]
                     if "log_level" in server_section:
                         self.log_level = server_section["log_level"].upper()
+                    if "restricted_mode" in server_section:
+                        self.restricted_mode = server_section["restricted_mode"]
+                    if "max_file_content_size" in server_section:
+                        self.max_file_content_size = int(server_section["max_file_content_size"])
 
             except json.JSONDecodeError as e:
                 logger.error(f"Failed to parse {SETTINGS_FILE}: {e}")
@@ -284,7 +447,10 @@ class SynologyConfig:
 
     def __str__(self) -> str:
         nas_names = ", ".join(self.nas_configs.keys()) if self.nas_configs else "none"
-        return f"SynologyConfig(nas=[{nas_names}], auto_login={self.auto_login})"
+        return (
+            f"SynologyConfig(nas=[{nas_names}], auto_login={self.auto_login}, "
+            f"restricted_mode={self.restricted_mode})"
+        )
 
 
 # Global config instance

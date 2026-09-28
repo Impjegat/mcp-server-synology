@@ -5,6 +5,8 @@ from typing import Any, Dict, Optional, Tuple
 
 import requests
 
+from utils.redact import redact
+
 logger = logging.getLogger(__name__)
 
 
@@ -54,7 +56,7 @@ class SynologyAPIClient:
         self,
         base_url: str,
         session_id: str,
-        verify_ssl: bool = False,
+        verify_ssl: bool = True,
         syno_token: Optional[str] = None,
     ):
         self.base_url = base_url.rstrip("/")
@@ -138,9 +140,23 @@ class SynologyAPIClient:
             resp.raise_for_status()
             return resp.json()
         except requests.RequestException as e:
-            return {"success": False, "error": {"code": "network_error", "message": str(e)}}
+            # `str(e)` commonly embeds the full request URL — which carries
+            # `_sid=<session_id>` on every GET call — so redact before
+            # returning it to the caller. This is a backstop; the
+            # tool-response boundary in mcp_server.py also redacts.
+            return {
+                "success": False,
+                "error": {"code": "network_error", "message": self._redact(str(e))},
+            }
         except Exception as e:
-            return {"success": False, "error": {"code": "unknown_error", "message": str(e)}}
+            return {
+                "success": False,
+                "error": {"code": "unknown_error", "message": self._redact(str(e))},
+            }
+
+    def _redact(self, message: str) -> str:
+        """Redact this client's live secrets from an error message."""
+        return redact(message, live_secrets=[self.session_id, self.syno_token])
 
     def get(
         self, api: str, method: str, version: int = 1, extra_params: Optional[Dict] = None

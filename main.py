@@ -12,15 +12,6 @@ Usage:
 
 Configuration:
     All settings are loaded from ~/.config/synology-mcp/settings.json
-
-    For Xiaozhi support, set in settings.json:
-    {
-      "xiaozhi": {
-        "enabled": true,
-        "token": "your_token",
-        "endpoint": "wss://api.xiaozhi.me/mcp/"
-      }
-    }
 """
 
 import asyncio
@@ -39,33 +30,29 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
 
 def check_requirements():
     """Check if all requirements are met."""
-    from config import config
-
-    errors = []
-
-    if config.xiaozhi_enabled:
-        # Check for token
-        if not config.xiaozhi_token:
-            errors.append("Xiaozhi token is required when xiaozhi.enabled=true in settings.json")
-
-        # Check for websockets package
-        import importlib.util
-
-        if importlib.util.find_spec("websockets") is None:
-            errors.append(
-                "websockets package is not installed. Run: pip install websockets>=11.0.3"
-            )
-
-    return errors
+    return []
 
 
 def setup_logging(level: str = "INFO"):
-    """Setup logging configuration."""
+    """Setup logging configuration.
+
+    Attaches a redaction filter to every handler so session IDs, SynoTokens,
+    device tokens, and passwords never reach the log output, however they
+    got embedded in a log message (a deliberate log line, or an exception's
+    str() picking up a URL that had `_sid=` in it).
+    """
     logging.basicConfig(
         level=getattr(logging, level.upper(), logging.INFO),
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
+
+    from auth.synology_auth import iter_live_secrets
+    from utils.redact import RedactingFilter
+
+    redacting_filter = RedactingFilter(iter_live_secrets)
+    for handler in logging.getLogger().handlers:
+        handler.addFilter(redacting_filter)
 
 
 if __name__ == "__main__":
@@ -75,14 +62,7 @@ if __name__ == "__main__":
     setup_logging(config.log_level)
     logger = logging.getLogger("synology-mcp")
 
-    enable_xiaozhi = config.xiaozhi_enabled
-
-    if enable_xiaozhi:
-        logger.info("Starting Synology MCP Server with Xiaozhi Bridge")
-        logger.info("Supports BOTH Xiaozhi and Claude/Cursor simultaneously")
-    else:
-        logger.info("Starting Synology MCP Server")
-        logger.info("Claude/Cursor only mode")
+    logger.info("Starting Synology MCP Server")
 
     # Check requirements
     errors = check_requirements()
@@ -95,30 +75,13 @@ if __name__ == "__main__":
     logger.info("Requirements check passed")
 
     try:
-        if enable_xiaozhi:
-            # Show Xiaozhi configuration
-            endpoint = config.xiaozhi_endpoint
-            token = config.xiaozhi_token
-            token_preview = f"{token[:8]}..." if token and len(token) > 8 else "***"
+        logger.info("Client Support: Claude/Cursor (stdio)")
+        logger.info("Starting MCP server... Press Ctrl+C to stop")
 
-            logger.info(f"Xiaozhi Endpoint: {endpoint}")
-            logger.info(f"Xiaozhi Token: {token_preview}")
-            logger.info("Client Support: Xiaozhi (WebSocket), Claude/Cursor (stdio)")
+        # Import and run standard MCP server
+        from mcp_server import main as server_main
 
-            logger.info("Starting multi-client bridge... Press Ctrl+C to stop")
-
-            # Import and run multiclient bridge
-            from multiclient_bridge import main as bridge_main
-
-            asyncio.run(bridge_main())
-        else:
-            logger.info("Client Support: Claude/Cursor (stdio)")
-            logger.info("Starting MCP server... Press Ctrl+C to stop")
-
-            # Import and run standard MCP server
-            from mcp_server import main as server_main
-
-            asyncio.run(server_main())
+        asyncio.run(server_main())
 
     except KeyboardInterrupt:
         logger.info("Server stopped by user")

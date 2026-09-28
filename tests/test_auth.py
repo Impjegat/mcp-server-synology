@@ -197,6 +197,7 @@ class TestSynologyAuth:
 
 
 # Quick connectivity test
+@pytest.mark.real_nas
 def test_auth_connectivity(env_check):
     """Quick test to verify auth service is reachable."""
     from auth.synology_auth import SynologyAuth
@@ -287,20 +288,33 @@ class _FakeResponse:
 
 
 def _patch_requests_get(monkeypatch, payloads):
-    """Replace requests.get in synology_auth with a recorder.
+    """Replace requests.get AND requests.post in synology_auth with a recorder.
 
-    `payloads` is a list of dicts; each call pops the head. Every call also
-    records the params it was called with into `calls` for assertions.
+    `payloads` is a list of dicts; each call (whichever verb the code under
+    test used) pops the head in call order. Both login and logout send their
+    payload via POST (`data=`) — both are recorded under the same `params`
+    key in the returned call record, plus a `method` key, so existing
+    assertions like `calls[i]["params"][...]` keep working regardless of
+    which verb was used, while a test can also assert on `calls[i]["method"]`
+    when the verb itself matters (e.g. confirming login/logout no longer
+    send credentials/session ids as a URL query string).
     """
     import auth.synology_auth as mod
 
     calls = []
 
-    def _fake_get(url, params=None, verify=None):
-        calls.append({"url": url, "params": dict(params or {}), "verify": verify})
+    def _record(method, url, params, verify):
+        calls.append({"url": url, "params": dict(params or {}), "verify": verify, "method": method})
         return _FakeResponse(payloads.pop(0) if payloads else {"success": False})
 
+    def _fake_get(url, params=None, verify=None, timeout=None, **kwargs):
+        return _record("GET", url, params, verify)
+
+    def _fake_post(url, data=None, verify=None, timeout=None, **kwargs):
+        return _record("POST", url, data, verify)
+
     monkeypatch.setattr(mod.requests, "get", _fake_get)
+    monkeypatch.setattr(mod.requests, "post", _fake_post)
     return calls
 
 
@@ -486,3 +500,233 @@ def test_get_session_info_includes_device_id():
     auth.current_device_id = "DID_visible"
     info = auth.get_session_info()
     assert info["device_id"] == "DID_visible"
+
+
+# ---------------------------------------------------------------------------
+# Credential-and-session-leak hardening (PR 1) unit tests
+# ---------------------------------------------------------------------------
+
+
+def test_login_sends_credentials_via_post_not_url(monkeypatch):
+    """The password/OTP/device-token must travel in the POST body, never the
+    URL query string — a GET would put them in DSM's access log, any
+    intermediate proxy's log, and in `requests`' own exception text."""
+    from auth.synology_auth import SynologyAuth
+
+    success_payload = {"success": True, "data": {"sid": "SID_post", "synotoken": "T"}}
+    calls = _patch_requests_get(monkeypatch, [success_payload])
+
+    auth = SynologyAuth("https://nas.example.test:5001")
+    auth.login("alice", "hunter2", otp_code="123456")
+
+    assert len(calls) == 1
+    assert calls[0]["method"] == "POST"
+    assert "hunter2" not in calls[0]["url"]
+    assert "passwd=" not in calls[0]["url"]
+    # The password is still sent — just in the body, not the URL.
+    assert calls[0]["params"]["passwd"] == "hunter2"
+
+
+def test_logout_sends_session_id_via_post_not_url(monkeypatch):
+    """logout() must carry `_sid` in the POST body too — the same leak
+    vector login() was fixed for (visible in DSM's own access log and any
+    intermediate proxy's log) applies equally to logout's session id."""
+    from auth.synology_auth import SynologyAuth
+
+    login_payload = {"success": True, "data": {"sid": "SID_to_logout", "synotoken": "T"}}
+    logout_payload = {"success": True}
+    calls = _patch_requests_get(monkeypatch, [login_payload, logout_payload])
+
+    auth = SynologyAuth("https://nas.example.test:5001")
+    auth.login("alice", "pw")
+    auth.logout()
+
+    assert len(calls) == 2
+    assert calls[1]["method"] == "POST"
+    assert "SID_to_logout" not in calls[1]["url"]
+    assert "_sid=" not in calls[1]["url"]
+    assert calls[1]["params"]["_sid"] == "SID_to_logout"
+
+
+def test_auth_outcome_error_does_not_retry_other_api_versions(monkeypatch):
+    """A DSM auth-outcome error (account disabled, IP auto-blocked, 2SV
+    required, ...) means DSM already made its decision on these credentials.
+    Retrying with another API version would just resubmit the same password
+    again, feeding exactly the pattern DSM's Auto Block watches for."""
+    from auth.synology_auth import SynologyAuth
+
+    # Only one payload queued: if the code tries a second API version, the
+    # fake will hand back the default `{"success": False}` instead, and the
+    # call-count assertion below catches it either way.
+    calls = _patch_requests_get(monkeypatch, [{"success": False, "error": {"code": 401}}])
+
+    auth = SynologyAuth("https://nas.example.test:5001")
+    result = auth.login("alice", "pw")
+
+    assert result["success"] is False
+    assert len(calls) == 1, "a 401 (account disabled) must not trigger a version-fallback retry"
+
+
+def test_unsupported_version_error_retries_next_api_version(monkeypatch):
+    """A parameter/API/method/version-not-supported error (102) is a reason
+    to try the next API version — unlike an auth-outcome error, DSM hasn't
+    made an authentication decision yet."""
+    from auth.synology_auth import SynologyAuth
+
+    calls = _patch_requests_get(
+        monkeypatch,
+        [
+            {"success": False, "error": {"code": 102}},
+            {"success": True, "data": {"sid": "SID_v_fallback", "synotoken": "T"}},
+        ],
+    )
+
+    auth = SynologyAuth("https://nas.example.test:5001")
+    result = auth.login("alice", "pw")
+
+    assert result["success"] is True
+    assert len(calls) == 2, "an unsupported-API error should fall back to the next API version"
+
+
+# ---------------------------------------------------------------------------
+# Distinguished connection errors (PR 3): certificate/unreachable/timeout
+# failures get a specific, sanitized message instead of a blanket
+# "Authentication failed" — and none of them retry other API versions,
+# since a transport-level failure isn't fixed by changing the payload.
+# ---------------------------------------------------------------------------
+
+
+def _patch_requests_post_raises(monkeypatch, exception):
+    """Make every requests.post call in synology_auth raise `exception`."""
+    import auth.synology_auth as mod
+
+    calls = []
+
+    def _fake_post(url, data=None, verify=None, timeout=None, **kwargs):
+        calls.append({"url": url, "data": dict(data or {})})
+        raise exception
+
+    monkeypatch.setattr(mod.requests, "post", _fake_post)
+    return calls
+
+
+def test_certificate_error_stops_immediately_with_a_specific_message(monkeypatch):
+    import requests
+
+    from auth.synology_auth import SynologyAuth
+
+    calls = _patch_requests_post_raises(
+        monkeypatch, requests.exceptions.SSLError("certificate verify failed")
+    )
+
+    auth = SynologyAuth("https://nas.example.test:5001")
+    result = auth.login("alice", "hunter2")
+
+    assert result["success"] is False
+    assert result["error"]["code"] == "certificate_error"
+    assert "certificate" in result["error"]["message"].lower()
+    assert "hunter2" not in result["error"]["message"]
+    assert len(calls) == 1, "a certificate error must not retry other API versions"
+
+
+def test_connection_error_stops_immediately_with_a_specific_message(monkeypatch):
+    import requests
+
+    from auth.synology_auth import SynologyAuth
+
+    calls = _patch_requests_post_raises(
+        monkeypatch, requests.exceptions.ConnectionError("Connection refused")
+    )
+
+    auth = SynologyAuth("https://nas.example.test:5001")
+    result = auth.login("alice", "hunter2")
+
+    assert result["success"] is False
+    assert result["error"]["code"] == "connection_error"
+    assert "hunter2" not in result["error"]["message"]
+    assert len(calls) == 1, "a connection error must not retry other API versions"
+
+
+def test_timeout_error_stops_immediately_with_a_specific_message(monkeypatch):
+    import requests
+
+    from auth.synology_auth import SynologyAuth
+
+    calls = _patch_requests_post_raises(monkeypatch, requests.exceptions.Timeout("timed out"))
+
+    auth = SynologyAuth("https://nas.example.test:5001")
+    result = auth.login("alice", "pw")
+
+    assert result["success"] is False
+    assert result["error"]["code"] == "connection_timeout"
+    assert "timed out" in result["error"]["message"].lower()
+    assert len(calls) == 1, "a timeout must not retry other API versions"
+
+
+def test_unexpected_transport_exception_still_retries_other_versions(monkeypatch):
+    """A non-SSL/connection/timeout exception (e.g. a malformed response)
+    keeps the old fall-through-to-next-version behavior."""
+    from auth.synology_auth import SynologyAuth
+
+    calls = _patch_requests_post_raises(monkeypatch, ValueError("unexpected"))
+
+    auth = SynologyAuth("https://nas.example.test:5001")
+    result = auth.login("alice", "pw")
+
+    assert result["success"] is False
+    assert result["error"]["code"] == "unknown"
+    assert len(calls) == 4, "an unrecognized exception should still try every API version"
+
+
+def test_missing_ca_bundle_path_is_classified_as_certificate_error(monkeypatch):
+    """requests' HTTPAdapter.cert_verify() raises a bare OSError (NOT
+    requests.exceptions.SSLError) when VERIFY_SSL points at a CA-bundle
+    path that doesn't exist on disk — arguably the most likely
+    misconfiguration for that feature. Since requests.exceptions.SSLError/
+    ConnectionError/Timeout are themselves OSError subclasses, this must
+    still classify as certificate_error and stop immediately, not fall
+    through to the generic "unknown" bucket."""
+    calls = _patch_requests_post_raises(
+        monkeypatch,
+        OSError("Could not find a suitable TLS CA certificate bundle, invalid path: /nope.pem"),
+    )
+
+    from auth.synology_auth import SynologyAuth
+
+    auth = SynologyAuth("https://nas.example.test:5001")
+    result = auth.login("alice", "hunter2")
+
+    assert result["success"] is False
+    assert result["error"]["code"] == "certificate_error"
+    assert "hunter2" not in result["error"]["message"]
+    assert len(calls) == 1, "a bad CA-bundle path must not retry other API versions"
+
+
+def test_http_error_is_not_misclassified_as_certificate_error(monkeypatch):
+    """requests.exceptions.RequestException (the base of HTTPError,
+    JSONDecodeError, and every other requests exception, including the
+    three special-cased above) is itself an OSError subclass. An HTTPError
+    from raise_for_status() (e.g. a reverse proxy/WAF in front of DSM
+    returning a non-2xx status) must not be swallowed by the
+    missing-CA-bundle-path branch — that would misclassify it as a
+    certificate problem and wrongly stop retrying other API versions."""
+    import auth.synology_auth as mod
+
+    calls = []
+
+    class _FakeErrorResponse:
+        def raise_for_status(self):
+            raise mod.requests.exceptions.HTTPError("502 Bad Gateway")
+
+    def _fake_post(url, data=None, verify=None, timeout=None, **kwargs):
+        calls.append(url)
+        return _FakeErrorResponse()
+
+    monkeypatch.setattr(mod.requests, "post", _fake_post)
+
+    auth = mod.SynologyAuth("https://nas.example.test:5001")
+    result = auth.login("alice", "pw")
+
+    assert result["success"] is False
+    assert result["error"]["code"] == "unknown"
+    assert len(calls) == 4, "an HTTPError must still retry every API version like before"

@@ -13,7 +13,7 @@ class SynologyNFS:
         self,
         base_url: str,
         session_id: str,
-        verify_ssl: bool = False,
+        verify_ssl: bool = True,
         syno_token: Optional[str] = None,
     ):
         self.base_url = base_url.rstrip("/")

@@ -1,8 +1,10 @@
 """Real Download Station functionality tests."""
 
 import time
+from unittest.mock import patch
 
 import pytest
+import requests
 
 
 @pytest.mark.real_nas
@@ -221,6 +223,7 @@ class TestRealDownloadStation:
 
 
 # Simple connectivity test that can run quickly
+@pytest.mark.real_nas
 def test_basic_connectivity(download_station):
     """Quick test to verify basic Download Station connectivity."""
     try:
@@ -229,3 +232,26 @@ def test_basic_connectivity(download_station):
         assert True  # If we get here, connection works
     except Exception as e:
         pytest.fail(f"Basic connectivity failed: {e}")
+
+
+# ---------------------------------------------------------------------------
+# Credential-and-session-leak hardening (PR 1) unit test — no real NAS needed
+# ---------------------------------------------------------------------------
+
+
+def test_get_info_redacts_session_id_from_network_error():
+    """get_info()'s fallback 'note' field must not leak the session id, even
+    though the underlying GET request's URL carries `_sid=<session_id>` and
+    a RequestException's str() commonly embeds the full request URL."""
+    from downloadstation.synology_downloadstation import SynologyDownloadStation
+
+    ds = SynologyDownloadStation("https://nas.example.test:5001", "LIVE_SID_777")
+
+    fake_url = f"{ds.base_url}/webapi/DownloadStation/info.cgi?api=X&_sid=LIVE_SID_777"
+    with patch(
+        "downloadstation.synology_downloadstation.requests.get",
+        side_effect=requests.exceptions.ConnectionError(f"Failed to connect: {fake_url}"),
+    ):
+        info = ds.get_info()
+
+    assert "LIVE_SID_777" not in info["note"]

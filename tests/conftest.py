@@ -1,6 +1,9 @@
 """Pytest configuration for real Synology Download Station testing."""
 
+import os
+import socket
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -9,10 +12,48 @@ import pytest
 src_path = Path(__file__).parent.parent / "src"
 sys.path.insert(0, str(src_path))
 
+# Isolate settings.json discovery from whatever happens to be on this
+# machine *before* config is ever imported: its module-level code
+# constructs a singleton that reads ~/.config/synology-mcp/settings.json
+# immediately at import time, so an ambient file (unexpected multi-NAS
+# entries, a malformed file from unrelated local work) would otherwise
+# make test collection itself non-hermetic or crash outright, for every
+# test run regardless of whether real_nas tests are even selected.
+#
+# setdefault, not a hard override: the legacy .env-based credentials
+# (SYNOLOGY_URL/USERNAME/PASSWORD) that real_nas tests use are unaffected
+# either way (config.py reads those from os.environ/.env directly, not
+# through XDG_CONFIG_HOME), and a developer or CI job that deliberately
+# points XDG_CONFIG_HOME elsewhere is left alone.
+os.environ.setdefault("XDG_CONFIG_HOME", tempfile.mkdtemp(prefix="synology-mcp-test-config-"))
+
 # Import our modules
 from auth.synology_auth import SynologyAuth
 from config import config
 from downloadstation.synology_downloadstation import SynologyDownloadStation
+
+
+@pytest.fixture(autouse=True)
+def _block_network_unless_real_nas(request, monkeypatch):
+    """Defense in depth against an accidental live network call from a
+    test that isn't explicitly marked @pytest.mark.real_nas — markers alone
+    aren't relied on for this (a test could be missing its marker, or a
+    mocked call could fall through to the real implementation). Every
+    other test in the suite already mocks its network calls, so this has
+    nothing legitimate to block for them.
+    """
+    if request.node.get_closest_marker("real_nas") is not None:
+        return
+
+    def _blocked(*_args, **_kwargs):
+        raise RuntimeError(
+            "Outbound network access is blocked in tests not marked "
+            "@pytest.mark.real_nas. Mock the network call, or mark the "
+            "test real_nas if it deliberately needs a live NAS."
+        )
+
+    monkeypatch.setattr(socket.socket, "connect", _blocked)
+    monkeypatch.setattr(socket.socket, "connect_ex", _blocked)
 
 
 @pytest.fixture(scope="session")

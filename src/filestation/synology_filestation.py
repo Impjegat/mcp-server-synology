@@ -2,11 +2,53 @@
 
 import json
 import os
+import posixpath
+import re
 import tempfile
 import unicodedata
 from typing import Any, Dict, List, Optional
 
 import requests
+
+from utils.redact import redact
+
+# Paths no path-taking method below may touch, read or write. See
+# _check_critical_path.
+#
+# Volume roots and /homes are blocked only as exact matches: they're raw
+# volume mounts and the aggregate home-directories share, not places real
+# files live directly — but /volume2/photo or /homes/alice are ordinary
+# user shares/subfolders and must stay reachable, so these are NOT
+# prefix-matched. Synology NAS units commonly expose more than one storage
+# volume (/volume1, /volume2, ...), so this is a pattern, not a fixed name.
+_VOLUME_ROOT_RE = re.compile(r"/volume\d+")
+_CRITICAL_PATHS_EXACT = ("/homes",)
+# True OS-level directories have no legitimate DSM share overlap at all, so
+# every path under them is blocked too (e.g. /etc/passwd, not just /etc).
+_CRITICAL_PATHS_PREFIX = ("/var", "/etc", "/usr", "/bin", "/sbin")
+
+
+def _decode_downloaded_text(content: bytes, declared_encoding: Optional[str]) -> str:
+    """Decode a downloaded file's bytes the way `requests.Response.text`
+    would: use the declared encoding if the server sent one, otherwise
+    auto-detect (mirroring `Response.apparent_encoding`) instead of
+    assuming UTF-8. DSM's download endpoint doesn't send a charset, so the
+    auto-detect path is the common case here, not an edge case.
+
+    This can't just call `response.apparent_encoding` — that reads
+    `response.content`, which raises once the body has already been
+    consumed via `iter_content()` (needed here to enforce the size cap
+    against the actual bytes read, not just pre-download metadata).
+    """
+    if declared_encoding:
+        return content.decode(declared_encoding, errors="replace")
+    try:
+        import charset_normalizer
+
+        detected = charset_normalizer.detect(content)["encoding"]
+    except Exception:
+        detected = None
+    return content.decode(detected or "utf-8", errors="replace")
 
 
 class SynologyFileStation:
@@ -16,14 +58,18 @@ class SynologyFileStation:
         self,
         base_url: str,
         session_id: str,
-        verify_ssl: bool = False,
+        verify_ssl: bool = True,
         syno_token: Optional[str] = None,
+        max_file_content_size: int = 1_000_000,
     ):
         self.base_url = base_url.rstrip("/")
         self.session_id = session_id
         self.verify_ssl = verify_ssl
         self.syno_token = syno_token
         self.api_url = f"{self.base_url}/webapi/entry.cgi"
+        # get_file_content refuses to download a file larger than this,
+        # checked via file metadata before any download request is made.
+        self.max_file_content_size = max_file_content_size
 
     def _csrf_headers(self, *, post: bool) -> Dict[str, str]:
         """Build request headers, including X-SYNO-TOKEN for DSM 7.3.2+ CSRF.
@@ -37,6 +83,10 @@ class SynologyFileStation:
             headers["X-SYNO-TOKEN"] = self.syno_token
         return headers
 
+    def _redact(self, message: str) -> str:
+        """Redact this instance's live secrets from an error message."""
+        return redact(message, live_secrets=[self.session_id, self.syno_token])
+
     def _make_request(
         self, api: str, version: str, method: str, use_post: bool = False, **params
     ) -> Dict[str, Any]:
@@ -49,25 +99,32 @@ class SynologyFileStation:
             **params,
         }
 
-        if use_post:
-            response = requests.post(
-                self.api_url,
-                data=request_params,
-                headers=self._csrf_headers(post=True),
-                verify=self.verify_ssl,
-                timeout=15,
-            )
-        else:
-            response = requests.get(
-                self.api_url,
-                params=request_params,
-                headers=self._csrf_headers(post=False) or None,
-                verify=self.verify_ssl,
-                timeout=15,
-            )
-        response.raise_for_status()
+        try:
+            if use_post:
+                response = requests.post(
+                    self.api_url,
+                    data=request_params,
+                    headers=self._csrf_headers(post=True),
+                    verify=self.verify_ssl,
+                    timeout=15,
+                )
+            else:
+                response = requests.get(
+                    self.api_url,
+                    params=request_params,
+                    headers=self._csrf_headers(post=False) or None,
+                    verify=self.verify_ssl,
+                    timeout=15,
+                )
+            response.raise_for_status()
+            data = response.json()
+        except requests.RequestException as e:
+            # This GET request's URL carries `_sid=<session_id>` directly, and
+            # `str(e)` on a RequestException commonly embeds the full URL —
+            # redact before it propagates. Backstop; the tool-response
+            # boundary in mcp_server.py also redacts.
+            raise Exception(self._redact(f"Network error: {e}"))
 
-        data = response.json()
         if not data.get("success"):
             error_code = data.get("error", {}).get("code", "unknown")
             error_info = data.get("error", {})
@@ -103,18 +160,24 @@ class SynologyFileStation:
 
         # Multipart upload — let requests set Content-Type with the boundary;
         # we only thread the X-SYNO-TOKEN header (no charset override here).
+        # `_sid` and the other API params go in `data=` (regular multipart
+        # form fields, sent alongside `files=`), not `params=` — `params=`
+        # would put them in the URL query string even though this is a POST.
         upload_headers = {"X-SYNO-TOKEN": self.syno_token} if self.syno_token else None
-        response = requests.post(
-            self.api_url,
-            params=request_params,
-            files=files,
-            headers=upload_headers,
-            verify=self.verify_ssl,
-            timeout=15,
-        )
-        response.raise_for_status()
+        try:
+            response = requests.post(
+                self.api_url,
+                data=request_params,
+                files=files,
+                headers=upload_headers,
+                verify=self.verify_ssl,
+                timeout=15,
+            )
+            response.raise_for_status()
+            data = response.json()
+        except requests.RequestException as e:
+            raise Exception(self._redact(f"Network error: {e}"))
 
-        data = response.json()
         if not data.get("success"):
             error_code = data.get("error", {}).get("code", "unknown")
             raise Exception(f"Synology API error: {error_code}")
@@ -123,10 +186,20 @@ class SynologyFileStation:
 
     def _format_path(self, path: str) -> str:
         """Format path for Synology API."""
-        if not path.startswith("/"):
-            path = "/" + path
-        if path != "/" and path.endswith("/"):
-            path = path.rstrip("/")
+        # Collapse any run of leading slashes to exactly one *before*
+        # normpath: posixpath.normpath has a POSIX quirk where it preserves
+        # exactly two leading slashes verbatim (three or more collapse to
+        # one), so "//etc/passwd" would otherwise survive unchanged and
+        # bypass a "/etc" prefix check even though the filesystem treats
+        # "//" the same as "/".
+        path = "/" + path.lstrip("/")
+
+        # Resolve "." / ".." segments (POSIX-style, regardless of the host
+        # OS this process runs on) before anything downstream — otherwise
+        # e.g. "/share/../etc/passwd" never matches _check_critical_path's
+        # prefix check on the literal, unresolved string, even though it
+        # names a critical path once resolved.
+        path = posixpath.normpath(path)
 
         # Normalize Unicode characters to NFC form (most common for filesystems)
         path = unicodedata.normalize("NFC", path)
@@ -150,6 +223,7 @@ class SynologyFileStation:
     def list_directory(self, path: str, additional_info: bool = True) -> List[Dict[str, Any]]:
         """List contents of a directory."""
         formatted_path = self._format_path(path)
+        self._check_critical_path(formatted_path)
 
         params: Dict[str, Any] = {"folder_path": formatted_path}
 
@@ -174,6 +248,12 @@ class SynologyFileStation:
             # Add additional info if available
             if "additional" in file_info:
                 additional = file_info["additional"]
+
+                # DSM returns the requested "size" additional field nested
+                # here, same as time/owner/perm below — not at the file
+                # object's top level, despite the fallback above.
+                if "size" in additional:
+                    item["size"] = additional["size"]
 
                 if "time" in additional:
                     time_info = additional["time"]
@@ -205,6 +285,7 @@ class SynologyFileStation:
     def get_file_info(self, path: str) -> Dict[str, Any]:
         """Get detailed information about a file or directory."""
         formatted_path = self._format_path(path)
+        self._check_critical_path(formatted_path)
 
         data = self._make_request(
             "SYNO.FileStation.List",
@@ -230,6 +311,14 @@ class SynologyFileStation:
         # Add additional info
         if "additional" in file_info:
             additional = file_info["additional"]
+
+            # DSM returns the requested "size" additional field nested
+            # here, same as time/owner/perm below — not at the file
+            # object's top level, despite the fallback above. Without this,
+            # get_file_content's size cap (checked via this method's "size")
+            # never fires against a real NAS.
+            if "size" in additional:
+                result["size"] = additional["size"]
 
             if "time" in additional:
                 time_info = additional["time"]
@@ -259,6 +348,7 @@ class SynologyFileStation:
     def search_files(self, path: str, pattern: str) -> List[Dict[str, Any]]:
         """Search for files matching a pattern."""
         formatted_path = self._format_path(path)
+        self._check_critical_path(formatted_path)
 
         # Start search
         start_data = self._make_request(
@@ -273,7 +363,10 @@ class SynologyFileStation:
             # Wait for search to complete
             import time
 
-            while True:
+            max_wait_time = 120  # Maximum wait time (2 minutes)
+            wait_time = 0.0
+
+            while wait_time < max_wait_time:
                 status_data = self._make_request(
                     "SYNO.FileStation.Search", "2", "status", taskid=task_id
                 )
@@ -282,6 +375,9 @@ class SynologyFileStation:
                     break
 
                 time.sleep(0.5)
+                wait_time += 0.5
+            else:
+                raise Exception(f"Search operation timed out after {max_wait_time} seconds")
 
             # Get results
             result_data = self._make_request("SYNO.FileStation.Search", "2", "list", taskid=task_id)
@@ -377,6 +473,8 @@ class SynologyFileStation:
         if not formatted_path or formatted_path == "/":
             raise Exception("Invalid file path")
 
+        self._check_critical_path(formatted_path)
+
         # Get directory and filename
         directory = os.path.dirname(formatted_path)
         filename = os.path.basename(formatted_path)
@@ -393,13 +491,18 @@ class SynologyFileStation:
             # Use context manager for session to prevent resource leak
             with requests.Session() as session:
                 with open(temp_file_path, "rb") as payload:
-                    # Build URL with parameters
-                    url = f"{self.api_url}?api=SYNO.FileStation.Upload&version=2&method=upload&_sid={self.session_id}"
-
-                    # Create multipart data
+                    # `api`/`version`/`method`/`_sid` go in the multipart form
+                    # body (data=), not the URL — putting `_sid` in the URL
+                    # query string would leak the session id into any log or
+                    # exception text that captures the request URL, even
+                    # though this is a POST.
                     files = {"file": (filename, payload, "text/plain")}
 
                     data = {
+                        "api": "SYNO.FileStation.Upload",
+                        "version": "2",
+                        "method": "upload",
+                        "_sid": self.session_id,
                         "path": directory,
                         "create_parents": "true",
                         "overwrite": str(overwrite).lower(),
@@ -408,17 +511,19 @@ class SynologyFileStation:
                     # Make the request — thread X-SYNO-TOKEN for DSM 7.3.2+ CSRF;
                     # let requests set Content-Type with the multipart boundary.
                     upload_headers = {"X-SYNO-TOKEN": self.syno_token} if self.syno_token else None
-                    response = session.post(
-                        url,
-                        files=files,
-                        data=data,
-                        headers=upload_headers,
-                        verify=self.verify_ssl,
-                        timeout=15,
-                    )
-                    response.raise_for_status()
-
-                    result = response.json()
+                    try:
+                        response = session.post(
+                            self.api_url,
+                            files=files,
+                            data=data,
+                            headers=upload_headers,
+                            verify=self.verify_ssl,
+                            timeout=15,
+                        )
+                        response.raise_for_status()
+                        result = response.json()
+                    except requests.RequestException as e:
+                        raise Exception(self._redact(f"Network error: {e}"))
 
                     if not result.get("success"):
                         error_code = result.get("error", {}).get("code", "unknown")
@@ -458,6 +563,8 @@ class SynologyFileStation:
         # Validate folder path
         if not formatted_folder_path:
             raise Exception("Invalid folder path")
+
+        self._check_critical_path(formatted_folder_path)
 
         # Validate name
         if not name or name.strip() == "":
@@ -511,13 +618,7 @@ class SynologyFileStation:
         if not formatted_path or formatted_path == "/":
             raise Exception("Invalid path - cannot delete root")
 
-        # Safety check for critical paths
-        critical_paths = ["/volume1", "/homes", "/var", "/etc", "/usr", "/bin", "/sbin"]
-        # Check if path IS or STARTS WITH any critical path (with / to prevent /volume11 bypass)
-        if any(
-            formatted_path == cp or formatted_path.startswith(cp + "/") for cp in critical_paths
-        ):
-            raise Exception(f"Cannot delete critical system path: {formatted_path}")
+        self._check_critical_path(formatted_path)
 
         # Auto-detect if this is a file or directory
         try:
@@ -588,17 +689,28 @@ class SynologyFileStation:
             raise e
 
     def _check_critical_path(self, path: str) -> None:
-        """Check if path is critical and raise exception if so.
+        """Check if path is a critical system path, or inside one — raise if so.
+
+        `_CRITICAL_PATHS_EXACT`/`_VOLUME_ROOT_RE` entries block only the
+        literal path itself (a real share/subfolder underneath is
+        unaffected); `_CRITICAL_PATHS_PREFIX` entries block the path and
+        everything under it. This is the one denylist check every
+        path-taking method below calls; it used to be exact-match-only here
+        and separately duplicated with prefix-matching in `delete()` —
+        consolidated so there is one definition of "critical path" instead
+        of two that could drift apart.
 
         Args:
             path: Formatted path to check
 
         Raises:
-            Exception: If path is a critical system path
+            Exception: If path is or is inside a critical system path
         """
-        critical_paths = ["/volume1", "/homes", "/var", "/etc", "/usr", "/bin", "/sbin"]
-        if path in critical_paths:
+        if path in _CRITICAL_PATHS_EXACT or _VOLUME_ROOT_RE.fullmatch(path):
             raise Exception(f"Cannot access critical system path: {path}")
+        for cp in _CRITICAL_PATHS_PREFIX:
+            if path == cp or path.startswith(cp + "/"):
+                raise Exception(f"Cannot access critical system path: {path}")
 
     def get_file_content(self, path: str) -> str:
         """Get the content of a file."""
@@ -607,37 +719,77 @@ class SynologyFileStation:
         # Check for critical paths
         self._check_critical_path(formatted_path)
 
+        # Enforce the size cap via file metadata, before any download
+        # request is made — not after reading the whole file into memory.
+        # File contents are sent to the MCP client's AI provider, and this
+        # tool stays enabled even in restricted mode.
+        info = self.get_file_info(formatted_path)
+        size = info.get("size", 0)
+        if size > self.max_file_content_size:
+            raise Exception(
+                f"File '{path}' is {size} bytes, which exceeds the configured "
+                f"limit of {self.max_file_content_size} bytes (max_file_content_size)."
+            )
+
         # Use the download API to get file content
         download_headers = {"X-SYNO-TOKEN": self.syno_token} if self.syno_token else None
-        response = requests.get(
-            f"{self.base_url}/webapi/entry.cgi",
-            params={
-                "api": "SYNO.FileStation.Download",
-                "version": "2",
-                "method": "download",
-                "path": formatted_path,
-                "_sid": self.session_id,
-            },
-            headers=download_headers,
-            verify=self.verify_ssl,
-            stream=True,
-            timeout=15,
-        )
-        response.raise_for_status()
+        try:
+            response = requests.get(
+                f"{self.base_url}/webapi/entry.cgi",
+                params={
+                    "api": "SYNO.FileStation.Download",
+                    "version": "2",
+                    "method": "download",
+                    "path": formatted_path,
+                    "_sid": self.session_id,
+                },
+                headers=download_headers,
+                verify=self.verify_ssl,
+                stream=True,
+                timeout=15,
+            )
+            response.raise_for_status()
 
-        # Check for API error in the headers (download API is special)
-        if (
-            "Content-Type" in response.headers
-            and "application/json" in response.headers["Content-Type"]
-        ):
-            error_data = response.json()
-            if not error_data.get("success"):
-                error_code = error_data.get("error", {}).get("code", "unknown")
-                raise Exception(f"Synology API error: {error_code}")
+            # Check for API error in the headers (download API is special)
+            if (
+                "Content-Type" in response.headers
+                and "application/json" in response.headers["Content-Type"]
+            ):
+                error_data = response.json()
+                if not error_data.get("success"):
+                    error_code = error_data.get("error", {}).get("code", "unknown")
+                    raise Exception(f"Synology API error: {error_code}")
 
-        # Assuming the content is text, read it
-        # For binary files, this would need to be handled differently
-        return response.text
+            # Enforce the cap on the bytes actually read too, not just on
+            # the get_file_info() pre-check above: that check can be stale
+            # (the file can grow between the two requests) or silently
+            # absent (info.get("size", 0) fails open to 0 if DSM's response
+            # doesn't carry a size for some reason). Streaming (already
+            # requested via stream=True) lets this abort mid-download
+            # instead of buffering an oversized body into memory first.
+            chunks = []
+            total_bytes = 0
+            for chunk in response.iter_content(chunk_size=65536):
+                if not chunk:
+                    continue
+                total_bytes += len(chunk)
+                if total_bytes > self.max_file_content_size:
+                    response.close()
+                    raise Exception(
+                        f"File '{path}' exceeds the configured limit of "
+                        f"{self.max_file_content_size} bytes (max_file_content_size) "
+                        "while downloading."
+                    )
+                chunks.append(chunk)
+
+            # Assuming the content is text, decode it
+            # For binary files, this would need to be handled differently
+            return _decode_downloaded_text(b"".join(chunks), response.encoding)
+        except requests.RequestException as e:
+            # This GET request's URL carries `_sid=<session_id>` directly —
+            # redact before a RequestException's str() (which commonly
+            # embeds the full URL) propagates to the caller.
+            raise Exception(self._redact(f"Network error: {e}"))
 
     def move_file(
         self, source_path: str, destination_path: str, overwrite: bool = False

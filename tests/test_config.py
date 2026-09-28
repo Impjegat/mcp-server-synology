@@ -6,6 +6,8 @@ import sys
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 
 # Force reimport of config module to avoid cached global instance
 def reload_config():
@@ -26,7 +28,7 @@ class TestSynologyConfig:
         with patch.dict(
             os.environ,
             {
-                "SYNOLOGY_URL": "http://test.local:5000",
+                "SYNOLOGY_URL": "https://test.local:5001",
                 "SYNOLOGY_USERNAME": "testuser",
                 "SYNOLOGY_PASSWORD": "testpass",
             },
@@ -37,9 +39,41 @@ class TestSynologyConfig:
 
                     config = SynologyConfig()
 
-                    assert config.synology_url == "http://test.local:5000"
+                    assert config.synology_url == "https://test.local:5001"
                     assert config.synology_username == "testuser"
                     assert config.synology_password == "testpass"
+
+    def test_env_rejects_http_url(self):
+        """SYNOLOGY_URL using plain http:// must fail fast at startup."""
+        reload_config()
+
+        with patch.dict(
+            os.environ,
+            {
+                "SYNOLOGY_URL": "http://test.local:5000",
+                "SYNOLOGY_USERNAME": "testuser",
+                "SYNOLOGY_PASSWORD": "testpass",
+            },
+        ):
+            # config.py constructs a module-level `config = SynologyConfig()`
+            # singleton at import time, and _load_env_settings() (which
+            # validates SYNOLOGY_URL) runs before _load_settings() (which
+            # touches SETTINGS_FILE) — so the fresh import below (sys.modules
+            # was cleared by reload_config() above) raises here, under this
+            # patched env, before SETTINGS_FILE is ever read. No need to mock
+            # it: patch("config.SETTINGS_FILE", ...) would itself trigger
+            # this same fresh import via its own string-based target
+            # resolution, outside of any pytest.raises context.
+            #
+            # Match on ValueError (InsecureURLError's stable base class)
+            # rather than InsecureURLError itself: a fresh reimport defines a
+            # brand-new class object each time, so any reference obtained
+            # only after a *successful* import wouldn't be the same class
+            # this raise actually uses.
+            with pytest.raises(ValueError, match="https://") as exc_info:
+                import config  # noqa: F401
+
+            assert exc_info.value.__class__.__name__ == "InsecureURLError"
 
     def test_default_values(self):
         """Test default configuration values."""
@@ -56,7 +90,186 @@ class TestSynologyConfig:
                     assert config.server_version == "1.0.0"
                     assert config.default_session_timeout == 3600
                     assert config.auto_login is True
-                    assert config.verify_ssl is False
+                    assert config.verify_ssl is True
+                    # Restricted mode is on by default — the whole
+                    # remediation objective is an installation limited to
+                    # browsing and monitoring unless deliberately widened.
+                    assert config.restricted_mode is True
+                    assert config.max_file_content_size == 1_000_000
+
+    def test_max_file_content_size_env_var_override(self):
+        reload_config()
+
+        with patch.dict(os.environ, {"MAX_FILE_CONTENT_SIZE": "5000"}, clear=True):
+            with patch("config.SETTINGS_FILE", Path("/nonexistent/secrets.json")):
+                with patch.object(Path, "exists", return_value=False):
+                    from config import SynologyConfig
+
+                    assert SynologyConfig().max_file_content_size == 5000
+
+    def test_max_file_content_size_settings_json_overrides_env(self, tmp_path):
+        secrets_data = {
+            "synology": {
+                "nas1": {
+                    "host": "192.168.1.100",
+                    "port": 5001,
+                    "username": "admin",
+                    "password": "pass123",
+                }
+            },
+            "server": {"max_file_content_size": 42},
+        }
+        secrets_file = tmp_path / "secrets.json"
+        secrets_file.write_text(json.dumps(secrets_data))
+        os.chmod(str(secrets_file), 0o600)
+
+        reload_config()
+
+        with patch.dict(os.environ, {"MAX_FILE_CONTENT_SIZE": "5000"}, clear=True):
+            with patch("config.SETTINGS_FILE", secrets_file):
+                from config import SynologyConfig
+
+                assert SynologyConfig().max_file_content_size == 42
+
+    def test_max_file_content_size_settings_json_coerces_quoted_number(self, tmp_path):
+        """Unlike the MAX_FILE_CONTENT_SIZE env var (always a string, always
+        int()-cast), a settings.json author could quote the number. Coerce
+        it the same way, so a quoted value fails fast here with a clear
+        error if it's ever non-numeric, rather than raising deep inside
+        get_file_content's size comparison."""
+        secrets_data = {
+            "synology": {
+                "nas1": {
+                    "host": "192.168.1.100",
+                    "port": 5001,
+                    "username": "admin",
+                    "password": "pass123",
+                }
+            },
+            "server": {"max_file_content_size": "42"},
+        }
+        secrets_file = tmp_path / "secrets.json"
+        secrets_file.write_text(json.dumps(secrets_data))
+        os.chmod(str(secrets_file), 0o600)
+
+        reload_config()
+
+        with patch.dict(os.environ, {}, clear=True):
+            with patch("config.SETTINGS_FILE", secrets_file):
+                from config import SynologyConfig
+
+                assert SynologyConfig().max_file_content_size == 42
+
+    def test_restricted_mode_env_var_disables_it(self):
+        reload_config()
+
+        with patch.dict(os.environ, {"RESTRICTED_MODE": "false"}, clear=True):
+            with patch("config.SETTINGS_FILE", Path("/nonexistent/secrets.json")):
+                with patch.object(Path, "exists", return_value=False):
+                    from config import SynologyConfig
+
+                    assert SynologyConfig().restricted_mode is False
+
+    def test_restricted_mode_settings_json_overrides_env(self, tmp_path):
+        secrets_data = {
+            "synology": {
+                "nas1": {
+                    "host": "192.168.1.100",
+                    "port": 5001,
+                    "username": "admin",
+                    "password": "pass123",
+                }
+            },
+            "server": {"restricted_mode": False},
+        }
+        secrets_file = tmp_path / "secrets.json"
+        secrets_file.write_text(json.dumps(secrets_data))
+        os.chmod(str(secrets_file), 0o600)
+
+        reload_config()
+
+        with patch.dict(os.environ, {"RESTRICTED_MODE": "true"}, clear=True):
+            with patch("config.SETTINGS_FILE", secrets_file):
+                from config import SynologyConfig
+
+                assert SynologyConfig().restricted_mode is False
+
+    def test_verify_ssl_env_var_accepts_ca_bundle_path(self):
+        """VERIFY_SSL isn't just true/false — a value that isn't either
+        literal string is a CA-bundle path, passed straight through to
+        requests' own `verify=` parameter (which already accepts a path)."""
+        reload_config()
+
+        with patch.dict(os.environ, {"VERIFY_SSL": "/etc/ssl/certs/my-ca.pem"}, clear=True):
+            with patch("config.SETTINGS_FILE", Path("/nonexistent/secrets.json")):
+                with patch.object(Path, "exists", return_value=False):
+                    from config import SynologyConfig
+
+                    assert SynologyConfig().verify_ssl == "/etc/ssl/certs/my-ca.pem"
+
+    def test_verify_ssl_ca_bundle_path_strips_incidental_whitespace(self):
+        """Env vars sourced from files/Docker/K8s secrets commonly carry
+        incidental leading/trailing whitespace — left in, the path would
+        silently fail to resolve, producing a confusing error deep inside
+        `requests` rather than a clear config error."""
+        reload_config()
+
+        with patch.dict(os.environ, {"VERIFY_SSL": "  /etc/ssl/certs/my-ca.pem  "}, clear=True):
+            with patch("config.SETTINGS_FILE", Path("/nonexistent/secrets.json")):
+                with patch.object(Path, "exists", return_value=False):
+                    from config import SynologyConfig
+
+                    assert SynologyConfig().verify_ssl == "/etc/ssl/certs/my-ca.pem"
+
+    @pytest.mark.parametrize("value,expected", [("1", True), ("yes", True), ("On", True)])
+    def test_verify_ssl_recognizes_truthy_aliases(self, value, expected):
+        reload_config()
+
+        with patch.dict(os.environ, {"VERIFY_SSL": value}, clear=True):
+            with patch("config.SETTINGS_FILE", Path("/nonexistent/secrets.json")):
+                with patch.object(Path, "exists", return_value=False):
+                    from config import SynologyConfig
+
+                    assert SynologyConfig().verify_ssl is expected
+
+    @pytest.mark.parametrize("value", ["0", "no", "Off"])
+    def test_verify_ssl_recognizes_falsy_aliases(self, value):
+        """Before CA-bundle-path support, any non-"true" value silently
+        meant "disabled" (`.lower() == "true"`) — these common boolean
+        aliases must keep working rather than being treated as a CA-bundle
+        path and failing hard the first time DSM is contacted."""
+        reload_config()
+
+        with patch.dict(os.environ, {"VERIFY_SSL": value}, clear=True):
+            with patch("config.SETTINGS_FILE", Path("/nonexistent/secrets.json")):
+                with patch.object(Path, "exists", return_value=False):
+                    from config import SynologyConfig
+
+                    assert SynologyConfig().verify_ssl is False
+
+    def test_verify_ssl_settings_json_accepts_ca_bundle_path(self, tmp_path):
+        secrets_data = {
+            "synology": {
+                "nas1": {
+                    "host": "192.168.1.100",
+                    "port": 5001,
+                    "username": "admin",
+                    "password": "pass123",
+                }
+            },
+            "server": {"verify_ssl": "/etc/ssl/certs/my-ca.pem"},
+        }
+        secrets_file = tmp_path / "secrets.json"
+        secrets_file.write_text(json.dumps(secrets_data))
+        os.chmod(str(secrets_file), 0o600)
+
+        reload_config()
+
+        with patch.dict(os.environ, {}, clear=True):
+            with patch("config.SETTINGS_FILE", secrets_file):
+                from config import SynologyConfig
+
+                assert SynologyConfig().verify_ssl == "/etc/ssl/certs/my-ca.pem"
 
     def test_has_credentials_with_secrets(self, tmp_path):
         """Test credential detection with secrets.json."""
@@ -85,7 +298,35 @@ class TestSynologyConfig:
 
                 assert cfg.has_synology_credentials() is True
                 assert "test_nas" in cfg.nas_configs
-                assert cfg.nas_configs["test_nas"]["base_url"] == "http://192.168.1.100:5000"
+                # HTTPS is forced regardless of port — no silent http fallback.
+                assert cfg.nas_configs["test_nas"]["base_url"] == "https://192.168.1.100:5000"
+
+    def test_omitted_port_defaults_to_5001(self, tmp_path):
+        """5001 is DSM's default HTTPS port; the old default (5000, HTTP-only)
+        would fail outright since base_url is always forced to https://."""
+        secrets_data = {
+            "synology": {
+                "test_nas": {
+                    "host": "192.168.1.100",
+                    "username": "admin",
+                    "password": "pass123",
+                }
+            }
+        }
+
+        secrets_file = tmp_path / "secrets.json"
+        secrets_file.write_text(json.dumps(secrets_data))
+        os.chmod(str(secrets_file), 0o600)  # config refuses insecure-perm files
+
+        reload_config()
+
+        with patch.dict(os.environ, {}, clear=True):
+            with patch("config.SETTINGS_FILE", secrets_file):
+                from config import SynologyConfig
+
+                cfg = SynologyConfig()
+
+                assert cfg.nas_configs["test_nas"]["base_url"] == "https://192.168.1.100:5001"
 
     def test_get_nas_names(self, tmp_path):
         """Test getting NAS names from secrets.json."""
@@ -169,7 +410,7 @@ class TestSynologyConfig:
         with patch.dict(
             os.environ,
             {
-                "SYNOLOGY_URL": "http://test.local:5000",
+                "SYNOLOGY_URL": "https://test.local:5001",
                 "SYNOLOGY_USERNAME": "user",
                 "SYNOLOGY_PASSWORD": "pass",
                 "SESSION_TIMEOUT": "30",
@@ -256,7 +497,7 @@ class TestSynologyConfig:
                 cfg = SynologyConfig()
 
                 url = cfg.resolve_base_url("office_nas")
-                assert url == "http://office.example.com:5000"
+                assert url == "https://office.example.com:5000"
 
                 # Test non-existent NAS
                 url = cfg.resolve_base_url("nonexistent")
@@ -289,6 +530,130 @@ class TestFilePermissions:
                 # Permission warning is emitted via logger.warning, not stderr
                 assert any("permission" in rec.message.lower() for rec in caplog.records)
 
+    def test_permission_check_skips_without_getuid(self, tmp_path, caplog, monkeypatch):
+        """Platforms without os.getuid() (Windows) must not crash on load.
+
+        os.getuid() and the group/other mode bits it gates don't exist on
+        Windows (NTFS uses ACLs, not POSIX mode bits). The check should
+        degrade to "skip with a warning" rather than raising AttributeError.
+        """
+        import json
+        import logging
+
+        secrets_data = {
+            "synology": {
+                "test_nas": {
+                    "host": "192.168.1.100",
+                    "port": 5001,
+                    "username": "admin",
+                    "password": "pass123",
+                }
+            }
+        }
+        secrets_file = tmp_path / "secrets.json"
+        secrets_file.write_text(json.dumps(secrets_data))
+
+        # Simulate a platform without os.getuid() regardless of what's
+        # actually running this test (raising=False: a no-op on platforms
+        # where it's already absent, e.g. Windows).
+        monkeypatch.delattr(os, "getuid", raising=False)
+        # On real Windows, Path.home() never touches os.getuid() at all —
+        # ntpath.expanduser() resolves "~" from USERPROFILE/HOME instead.
+        # Deleting os.getuid() to simulate that here would otherwise also
+        # break config.py's own unrelated module-level Path.home() call
+        # (used to default XDG_CONFIG_HOME), which does depend on getuid()
+        # via posixpath.expanduser() on this POSIX test runner.
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        reload_config()
+
+        with patch.dict(os.environ, {}, clear=True):
+            with patch("config.SETTINGS_FILE", secrets_file):
+                from config import SynologyConfig
+
+                with caplog.at_level(logging.WARNING, logger="synology-mcp"):
+                    cfg = SynologyConfig()
+
+                assert any(
+                    "skipping file-permission check" in rec.message.lower()
+                    for rec in caplog.records
+                )
+                # The file must still actually load (not be refused) once
+                # the permission check is skipped.
+                assert "test_nas" in cfg.nas_configs
+
+
+class TestSaveDeviceId:
+    """Test SynologyConfig.save_device_id()'s atomic, permission-safe write."""
+
+    def test_save_device_id_writes_restricted_file_and_preserves_other_fields(self, tmp_path):
+        """The settings file must never sit at default-umask permissions,
+        not even momentarily via an intermediate temp file — and fields
+        this class doesn't know about (here, `note`) must survive the
+        read-modify-write untouched."""
+        secrets_data = {
+            "synology": {
+                "nas1": {
+                    "host": "192.168.1.100",
+                    "port": 5001,
+                    "username": "admin",
+                    "password": "pass123",
+                    "note": "primary",
+                }
+            }
+        }
+        secrets_file = tmp_path / "secrets.json"
+        secrets_file.write_text(json.dumps(secrets_data))
+        os.chmod(str(secrets_file), 0o600)
+
+        reload_config()
+
+        with patch.dict(os.environ, {}, clear=True):
+            with patch("config.SETTINGS_FILE", secrets_file):
+                from config import SynologyConfig
+
+                cfg = SynologyConfig()
+                assert cfg.save_device_id("nas1", "DID_test123") is True
+
+        if hasattr(os, "getuid"):
+            import stat
+
+            mode = stat.S_IMODE(secrets_file.stat().st_mode)
+            assert mode == 0o600
+
+        on_disk = json.loads(secrets_file.read_text())
+        nas1 = on_disk["synology"]["nas1"]
+        assert nas1["device_id"] == "DID_test123"
+        assert nas1["password"] == "pass123"
+        assert nas1["note"] == "primary"
+
+        # In-memory config reflects the write immediately, no restart needed.
+        assert cfg.nas_configs["nas1"]["device_id"] == "DID_test123"
+
+    def test_save_device_id_returns_false_for_unknown_nas(self, tmp_path):
+        secrets_data = {
+            "synology": {
+                "nas1": {
+                    "host": "192.168.1.100",
+                    "port": 5001,
+                    "username": "admin",
+                    "password": "pass123",
+                }
+            }
+        }
+        secrets_file = tmp_path / "secrets.json"
+        secrets_file.write_text(json.dumps(secrets_data))
+        os.chmod(str(secrets_file), 0o600)
+
+        reload_config()
+
+        with patch.dict(os.environ, {}, clear=True):
+            with patch("config.SETTINGS_FILE", secrets_file):
+                from config import SynologyConfig
+
+                cfg = SynologyConfig()
+                assert cfg.save_device_id("does_not_exist", "DID_x") is False
+
 
 def test_config_str_representation():
     """Test string representation of config."""
@@ -297,7 +662,7 @@ def test_config_str_representation():
     with patch.dict(
         os.environ,
         {
-            "SYNOLOGY_URL": "http://test.local:5000",
+            "SYNOLOGY_URL": "https://test.local:5001",
             "SYNOLOGY_USERNAME": "user",
             "SYNOLOGY_PASSWORD": "pass",
         },
