@@ -1,8 +1,8 @@
 # Independent rereview follow-ups
 
-Status: In progress
+Status: Shipped — all three PRs merged into `main` ([#9](https://github.com/Impjegat/mcp-server-synology/pull/9), [#10](https://github.com/Impjegat/mcp-server-synology/pull/10), [#11](https://github.com/Impjegat/mcp-server-synology/pull/11))
 Initiated: 2026-09-28
-Source: [`REVIEW_REPORT.md`](REVIEW_REPORT.md) — an independent rereview of `main` at `0ed41f6` (the [remediation roadmap](../shipped/2026-09-27-remediation-roadmap/PLAN.md) merged via #7)
+Source: [`REVIEW_REPORT.md`](REVIEW_REPORT.md) — an independent rereview of `main` at `0ed41f6` (the [remediation roadmap](../2026-09-27-remediation-roadmap/PLAN.md) merged via #7)
 
 ## Why
 
@@ -26,8 +26,8 @@ Not included (scope decisions, not bugs):
 
 ## PRs
 
-1. [`plans/shipped/2026-09-28-rereview-security-fixes/`](../shipped/2026-09-28-rereview-security-fixes/PLAN.md) — findings 3, 1, 2. PR: [#9](https://github.com/Impjegat/mcp-server-synology/pull/9).
-2. [`plans/shipped/2026-09-28-rereview-reliability-fixes/`](../shipped/2026-09-28-rereview-reliability-fixes/PLAN.md) — findings 4, 5, 6. PR: [#10](https://github.com/Impjegat/mcp-server-synology/pull/10).
-3. `plans/shipped/2026-09-28-windows-test-isolation/` — finding 7.
+1. [`plans/shipped/2026-09-28-rereview-security-fixes/`](../2026-09-28-rereview-security-fixes/PLAN.md) — findings 3, 1, 2. PR: [#9](https://github.com/Impjegat/mcp-server-synology/pull/9).
+2. [`plans/shipped/2026-09-28-rereview-reliability-fixes/`](../2026-09-28-rereview-reliability-fixes/PLAN.md) — findings 4, 5, 6. PR: [#10](https://github.com/Impjegat/mcp-server-synology/pull/10).
+3. [`plans/shipped/2026-09-28-windows-test-isolation/`](../2026-09-28-windows-test-isolation/PLAN.md) — finding 7. PR: [#11](https://github.com/Impjegat/mcp-server-synology/pull/11).
 
 Each is its own PR against `main`, driven to green individually, same process as the original roadmap.

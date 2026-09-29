@@ -7,6 +7,24 @@ import tempfile
 from pathlib import Path
 
 import pytest
+from urllib3.connectionpool import HTTPConnectionPool
+
+from tests.socket_guard import is_local_address
+
+# The suite's progress output is full of emoji, and pytest.ini runs with -s
+# (no output capture), so those print()s go straight to the real stdout. When
+# that is a pipe or a file on Windows — as in CI, or `pytest | tee log` — Python
+# encodes it with the ANSI code page (cp1252), which has no emoji: the banner
+# printed by pytest_sessionstart raised UnicodeEncodeError and aborted the whole
+# session before a single test ran. Whether the suite runs must not depend on
+# the terminal's encoding, so characters it can't encode degrade to "?".
+#
+# The original streams (sys.__stdout__/__stderr__) are the ones to fix: while
+# this file is imported pytest has swapped in its own UTF-8 capture streams,
+# but the real ones are what print() reaches once capture is suspended or off.
+for _stream in (sys.__stdout__, sys.__stderr__, sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(errors="replace")
 
 # Add src directory to Python path
 src_path = Path(__file__).parent.parent / "src"
@@ -32,6 +50,11 @@ from auth.synology_auth import SynologyAuth
 from config import config
 from downloadstation.synology_downloadstation import SynologyDownloadStation
 
+# Kept at import time, before any fixture patches the class, so the guard
+# below can still hand a permitted connection to the genuine implementation.
+_REAL_SOCKET_CONNECT = socket.socket.connect
+_REAL_SOCKET_CONNECT_EX = socket.socket.connect_ex
+
 
 @pytest.fixture(autouse=True)
 def _block_network_unless_real_nas(request, monkeypatch):
@@ -41,19 +64,53 @@ def _block_network_unless_real_nas(request, monkeypatch):
     mocked call could fall through to the real implementation). Every
     other test in the suite already mocks its network calls, so this has
     nothing legitimate to block for them.
+
+    Connections that never leave this machine are let through at the socket
+    level: on Windows, asyncio creates its event loop's self-pipe as a
+    connected pair of loopback sockets (socket.socketpair() is emulated with
+    a listening socket and a connect() on Windows), so blocking every
+    connect() made each async test fail during setup, before it reached the
+    code under test.
+
+    That exemption alone would open a hole: `requests` honors HTTP(S)_PROXY,
+    and a proxy running on this machine (a local dev proxy, or a sandbox's
+    forwarder) is a loopback address — so an unmocked request could tunnel
+    out through it. HTTP requests are therefore also blocked one level up,
+    in urllib3's connection pool, whatever the proxy settings. That point is
+    below requests' own certificate-path handling (HTTPAdapter.cert_verify)
+    and above any connection attempt.
+
+    That block covers urllib3/requests, the only HTTP stack the server uses.
+    If httpx or aiohttp is ever used directly, block it here too, or the same
+    loopback-proxy route reopens. It also means a test that wants a real
+    loopback HTTP server must be marked real_nas or mock the call.
     """
     if request.node.get_closest_marker("real_nas") is not None:
         return
 
-    def _blocked(*_args, **_kwargs):
+    def _blocked(address):
         raise RuntimeError(
             "Outbound network access is blocked in tests not marked "
             "@pytest.mark.real_nas. Mock the network call, or mark the "
-            "test real_nas if it deliberately needs a live NAS."
+            f"test real_nas if it deliberately needs a live NAS. (Attempted: {address!r})"
         )
 
-    monkeypatch.setattr(socket.socket, "connect", _blocked)
-    monkeypatch.setattr(socket.socket, "connect_ex", _blocked)
+    def _guarded_connect(self, address):
+        if is_local_address(address):
+            return _REAL_SOCKET_CONNECT(self, address)
+        _blocked(address)
+
+    def _guarded_connect_ex(self, address):
+        if is_local_address(address):
+            return _REAL_SOCKET_CONNECT_EX(self, address)
+        _blocked(address)
+
+    def _blocked_urlopen(self, method, url, *args, **kwargs):
+        _blocked(f"{method} {self.scheme}://{self.host}:{self.port}")
+
+    monkeypatch.setattr(HTTPConnectionPool, "urlopen", _blocked_urlopen)
+    monkeypatch.setattr(socket.socket, "connect", _guarded_connect)
+    monkeypatch.setattr(socket.socket, "connect_ex", _guarded_connect_ex)
 
 
 @pytest.fixture(scope="session")

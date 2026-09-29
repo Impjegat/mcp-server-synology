@@ -12,3 +12,5 @@ This folder tracks work-in-progress remediation/feature plans for this repositor
 ## Current status
 
 See [`shipped/2026-09-27-remediation-roadmap/PLAN.md`](shipped/2026-09-27-remediation-roadmap/PLAN.md) for the roadmap and which PR folder implements which section.
+
+A later independent rereview produced a second, smaller set of fixes: see [`shipped/2026-09-28-rereview-followups/PLAN.md`](shipped/2026-09-28-rereview-followups/PLAN.md).

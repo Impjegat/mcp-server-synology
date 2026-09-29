@@ -1,6 +1,10 @@
 pycryptodome
 requests
-mcp>=1.28.1
+# mcp 2.x replaced the low-level Server decorators (`@server.list_tools()`,
+# `@server.call_tool()`) with constructor callbacks and changed the startup
+# code; src/mcp_server.py is written against 1.x, and against 2.x
+# SynologyMCPServer() fails on construction. Lift the cap once that is migrated.
+mcp>=1.28.1,<2
 python-dotenv
 
 # Testing dependencies
