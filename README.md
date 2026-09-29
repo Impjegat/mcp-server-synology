@@ -509,6 +509,8 @@ The MCP server supports DSM accounts with 2FA enabled. There are two ways to use
 
    When `device_id` is present, it takes precedence over `otp_code` (trusted-device path). Legacy `.env` users can set the one-shot `SYNOLOGY_OTP_CODE` env var; for persistent `device_id`, migrate to `settings.json` (long opaque token doesn't fit an env var cleanly).
 
+   **On Windows**, saving the device token also requires restricting `settings.json`'s permissions via `icacls` (see the Windows Installation section's "File permissions" note above) — if that fails, the token isn't saved at all (a warning is logged; nothing is left half-written) and you'll be prompted for `otp_code` again on the next start.
+
 ## 📖 Usage Examples
 
 ### 📁 File Operations

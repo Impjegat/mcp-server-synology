@@ -160,6 +160,40 @@ def test_redacting_filter_scrubs_a_non_string_arg_like_an_exception_object():
     assert "***REDACTED***" in record.getMessage()
 
 
+def test_redacting_filter_leaves_a_literal_percent_in_the_rendered_message_alone():
+    """The filter renders the message once via getMessage() (msg % args),
+    then stores the *already-rendered* text back into record.msg and clears
+    record.args. If the rendered text happens to contain a literal `%`
+    (e.g. from `%%`-escaping in the original format string, or one already
+    present in an arg's own text), it must survive untouched rather than
+    being reinterpreted as a new format specifier the next time something
+    calls record.getMessage() — safe here specifically because
+    LogRecord.getMessage() only attempts % substitution when record.args is
+    truthy, and this filter always clears it to None on the success path."""
+    secrets = ["LIVE_SID"]
+    filt = RedactingFilter(lambda: secrets)
+
+    class Obj:
+        def __str__(self):
+            return "obj-with-LIVE_SID-inside"
+
+    record = logging.LogRecord(
+        name="test",
+        level=logging.INFO,
+        pathname=__file__,
+        lineno=1,
+        msg="Battery: %d%% (%s)",
+        args=(100, Obj()),
+        exc_info=None,
+    )
+    assert filt.filter(record) is True
+    assert record.args is None
+    # Calling getMessage() again (as the real handler will, at emit time)
+    # must not raise and must not re-run % substitution against the
+    # literal "%" now sitting in the already-rendered text.
+    assert record.getMessage() == "Battery: 100% (obj-with-***REDACTED***-inside)"
+
+
 def test_redacting_filter_scrubs_a_non_string_arg_in_the_malformed_format_fallback():
     """When getMessage() itself raises (a malformed format string — here,
     too few args for its placeholders), the filter falls back to redacting
