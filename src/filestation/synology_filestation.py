@@ -5,6 +5,7 @@ import os
 import posixpath
 import re
 import tempfile
+import time
 import unicodedata
 from typing import Any, Dict, List, Optional
 
@@ -49,6 +50,32 @@ def _decode_downloaded_text(content: bytes, declared_encoding: Optional[str]) ->
     except Exception:
         detected = None
     return content.decode(detected or "utf-8", errors="replace")
+
+
+def _dsm_download_error_code(body: bytes) -> Optional[str]:
+    """If `body` is a DSM error envelope, return its error code (or
+    "unknown"); return None if it is anything else.
+
+    DSM's download endpoint reports failures as a small JSON body,
+    `{"success": false, "error": {"code": N}}`, served with a JSON
+    Content-Type — but a real `.json` file downloads with that same
+    Content-Type. So a JSON Content-Type alone can't tell the two apart; the
+    body has to look like the error envelope: an object whose `success` is
+    `false` and that carries an `error` key. Anything else — a list, a
+    scalar, invalid JSON, an object without those two keys — is the file's
+    own content.
+    """
+    try:
+        data = json.loads(body)
+    except (ValueError, RecursionError):
+        # ValueError covers both malformed JSON and a body that isn't valid
+        # text in any JSON encoding; RecursionError is a deeply nested
+        # (but size-capped) file blowing the parser's stack.
+        return None
+    if not isinstance(data, dict) or data.get("success") is not False or "error" not in data:
+        return None
+    error = data["error"]
+    return str(error.get("code", "unknown")) if isinstance(error, dict) else "unknown"
 
 
 class SynologyFileStation:
@@ -361,12 +388,13 @@ class SynologyFileStation:
 
         try:
             # Wait for search to complete
-            import time
-
             max_wait_time = 120  # Maximum wait time (2 minutes)
-            wait_time = 0.0
+            # A wall-clock deadline, not a tally of time spent sleeping: each
+            # status request can itself take up to its 15 s timeout, which a
+            # sleep counter never sees (240 polls x 15 s is an hour, not 2 min).
+            deadline = time.monotonic() + max_wait_time
 
-            while wait_time < max_wait_time:
+            while time.monotonic() < deadline:
                 status_data = self._make_request(
                     "SYNO.FileStation.Search", "2", "status", taskid=task_id
                 )
@@ -375,7 +403,6 @@ class SynologyFileStation:
                     break
 
                 time.sleep(0.5)
-                wait_time += 0.5
             else:
                 raise Exception(f"Search operation timed out after {max_wait_time} seconds")
 
@@ -649,12 +676,10 @@ class SynologyFileStation:
 
         try:
             # Wait for delete to complete
-            import time
-
             max_wait_time = 120  # Maximum wait time (2 minutes)
-            wait_time = 0.0
+            deadline = time.monotonic() + max_wait_time  # wall-clock, as in search_files
 
-            while wait_time < max_wait_time:
+            while time.monotonic() < deadline:
                 status_data = self._make_request(
                     "SYNO.FileStation.Delete", "2", "status", taskid=task_id
                 )
@@ -676,7 +701,6 @@ class SynologyFileStation:
                     }
 
                 time.sleep(0.5)
-                wait_time += 0.5
 
             raise Exception(f"Delete operation timed out after {max_wait_time} seconds")
 
@@ -748,43 +772,50 @@ class SynologyFileStation:
                 stream=True,
                 timeout=15,
             )
-            response.raise_for_status()
+            # `with response:` closes the connection on every exit path —
+            # the oversize abort, a DSM error, an exception mid-stream —
+            # not only the one that used to call close() by hand.
+            with response:
+                response.raise_for_status()
 
-            # Check for API error in the headers (download API is special)
-            if (
-                "Content-Type" in response.headers
-                and "application/json" in response.headers["Content-Type"]
-            ):
-                error_data = response.json()
-                if not error_data.get("success"):
-                    error_code = error_data.get("error", {}).get("code", "unknown")
-                    raise Exception(f"Synology API error: {error_code}")
+                # Enforce the cap on the bytes actually read too, not just on
+                # the get_file_info() pre-check above: that check can be stale
+                # (the file can grow between the two requests) or silently
+                # absent (info.get("size", 0) fails open to 0 if DSM's response
+                # doesn't carry a size for some reason). Streaming (already
+                # requested via stream=True) lets this abort mid-download
+                # instead of buffering an oversized body into memory first.
+                #
+                # This read comes before any JSON handling on purpose:
+                # response.json() would pull the entire body into memory
+                # first, so a JSON response would bypass the cap.
+                chunks = []
+                total_bytes = 0
+                for chunk in response.iter_content(chunk_size=65536):
+                    if not chunk:
+                        continue
+                    total_bytes += len(chunk)
+                    if total_bytes > self.max_file_content_size:
+                        raise Exception(
+                            f"File '{path}' exceeds the configured limit of "
+                            f"{self.max_file_content_size} bytes (max_file_content_size) "
+                            "while downloading."
+                        )
+                    chunks.append(chunk)
+                body = b"".join(chunks)
 
-            # Enforce the cap on the bytes actually read too, not just on
-            # the get_file_info() pre-check above: that check can be stale
-            # (the file can grow between the two requests) or silently
-            # absent (info.get("size", 0) fails open to 0 if DSM's response
-            # doesn't carry a size for some reason). Streaming (already
-            # requested via stream=True) lets this abort mid-download
-            # instead of buffering an oversized body into memory first.
-            chunks = []
-            total_bytes = 0
-            for chunk in response.iter_content(chunk_size=65536):
-                if not chunk:
-                    continue
-                total_bytes += len(chunk)
-                if total_bytes > self.max_file_content_size:
-                    response.close()
-                    raise Exception(
-                        f"File '{path}' exceeds the configured limit of "
-                        f"{self.max_file_content_size} bytes (max_file_content_size) "
-                        "while downloading."
-                    )
-                chunks.append(chunk)
+                # The download API is special: it reports failure as a JSON
+                # body rather than an HTTP error status. See
+                # _dsm_download_error_code for why a JSON Content-Type isn't
+                # enough to call it an error.
+                if "application/json" in response.headers.get("Content-Type", "").lower():
+                    error_code = _dsm_download_error_code(body)
+                    if error_code is not None:
+                        raise Exception(f"Synology API error: {error_code}")
 
-            # Assuming the content is text, decode it
-            # For binary files, this would need to be handled differently
-            return _decode_downloaded_text(b"".join(chunks), response.encoding)
+                # Assuming the content is text, decode it
+                # For binary files, this would need to be handled differently
+                return _decode_downloaded_text(body, response.encoding)
         except requests.RequestException as e:
             # This GET request's URL carries `_sid=<session_id>` directly —
             # redact before a RequestException's str() (which commonly
@@ -835,12 +866,10 @@ class SynologyFileStation:
 
         try:
             # Wait for move to complete
-            import time
-
             max_wait_time = 60  # Maximum wait time in seconds
-            wait_time = 0.0
+            deadline = time.monotonic() + max_wait_time  # wall-clock, as in search_files
 
-            while wait_time < max_wait_time:
+            while time.monotonic() < deadline:
                 status_data = self._make_request(
                     "SYNO.FileStation.CopyMove", "3", "status", taskid=task_id
                 )
@@ -869,7 +898,6 @@ class SynologyFileStation:
                     }
 
                 time.sleep(0.5)
-                wait_time += 0.5
 
             raise Exception(f"Move operation timed out after {max_wait_time} seconds")
 

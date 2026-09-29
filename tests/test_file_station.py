@@ -185,9 +185,9 @@ class TestSynologyFileStation:
 
         for input_path, expected in test_cases:
             result = file_station._format_path(input_path)
-            assert result == expected, (
-                f"Path '{input_path}' should format to '{expected}', got '{result}'"
-            )
+            assert (
+                result == expected
+            ), f"Path '{input_path}' should format to '{expected}', got '{result}'"
             print(f"✅ '{input_path}' → '{result}'")
 
         print("✅ Path formatting tests passed")
@@ -462,11 +462,27 @@ def test_dot_dot_traversal_cannot_bypass_the_critical_path_check(method_name, ar
 # ---------------------------------------------------------------------------
 
 
+class _FakeClock:
+    """Stands in for the `time` module as `synology_filestation` sees it, so
+    a polling deadline can be exercised without waiting in real time: the
+    clock only moves when something calls `sleep()` or `advance()`."""
+
+    def __init__(self):
+        self.now = 0.0
+
+    def monotonic(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.now += seconds
+
+    def advance(self, seconds):
+        self.now += seconds
+
+
 def test_search_files_times_out_instead_of_polling_forever(monkeypatch):
     """search_files previously polled with `while True` and no deadline —
     an unresponsive NAS would hang this call indefinitely."""
-    import time
-
     from filestation.synology_filestation import SynologyFileStation
 
     fs = SynologyFileStation("https://nas.example.test:5001", "sid")
@@ -481,7 +497,7 @@ def test_search_files_times_out_instead_of_polling_forever(monkeypatch):
         raise AssertionError(f"unexpected method {method}")
 
     monkeypatch.setattr(fs, "_make_request", fake_make_request)
-    monkeypatch.setattr(time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr("filestation.synology_filestation.time", _FakeClock())
 
     with pytest.raises(Exception, match="timed out"):
         fs.search_files("/share", "*.txt")
@@ -697,3 +713,235 @@ def test_get_file_content_size_cap_fires_against_a_realistic_dsm_response(monkey
 
     with pytest.raises(Exception, match="exceeds the configured limit"):
         fs.get_file_content("/share/f")
+
+
+# ---------------------------------------------------------------------------
+# Rereview reliability fixes: polling deadlines are wall-clock, and a JSON
+# download is read through the size cap like any other.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "method_name,args,api,limit_seconds",
+    [
+        ("search_files", ("/share", "*.txt"), "SYNO.FileStation.Search", 120),
+        ("delete", ("/share/a.txt",), "SYNO.FileStation.Delete", 120),
+        ("move_file", ("/share/a.txt", "/share/dest"), "SYNO.FileStation.CopyMove", 60),
+    ],
+)
+def test_polling_deadline_counts_the_time_each_status_request_takes(
+    monkeypatch, method_name, args, api, limit_seconds
+):
+    """The deadline used to be a tally of time spent *sleeping* (0.5 s per
+    poll), which never sees how long the status requests themselves take.
+    With each request taking 14 s (close to the 15 s request timeout), a
+    120 s limit meant 240 polls — about an hour — not 2 minutes. The
+    deadline must be wall-clock: with 14 s requests plus the 0.5 s sleep,
+    a limit of L seconds allows only ceil(L / 14.5) polls."""
+    import math
+
+    from filestation.synology_filestation import SynologyFileStation
+
+    fs = SynologyFileStation("https://nas.example.test:5001", "sid")
+    clock = _FakeClock()
+    calls = {"status": 0, "stop": 0}
+
+    def fake_make_request(request_api, version, method, use_post=False, **params):
+        assert request_api == api
+        if method == "start":
+            return {"taskid": "task123"}
+        if method == "status":
+            calls["status"] += 1
+            clock.advance(14)  # a slow status request
+            return {"finished": False}  # never finishes
+        if method == "stop":
+            calls["stop"] += 1
+            return {}
+        raise AssertionError(f"unexpected method {method}")
+
+    monkeypatch.setattr(fs, "_make_request", fake_make_request)
+    monkeypatch.setattr(fs, "get_file_info", lambda path: {"type": "file"})
+    monkeypatch.setattr("filestation.synology_filestation.time", clock)
+
+    with pytest.raises(Exception, match=f"timed out after {limit_seconds} seconds"):
+        getattr(fs, method_name)(*args)
+
+    assert calls["status"] == math.ceil(limit_seconds / 14.5)
+    # The existing cleanup still runs when the deadline is what ended it.
+    assert calls["stop"] == 1
+
+
+class _FakeStreamingResponse:
+    """A `requests.Response` stand-in that behaves like a real streamed one
+    where it matters here: `iter_content()` pulls chunks from the wire one
+    at a time, while `.content`/`.json()` drain every remaining chunk into
+    memory first (and later `iter_content()` calls then replay that cache).
+    `chunks_read` counts how much was actually pulled off the wire."""
+
+    def __init__(self, chunks, content_type=None, encoding=None):
+        from requests.structures import CaseInsensitiveDict
+
+        self._wire = iter(chunks)
+        self._cache = None
+        self.chunks_read = 0
+        self.closed = False
+        self.headers = CaseInsensitiveDict({"Content-Type": content_type} if content_type else {})
+        self.encoding = encoding
+
+    def raise_for_status(self):
+        pass
+
+    @property
+    def content(self):
+        if self._cache is None:
+            data = b""
+            for chunk in self._wire:
+                self.chunks_read += 1
+                data += chunk
+            self._cache = data
+        return self._cache
+
+    def json(self):
+        import json
+
+        return json.loads(self.content)
+
+    def iter_content(self, chunk_size=None):
+        if self._cache is not None:
+            for start in range(0, len(self._cache), chunk_size):
+                yield self._cache[start : start + chunk_size]
+            return
+        for chunk in self._wire:
+            self.chunks_read += 1
+            yield chunk
+
+    def close(self):
+        self.closed = True
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        self.close()
+        return False
+
+
+def _download_with(monkeypatch, response, *, max_file_content_size=1_000_000, reported_size=1):
+    """Run get_file_content against `response`, with file metadata
+    reporting `reported_size` (so the pre-download size check passes)."""
+    from filestation.synology_filestation import SynologyFileStation
+
+    fs = SynologyFileStation(
+        "https://nas.example.test:5001", "sid", max_file_content_size=max_file_content_size
+    )
+    monkeypatch.setattr(
+        fs,
+        "get_file_info",
+        lambda path: {"name": "f", "path": path, "type": "file", "size": reported_size},
+    )
+    monkeypatch.setattr("filestation.synology_filestation.requests.get", lambda *a, **k: response)
+    return fs.get_file_content("/share/f")
+
+
+def test_get_file_content_reads_a_json_body_through_the_size_cap(monkeypatch):
+    """A response with a JSON Content-Type used to go through
+    `response.json()`, which reads the entire body into memory before the
+    byte cap was ever looked at — so a large JSON body (or one whose
+    metadata size was stale or missing) bypassed max_file_content_size. It
+    must be rejected after reading only as much as the cap allows."""
+    body_chunks = [b"x" * 60] * 50  # 3000 bytes on the wire, cap is 100
+    response = _FakeStreamingResponse(body_chunks, content_type="application/json")
+
+    with pytest.raises(Exception, match="exceeds the configured limit"):
+        _download_with(monkeypatch, response, max_file_content_size=100)
+
+    assert response.chunks_read == 2  # 60 fits, 120 doesn't — nothing past that
+    assert response.closed
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        b'{"a": 1}',
+        b"[1, 2, 3]",
+        b'"just a string"',
+        b"null",
+        b'{"success": true, "data": {"n": 1}}',
+        b'{"success": false}',  # no "error" key: not a DSM error envelope
+        b'{"success": false, "detail": "a file that merely resembles one"}',
+    ],
+)
+def test_get_file_content_returns_a_real_json_file_as_its_text(monkeypatch, body):
+    """A real `.json` file comes back with the same JSON Content-Type DSM
+    uses for its error envelope. It used to be run through the error check
+    regardless: a list crashed it, and an object without `success` was
+    reported as "Synology API error: unknown" — such files could not be
+    read at all."""
+    response = _FakeStreamingResponse([body], content_type="application/json")
+
+    assert _download_with(monkeypatch, response) == body.decode()
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        pytest.param(b"not json at all {", id="malformed"),
+        pytest.param(b"\xff\xfe\xfa not text in any encoding", id="not-text"),
+        # Deeply nested: overflows the JSON parser's recursion limit.
+        pytest.param(b"[" * 100_000, id="deeply-nested"),
+        pytest.param(b"", id="empty"),
+    ],
+)
+def test_get_file_content_treats_unparseable_json_typed_bodies_as_file_content(monkeypatch, body):
+    response = _FakeStreamingResponse([body], content_type="application/json")
+
+    assert isinstance(_download_with(monkeypatch, response), str)
+
+
+@pytest.mark.parametrize(
+    "body,expected_code",
+    [
+        (b'{"success": false, "error": {"code": 119}}', "119"),
+        (b'{"success": false, "error": {}}', "unknown"),
+        (b'{"success": false, "error": "boom"}', "unknown"),
+    ],
+)
+@pytest.mark.parametrize("content_type", ["application/json", "Application/JSON; charset=utf-8"])
+def test_get_file_content_still_raises_on_a_dsm_error_body(
+    monkeypatch, body, expected_code, content_type
+):
+    response = _FakeStreamingResponse([body], content_type=content_type)
+
+    with pytest.raises(Exception, match=f"Synology API error: {expected_code}$"):
+        _download_with(monkeypatch, response)
+
+    assert response.closed
+
+
+def test_get_file_content_only_looks_for_a_dsm_error_in_json_typed_responses(monkeypatch):
+    """The same bytes under any other Content-Type are simply the file."""
+    body = b'{"success": false, "error": {"code": 119}}'
+    response = _FakeStreamingResponse([body], content_type="application/octet-stream")
+
+    assert _download_with(monkeypatch, response) == body.decode()
+
+
+def test_get_file_content_closes_the_response_after_a_successful_read(monkeypatch):
+    response = _FakeStreamingResponse([b"hello"], content_type="text/plain")
+
+    assert _download_with(monkeypatch, response) == "hello"
+    assert response.closed
+
+
+def test_get_file_content_closes_the_response_if_the_stream_fails_midway(monkeypatch):
+    def broken_stream():
+        yield b"partial"
+        raise requests.exceptions.ChunkedEncodingError("connection broken")
+
+    response = _FakeStreamingResponse([], content_type="text/plain")
+    response._wire = broken_stream()
+
+    with pytest.raises(Exception, match="Network error"):
+        _download_with(monkeypatch, response)
+
+    assert response.closed
