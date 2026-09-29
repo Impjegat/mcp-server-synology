@@ -48,6 +48,24 @@ def reload_config():
         del sys.modules[mod]
 
 
+@pytest.fixture(autouse=True)
+def _run_from_an_empty_directory(tmp_path, monkeypatch):
+    """Run every test in this module from an empty directory.
+
+    `config` loads `./.env` (a legacy fallback) both at import — its
+    module-level `config = SynologyConfig()` — and whenever a
+    SynologyConfig() is built, and these tests re-import it constantly
+    (`reload_config()`). Patching `os.path.exists` only after the import, as
+    one test used to, is too late: the import itself has already read the
+    file. So a developer's own `.env` in the working directory (the repo
+    root, when pytest is run from it) leaked real credentials and settings
+    into tests that expect none, and they failed on that machine only.
+    With no `.env` anywhere in the working directory, there is nothing to
+    leak, whatever the order things are imported in.
+    """
+    monkeypatch.chdir(tmp_path)
+
+
 class TestSynologyConfig:
     """Test Synology configuration loading and validation."""
 
@@ -482,21 +500,20 @@ class TestSynologyConfig:
         """Test validation fails with no credentials."""
         reload_config()
 
-        # clean_env() wipes os.environ but SynologyConfig calls
-        # load_dotenv(".env") at construction time, which re-injects whatever
-        # is in the developer's local .env. Patch os.path.exists so the loader
-        # treats the project as having no .env.
+        # clean_env() wipes os.environ, but `config` would re-inject whatever
+        # is in a `.env` in the working directory — the autouse fixture
+        # above runs this from an empty directory, so there is none to find,
+        # at import time or when SynologyConfig() is constructed below.
         with clean_env({}):
             with patch("config.SETTINGS_FILE", Path("/nonexistent/secrets.json")):
-                with patch("config.os.path.exists", return_value=False):
-                    with patch.object(Path, "exists", return_value=False):
-                        from config import SynologyConfig
+                with patch.object(Path, "exists", return_value=False):
+                    from config import SynologyConfig
 
-                        cfg = SynologyConfig()
+                    cfg = SynologyConfig()
 
-                        errors = cfg.validate_config()
-                        assert len(errors) > 0
-                        assert "No Synology credentials" in errors[0]
+                    errors = cfg.validate_config()
+                    assert len(errors) > 0
+                    assert "No Synology credentials" in errors[0]
 
     def test_validate_config_timeout_too_low(self):
         """Test validation fails with low timeout."""
