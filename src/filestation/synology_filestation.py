@@ -328,6 +328,14 @@ class SynologyFileStation:
             raise Exception(f"File not found: {path}")
 
         file_info = files[0]
+
+        # DSM reports a per-path failure (e.g. 408 for a missing path) inside
+        # the entry itself, with the request as a whole still success:true.
+        if "code" in file_info:
+            if file_info["code"] == 408:
+                raise Exception(f"File not found: {path}")
+            raise Exception(f"Cannot get info for {path} (DSM error {file_info['code']})")
+
         result = {
             "name": file_info.get("name"),
             "path": file_info.get("path"),

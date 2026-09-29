@@ -6,23 +6,24 @@ import pytest
 import requests
 
 
+@pytest.fixture(scope="class")
+def file_station(session_info):
+    """Get authenticated FileStation client."""
+    from filestation.synology_filestation import SynologyFileStation
+
+    fs = SynologyFileStation(
+        session_info["base_url"],
+        session_info["session_id"],
+        syno_token=session_info.get("syno_token"),
+    )
+
+    print("✅ FileStation client ready")
+    return fs
+
+
 @pytest.mark.real_nas
 class TestSynologyFileStation:
     """Test Synology FileStation operations."""
-
-    @pytest.fixture(scope="class")
-    def file_station(self, session_info):
-        """Get authenticated FileStation client."""
-        from filestation.synology_filestation import SynologyFileStation
-
-        fs = SynologyFileStation(
-            session_info["base_url"],
-            session_info["session_id"],
-            syno_token=session_info.get("syno_token"),
-        )
-
-        print("✅ FileStation client ready")
-        return fs
 
     def test_list_shares(self, file_station):
         """Test listing available shares."""
@@ -106,8 +107,9 @@ class TestSynologyFileStation:
 
     def test_get_file_info(self, file_station):
         """Test getting detailed file information."""
-        # Try to get info for root first
-        test_paths = ["/", "/volume1", "/homes"]
+        # File Station paths are share-rooted ("/<share>"), so use real shares;
+        # "/" and "/volume1" are not valid and DSM reports them as not found.
+        test_paths = [share["path"] for share in file_station.list_shares() if share.get("path")]
 
         for path in test_paths:
             try:
@@ -527,6 +529,36 @@ def test_search_files_still_returns_results_when_it_finishes_in_time(monkeypatch
 
     results = fs.search_files("/share", "*.txt")
     assert results == [{"name": "a.txt", "path": "/share/a.txt", "type": "file", "size": 3}]
+
+
+def test_get_file_info_raises_when_dsm_reports_missing_path_in_entry(monkeypatch):
+    """DSM answers getinfo for a missing path with success:true and a
+    per-entry error code (408); that must not look like an empty file."""
+    from filestation.synology_filestation import SynologyFileStation
+
+    fs = SynologyFileStation("https://nas.example.test:5001", "sid")
+    monkeypatch.setattr(
+        fs,
+        "_make_request",
+        lambda *a, **k: {"files": [{"code": 408, "name": "12345", "path": "/share/12345"}]},
+    )
+
+    with pytest.raises(Exception, match="File not found"):
+        fs.get_file_info("/share/12345")
+
+
+def test_get_file_info_raises_on_other_per_entry_dsm_error(monkeypatch):
+    from filestation.synology_filestation import SynologyFileStation
+
+    fs = SynologyFileStation("https://nas.example.test:5001", "sid")
+    monkeypatch.setattr(
+        fs,
+        "_make_request",
+        lambda *a, **k: {"files": [{"code": 407, "name": "x", "path": "/share/x"}]},
+    )
+
+    with pytest.raises(Exception, match=r"DSM error 407"):
+        fs.get_file_info("/share/x")
 
 
 def test_get_file_content_rejects_oversized_file_before_downloading(monkeypatch):
