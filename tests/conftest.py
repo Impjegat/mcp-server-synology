@@ -79,6 +79,11 @@ def _block_network_unless_real_nas(request, monkeypatch):
     in urllib3's connection pool, whatever the proxy settings. That point is
     below requests' own certificate-path handling (HTTPAdapter.cert_verify)
     and above any connection attempt.
+
+    That block covers urllib3/requests, the only HTTP stack the server uses.
+    If httpx or aiohttp is ever used directly, block it here too, or the same
+    loopback-proxy route reopens. It also means a test that wants a real
+    loopback HTTP server must be marked real_nas or mock the call.
     """
     if request.node.get_closest_marker("real_nas") is not None:
         return

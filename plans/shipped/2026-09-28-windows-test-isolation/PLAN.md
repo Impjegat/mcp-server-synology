@@ -15,7 +15,9 @@ The test isolation added by the remediation roadmap works on Linux but breaks th
 
 4. **Emoji output aborts the session when stdout isn't UTF-8.** The suite prints emoji progress messages, and `pytest.ini` runs with `-s` (no output capture), so they go straight to the real stdout. On Windows, when that is a pipe or file — CI, or `pytest | tee log` — Python encodes it as cp1252, which has no emoji. The banner in `pytest_sessionstart` raised `UnicodeEncodeError`, which pytest reports as an INTERNALERROR that aborts the session before a single test runs.
 
-Nothing verified these on Windows automatically, since the repo's only workflows are the AI-review ones. This PR adds the first test CI.
+Nothing verified these on Windows automatically, since the repo's only workflows are the AI-review ones. This PR adds the first test CI — and that CI immediately surfaced a fifth, unrelated problem, which is why this PR also touches `requirements.txt`:
+
+5. **A fresh install gets an `mcp` the server can't run on.** `requirements.txt` says `mcp>=1.28.1`, so a clean `pip install -r requirements.txt` (and therefore the Docker build) now installs `mcp` 2.2.0. That release replaced the low-level `Server` decorators the code uses (`@server.list_tools()`, `@server.call_tool()`) with constructor callbacks, so `SynologyMCPServer()` raises `AttributeError: 'Server' object has no attribute 'list_tools'`. Locally the suite passed only because the development environment still had 1.28.1; 47 tests failed identically on Ubuntu and Windows in CI. This is not caused by this PR and `main` has it too — but a server that can't start on a fresh install (or in a freshly built image) is worse than any test problem, and the new CI cannot go green without addressing it. You chose the cap over migrating to 2.x.
 
 ## Changes
 
@@ -33,6 +35,10 @@ Nothing verified these on Windows automatically, since the repo's only workflows
 
 - The original `sys.__stdout__`/`sys.__stderr__` (and the current `sys.stdout`/`sys.stderr`) are reconfigured with `errors="replace"`, so a character the terminal can't encode prints as `?` instead of raising. The originals matter: while `conftest.py` is imported pytest has swapped in its own UTF-8 capture streams, but the real ones are what `print()` reaches once capture is suspended or off. (A first attempt that only reconfigured `sys.stdout` did not fix it.) This covers the banner and every test's own emoji `print`.
 
+### Dependency — `requirements.txt`
+
+- `mcp>=1.28.1` becomes `mcp>=1.28.1,<2`, with a comment saying why. Fresh installs and Docker builds get 1.x again, which the server code is written for. Migrating to the 2.x API (constructor callbacks in place of decorators, changed startup and capabilities code) is a separate piece of work that can't be checked against a real MCP client from here; lifting the cap is part of it.
+
 ### CI — `.github/workflows/tests.yml` (new)
 
 - `pytest -m "not real_nas"` on `ubuntu-latest` and `windows-latest`, Python 3.13 (what the reviewer ran on Windows), `fail-fast: false` so one OS failing doesn't hide the other.
@@ -47,7 +53,7 @@ Nothing verified these on Windows automatically, since the repo's only workflows
 
 ## Verification
 
-- `pytest`, `ruff check`, `black --check` clean on Linux.
+- `pytest`, `ruff check`, `black --check` clean on Linux. Against a fresh install of `requirements.txt` in a new virtualenv (which gets the capped `mcp` 1.x) the suite passes; before the cap the same fresh install failed 47 tests, matching CI.
 - Without the fixes: the loopback and Unix-socket guard tests fail against the old `conftest.py`; the HTTP-block tests fail if the `urlopen` block is removed (and the suite's unmocked-request NFS test slows from 1 s to ~19 s); the Windows-shaped home test fails if `USERPROFILE` isn't kept.
 - The encoding failure reproduces on Linux with `PYTHONIOENCODING=cp1252` (INTERNALERROR on the banner before the fix; the whole suite passes after it). There is no separate regression test for it: the `windows-latest` job fails without the fix, and a nested-pytest subprocess test would be slower and more fragile than that.
 - The Windows behavior itself can't be run in this Linux container. The new workflow's `windows-latest` job is the check, and any further Windows-only failure it shows is fixed in this PR until both operating systems pass.
