@@ -14,8 +14,20 @@ import pytest
 # HOMEDRIVE + HOMEPATH), raising RuntimeError once they're gone (POSIX falls
 # back to the password database, so it never noticed). XDG_CONFIG_HOME is
 # kept so the settings.json lookup stays pointed at the throwaway directory
-# tests/conftest.py set up, instead of the real ~/.config.
-_KEPT_ENV_VARS = ("XDG_CONFIG_HOME", "HOME", "USERPROFILE", "HOMEDRIVE", "HOMEPATH")
+# tests/conftest.py set up, instead of the real ~/.config. The last two are
+# Windows-only needs of code running inside these blocks: USERNAME names the
+# account the settings file is locked down to (config._restrict_file_permissions),
+# and SYSTEMROOT must stay set for the socket module (and child processes such as
+# icacls) to work at all.
+_KEPT_ENV_VARS = (
+    "XDG_CONFIG_HOME",
+    "HOME",
+    "USERPROFILE",
+    "HOMEDRIVE",
+    "HOMEPATH",
+    "USERNAME",
+    "SYSTEMROOT",
+)
 
 
 def clean_env(overrides=None):
@@ -995,6 +1007,8 @@ class TestCleanEnv:
             "USERPROFILE": r"C:\Users\someone",
             "HOMEDRIVE": "C:",
             "HOMEPATH": r"\Users\someone",
+            "USERNAME": "someone",
+            "SYSTEMROOT": r"C:\Windows",
             "HOME": "/home/someone",
             "XDG_CONFIG_HOME": "/some/config",
             "SYNOLOGY_URL": "https://ambient.example:5001",
@@ -1002,7 +1016,15 @@ class TestCleanEnv:
         }
         with patch.dict(os.environ, ambient):
             with clean_env({"MAX_FILE_CONTENT_SIZE": "5"}):
-                for name in ("XDG_CONFIG_HOME", "HOME", "USERPROFILE", "HOMEDRIVE", "HOMEPATH"):
+                for name in (
+                    "XDG_CONFIG_HOME",
+                    "HOME",
+                    "USERPROFILE",
+                    "HOMEDRIVE",
+                    "HOMEPATH",
+                    "USERNAME",
+                    "SYSTEMROOT",
+                ):
                     assert os.environ[name] == ambient[name]
                 assert "SYNOLOGY_URL" not in os.environ
                 assert "SOMETHING_ELSE" not in os.environ

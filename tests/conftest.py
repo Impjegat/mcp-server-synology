@@ -11,6 +11,21 @@ from urllib3.connectionpool import HTTPConnectionPool
 
 from tests.socket_guard import is_local_address
 
+# The suite's progress output is full of emoji, and pytest.ini runs with -s
+# (no output capture), so those print()s go straight to the real stdout. When
+# that is a pipe or a file on Windows — as in CI, or `pytest | tee log` — Python
+# encodes it with the ANSI code page (cp1252), which has no emoji: the banner
+# printed by pytest_sessionstart raised UnicodeEncodeError and aborted the whole
+# session before a single test ran. Whether the suite runs must not depend on
+# the terminal's encoding, so characters it can't encode degrade to "?".
+#
+# The original streams (sys.__stdout__/__stderr__) are the ones to fix: while
+# this file is imported pytest has swapped in its own UTF-8 capture streams,
+# but the real ones are what print() reaches once capture is suspended or off.
+for _stream in (sys.__stdout__, sys.__stderr__, sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(errors="replace")
+
 # Add src directory to Python path
 src_path = Path(__file__).parent.parent / "src"
 sys.path.insert(0, str(src_path))

@@ -7,11 +7,13 @@ Implements: finding 7 from [`REVIEW_REPORT.md`](../2026-09-28-rereview-followups
 
 ## Why
 
-The test isolation added by the remediation roadmap works on Linux but breaks the suite on Windows, where the project is developed (the report saw 26 failures and 10 setup errors). Three separate causes:
+The test isolation added by the remediation roadmap works on Linux but breaks the suite on Windows, where the project is developed (the report saw 26 failures and 10 setup errors). Four separate causes (the fourth was found by the new Windows CI job itself, not in the report):
 
 1. **The socket guard blocks asyncio's own sockets.** `tests/conftest.py` makes every `socket.connect()` raise in tests not marked `real_nas`. On Windows, asyncio builds its event loop's self-pipe as a pair of connected loopback sockets (`socket.socketpair()` is emulated with a listener plus a `connect()` there), so every async test failed during setup, before reaching the code under test.
 2. **Config tests strip the home directory.** 33 calls of `patch.dict(os.environ, {...}, clear=True)` remove `USERPROFILE`, and each is followed by a fresh import of `config`, whose module-level `os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")` evaluates `Path.home()` even when `XDG_CONFIG_HOME` is set. On Windows `Path.home()` needs `USERPROFILE` (or `HOMEDRIVE` + `HOMEPATH`), so the import raised. POSIX falls back to the password database and never noticed.
 3. **A permission test assumes POSIX.** `test_permission_warning_for_open_permissions` chmods a file to `0o644` and expects a warning about open permissions. Windows has no mode bits and no `os.getuid()`, so the server skips that check there — the test only passed by accident, because the "skipping file-permission check" warning also contains the word "permission".
+
+4. **Emoji output aborts the session when stdout isn't UTF-8.** The suite prints emoji progress messages, and `pytest.ini` runs with `-s` (no output capture), so they go straight to the real stdout. On Windows, when that is a pipe or file — CI, or `pytest | tee log` — Python encodes it as cp1252, which has no emoji. The banner in `pytest_sessionstart` raised `UnicodeEncodeError`, which pytest reports as an INTERNALERROR that aborts the session before a single test runs.
 
 Nothing verified these on Windows automatically, since the repo's only workflows are the AI-review ones. This PR adds the first test CI.
 
@@ -24,8 +26,12 @@ Nothing verified these on Windows automatically, since the repo's only workflows
 
 ### Config tests — `tests/test_config.py`
 
-- New `clean_env(overrides)`: `patch.dict(os.environ, ..., clear=True)` that keeps `XDG_CONFIG_HOME`, `HOME`, `USERPROFILE`, `HOMEDRIVE` and `HOMEPATH`. All 33 calls use it. Keeping `XDG_CONFIG_HOME` also leaves the settings lookup pointed at the throwaway directory `tests/conftest.py` sets up rather than the real `~/.config`.
+- New `clean_env(overrides)`: `patch.dict(os.environ, ..., clear=True)` that keeps `XDG_CONFIG_HOME`, `HOME`, `USERPROFILE`, `HOMEDRIVE` and `HOMEPATH`, plus two Windows-only needs of code that runs inside those blocks: `USERNAME` (the account `_restrict_file_permissions` locks the settings file to) and `SYSTEMROOT` (which the socket module and child processes such as `icacls` need). All 33 calls use it. Keeping `XDG_CONFIG_HOME` also leaves the settings lookup pointed at the throwaway directory `tests/conftest.py` sets up rather than the real `~/.config`.
 - `test_permission_warning_for_open_permissions` is skipped where `os.getuid()` doesn't exist.
+
+### Output encoding — `tests/conftest.py`
+
+- The original `sys.__stdout__`/`sys.__stderr__` (and the current `sys.stdout`/`sys.stderr`) are reconfigured with `errors="replace"`, so a character the terminal can't encode prints as `?` instead of raising. The originals matter: while `conftest.py` is imported pytest has swapped in its own UTF-8 capture streams, but the real ones are what `print()` reaches once capture is suspended or off. (A first attempt that only reconfigured `sys.stdout` did not fix it.) This covers the banner and every test's own emoji `print`.
 
 ### CI — `.github/workflows/tests.yml` (new)
 
@@ -43,4 +49,5 @@ Nothing verified these on Windows automatically, since the repo's only workflows
 
 - `pytest`, `ruff check`, `black --check` clean on Linux.
 - Without the fixes: the loopback and Unix-socket guard tests fail against the old `conftest.py`; the HTTP-block tests fail if the `urlopen` block is removed (and the suite's unmocked-request NFS test slows from 1 s to ~19 s); the Windows-shaped home test fails if `USERPROFILE` isn't kept.
+- The encoding failure reproduces on Linux with `PYTHONIOENCODING=cp1252` (INTERNALERROR on the banner before the fix; the whole suite passes after it). There is no separate regression test for it: the `windows-latest` job fails without the fix, and a nested-pytest subprocess test would be slower and more fragile than that.
 - The Windows behavior itself can't be run in this Linux container. The new workflow's `windows-latest` job is the check, and any further Windows-only failure it shows is fixed in this PR until both operating systems pass.
