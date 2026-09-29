@@ -6,6 +6,13 @@ services:
     container_name: synology-mcp-server
     command: ["python", "main.py"]
     network_mode: host  # Allow access to local network (192.168.x.x)
+    # `.env` is handed to the container at start, not baked into the image
+    # (.dockerignore keeps it out of the build context on purpose). It's
+    # optional: settings.json, mounted below, is the other way to configure
+    # this. `required: false` needs Docker Compose v2.24 or later.
+    env_file:
+      - path: .env
+        required: false
     environment:
       - XDG_CONFIG_HOME=/home/mcpuser/.config
     volumes:

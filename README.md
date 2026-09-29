@@ -36,6 +36,8 @@ AUTO_LOGIN=true
 VERIFY_SSL=true
 ```
 
+**How Docker reads `.env`:** `docker-compose.yml` hands `.env` to the container when it starts (an optional `env_file`). It is never copied into the image, so editing it needs no rebuild. This needs Docker Compose v2.24 or later — check with `docker compose version`. Compose expands `$` in `.env` values, so if a password contains `$`, wrap the value in single quotes (`SYNOLOGY_PASSWORD='pa$word'`) or it will be silently altered. If you'd rather not keep credentials in `.env`, configure the server through `settings.json` instead (see below).
+
 ### 3️⃣ Build the Image
 
 ```bash
