@@ -8,6 +8,25 @@ from unittest.mock import patch
 
 import pytest
 
+# Environment variables a test must not lose when it clears os.environ:
+# reloading `config` re-runs its module-level code, which resolves the home
+# directory via Path.home() — and on Windows that reads USERPROFILE (or
+# HOMEDRIVE + HOMEPATH), raising RuntimeError once they're gone (POSIX falls
+# back to the password database, so it never noticed). XDG_CONFIG_HOME is
+# kept so the settings.json lookup stays pointed at the throwaway directory
+# tests/conftest.py set up, instead of the real ~/.config.
+_KEPT_ENV_VARS = ("XDG_CONFIG_HOME", "HOME", "USERPROFILE", "HOMEDRIVE", "HOMEPATH")
+
+
+def clean_env(overrides=None):
+    """Like `patch.dict(os.environ, overrides, clear=True)`, but keeps the
+    variables in _KEPT_ENV_VARS so the home directory stays resolvable.
+    Everything else — every SYNOLOGY_*/setting variable — is cleared, and
+    `overrides` is applied on top."""
+    env = {name: os.environ[name] for name in _KEPT_ENV_VARS if name in os.environ}
+    env.update(overrides or {})
+    return patch.dict(os.environ, env, clear=True)
+
 
 # Force reimport of config module to avoid cached global instance
 def reload_config():
@@ -79,7 +98,7 @@ class TestSynologyConfig:
         """Test default configuration values."""
         reload_config()
 
-        with patch.dict(os.environ, {}, clear=True):
+        with clean_env({}):
             with patch("config.SETTINGS_FILE", Path("/nonexistent/secrets.json")):
                 with patch.object(Path, "exists", return_value=False):
                     from config import SynologyConfig
@@ -100,7 +119,7 @@ class TestSynologyConfig:
     def test_max_file_content_size_env_var_override(self):
         reload_config()
 
-        with patch.dict(os.environ, {"MAX_FILE_CONTENT_SIZE": "5000"}, clear=True):
+        with clean_env({"MAX_FILE_CONTENT_SIZE": "5000"}):
             with patch("config.SETTINGS_FILE", Path("/nonexistent/secrets.json")):
                 with patch.object(Path, "exists", return_value=False):
                     from config import SynologyConfig
@@ -125,7 +144,7 @@ class TestSynologyConfig:
 
         reload_config()
 
-        with patch.dict(os.environ, {"MAX_FILE_CONTENT_SIZE": "5000"}, clear=True):
+        with clean_env({"MAX_FILE_CONTENT_SIZE": "5000"}):
             with patch("config.SETTINGS_FILE", secrets_file):
                 from config import SynologyConfig
 
@@ -154,7 +173,7 @@ class TestSynologyConfig:
 
         reload_config()
 
-        with patch.dict(os.environ, {}, clear=True):
+        with clean_env({}):
             with patch("config.SETTINGS_FILE", secrets_file):
                 from config import SynologyConfig
 
@@ -163,7 +182,7 @@ class TestSynologyConfig:
     def test_restricted_mode_env_var_disables_it(self):
         reload_config()
 
-        with patch.dict(os.environ, {"RESTRICTED_MODE": "false"}, clear=True):
+        with clean_env({"RESTRICTED_MODE": "false"}):
             with patch("config.SETTINGS_FILE", Path("/nonexistent/secrets.json")):
                 with patch.object(Path, "exists", return_value=False):
                     from config import SynologyConfig
@@ -188,7 +207,7 @@ class TestSynologyConfig:
 
         reload_config()
 
-        with patch.dict(os.environ, {"RESTRICTED_MODE": "true"}, clear=True):
+        with clean_env({"RESTRICTED_MODE": "true"}):
             with patch("config.SETTINGS_FILE", secrets_file):
                 from config import SynologyConfig
 
@@ -205,7 +224,7 @@ class TestSynologyConfig:
         also stay restricted, not fail open."""
         reload_config()
 
-        with patch.dict(os.environ, {"RESTRICTED_MODE": value}, clear=True):
+        with clean_env({"RESTRICTED_MODE": value}):
             with patch("config.SETTINGS_FILE", Path("/nonexistent/secrets.json")):
                 with patch.object(Path, "exists", return_value=False):
                     from config import SynologyConfig
@@ -216,7 +235,7 @@ class TestSynologyConfig:
     def test_restricted_mode_env_var_recognizes_falsy_aliases(self, value):
         reload_config()
 
-        with patch.dict(os.environ, {"RESTRICTED_MODE": value}, clear=True):
+        with clean_env({"RESTRICTED_MODE": value}):
             with patch("config.SETTINGS_FILE", Path("/nonexistent/secrets.json")):
                 with patch.object(Path, "exists", return_value=False):
                     from config import SynologyConfig
@@ -252,7 +271,7 @@ class TestSynologyConfig:
 
         reload_config()
 
-        with patch.dict(os.environ, {}, clear=True):
+        with clean_env({}):
             with patch("config.SETTINGS_FILE", secrets_file):
                 from config import SynologyConfig
 
@@ -264,7 +283,7 @@ class TestSynologyConfig:
         requests' own `verify=` parameter (which already accepts a path)."""
         reload_config()
 
-        with patch.dict(os.environ, {"VERIFY_SSL": "/etc/ssl/certs/my-ca.pem"}, clear=True):
+        with clean_env({"VERIFY_SSL": "/etc/ssl/certs/my-ca.pem"}):
             with patch("config.SETTINGS_FILE", Path("/nonexistent/secrets.json")):
                 with patch.object(Path, "exists", return_value=False):
                     from config import SynologyConfig
@@ -278,7 +297,7 @@ class TestSynologyConfig:
         `requests` rather than a clear config error."""
         reload_config()
 
-        with patch.dict(os.environ, {"VERIFY_SSL": "  /etc/ssl/certs/my-ca.pem  "}, clear=True):
+        with clean_env({"VERIFY_SSL": "  /etc/ssl/certs/my-ca.pem  "}):
             with patch("config.SETTINGS_FILE", Path("/nonexistent/secrets.json")):
                 with patch.object(Path, "exists", return_value=False):
                     from config import SynologyConfig
@@ -289,7 +308,7 @@ class TestSynologyConfig:
     def test_verify_ssl_recognizes_truthy_aliases(self, value, expected):
         reload_config()
 
-        with patch.dict(os.environ, {"VERIFY_SSL": value}, clear=True):
+        with clean_env({"VERIFY_SSL": value}):
             with patch("config.SETTINGS_FILE", Path("/nonexistent/secrets.json")):
                 with patch.object(Path, "exists", return_value=False):
                     from config import SynologyConfig
@@ -304,7 +323,7 @@ class TestSynologyConfig:
         path and failing hard the first time DSM is contacted."""
         reload_config()
 
-        with patch.dict(os.environ, {"VERIFY_SSL": value}, clear=True):
+        with clean_env({"VERIFY_SSL": value}):
             with patch("config.SETTINGS_FILE", Path("/nonexistent/secrets.json")):
                 with patch.object(Path, "exists", return_value=False):
                     from config import SynologyConfig
@@ -329,7 +348,7 @@ class TestSynologyConfig:
 
         reload_config()
 
-        with patch.dict(os.environ, {}, clear=True):
+        with clean_env({}):
             with patch("config.SETTINGS_FILE", secrets_file):
                 from config import SynologyConfig
 
@@ -354,7 +373,7 @@ class TestSynologyConfig:
 
         reload_config()
 
-        with patch.dict(os.environ, {}, clear=True):
+        with clean_env({}):
             with patch("config.SETTINGS_FILE", secrets_file):
                 from config import SynologyConfig
 
@@ -384,7 +403,7 @@ class TestSynologyConfig:
 
         reload_config()
 
-        with patch.dict(os.environ, {}, clear=True):
+        with clean_env({}):
             with patch("config.SETTINGS_FILE", secrets_file):
                 from config import SynologyConfig
 
@@ -407,7 +426,7 @@ class TestSynologyConfig:
 
         reload_config()
 
-        with patch.dict(os.environ, {}, clear=True):
+        with clean_env({}):
             with patch("config.SETTINGS_FILE", secrets_file):
                 from config import SynologyConfig
 
@@ -437,7 +456,7 @@ class TestSynologyConfig:
 
         reload_config()
 
-        with patch.dict(os.environ, {}, clear=True):
+        with clean_env({}):
             with patch("config.SETTINGS_FILE", secrets_file):
                 from config import SynologyConfig
 
@@ -451,11 +470,11 @@ class TestSynologyConfig:
         """Test validation fails with no credentials."""
         reload_config()
 
-        # patch.dict clear=True wipes os.environ but SynologyConfig calls
+        # clean_env() wipes os.environ but SynologyConfig calls
         # load_dotenv(".env") at construction time, which re-injects whatever
         # is in the developer's local .env. Patch os.path.exists so the loader
         # treats the project as having no .env.
-        with patch.dict(os.environ, {}, clear=True):
+        with clean_env({}):
             with patch("config.SETTINGS_FILE", Path("/nonexistent/secrets.json")):
                 with patch("config.os.path.exists", return_value=False):
                     with patch.object(Path, "exists", return_value=False):
@@ -507,7 +526,7 @@ class TestSynologyConfig:
 
         reload_config()
 
-        with patch.dict(os.environ, {}, clear=True):
+        with clean_env({}):
             with patch("config.SETTINGS_FILE", secrets_file):
                 from config import SynologyConfig
 
@@ -526,7 +545,7 @@ class TestSynologyConfig:
 
         reload_config()
 
-        with patch.dict(os.environ, {}, clear=True):
+        with clean_env({}):
             with patch("config.SETTINGS_FILE", secrets_file):
                 from config import SynologyConfig
 
@@ -554,7 +573,7 @@ class TestSynologyConfig:
 
         reload_config()
 
-        with patch.dict(os.environ, {}, clear=True):
+        with clean_env({}):
             with patch("config.SETTINGS_FILE", secrets_file):
                 from config import SynologyConfig
 
@@ -571,6 +590,10 @@ class TestSynologyConfig:
 class TestFilePermissions:
     """Test file permission checking."""
 
+    @pytest.mark.skipif(
+        not hasattr(os, "getuid"),
+        reason="POSIX permission bits: Windows has no os.getuid(), and the check is skipped there",
+    )
     def test_permission_warning_for_open_permissions(self, tmp_path, caplog):
         """Test that warning is logged for overly open permissions."""
         import logging
@@ -584,7 +607,7 @@ class TestFilePermissions:
 
         reload_config()
 
-        with patch.dict(os.environ, {}, clear=True):
+        with clean_env({}):
             with patch("config.SETTINGS_FILE", secrets_file):
                 from config import SynologyConfig
 
@@ -631,7 +654,7 @@ class TestFilePermissions:
 
         reload_config()
 
-        with patch.dict(os.environ, {}, clear=True):
+        with clean_env({}):
             with patch("config.SETTINGS_FILE", secrets_file):
                 from config import SynologyConfig
 
@@ -672,7 +695,7 @@ class TestSaveDeviceId:
 
         reload_config()
 
-        with patch.dict(os.environ, {}, clear=True):
+        with clean_env({}):
             with patch("config.SETTINGS_FILE", secrets_file):
                 from config import SynologyConfig
 
@@ -711,7 +734,7 @@ class TestSaveDeviceId:
 
         reload_config()
 
-        with patch.dict(os.environ, {}, clear=True):
+        with clean_env({}):
             with patch("config.SETTINGS_FILE", secrets_file):
                 from config import SynologyConfig
 
@@ -745,7 +768,7 @@ class TestSaveDeviceId:
 
         reload_config()
 
-        with patch.dict(os.environ, {}, clear=True):
+        with clean_env({}):
             with patch("config.SETTINGS_FILE", secrets_file):
                 from config import SynologyConfig
 
@@ -781,7 +804,7 @@ class TestSaveDeviceId:
         reload_config()
 
         seen_tmp_names = []
-        with patch.dict(os.environ, {}, clear=True):
+        with clean_env({}):
             with patch("config.SETTINGS_FILE", secrets_file):
                 from config import SynologyConfig
 
@@ -836,7 +859,7 @@ class TestIterConfiguredSecrets:
 
         reload_config()
 
-        with patch.dict(os.environ, {}, clear=True):
+        with clean_env({}):
             with patch("config.SETTINGS_FILE", secrets_file):
                 from config import SynologyConfig
 
@@ -864,7 +887,7 @@ class TestIterConfiguredSecrets:
 
         reload_config()
 
-        with patch.dict(os.environ, {}, clear=True):
+        with clean_env({}):
             with patch("config.SETTINGS_FILE", secrets_file):
                 from config import SynologyConfig
 
@@ -877,15 +900,13 @@ class TestIterConfiguredSecrets:
     def test_yields_legacy_env_password_but_not_otp_code(self):
         reload_config()
 
-        with patch.dict(
-            os.environ,
+        with clean_env(
             {
                 "SYNOLOGY_URL": "https://nas.example.com:5001",
                 "SYNOLOGY_USERNAME": "admin",
                 "SYNOLOGY_PASSWORD": "legacy_pass",
                 "SYNOLOGY_OTP_CODE": "222222",
-            },
-            clear=True,
+            }
         ):
             with patch("config.SETTINGS_FILE", Path("/nonexistent/secrets.json")):
                 with patch.object(Path, "exists", return_value=False):
@@ -899,7 +920,7 @@ class TestIterConfiguredSecrets:
     def test_yields_nothing_when_unconfigured(self):
         reload_config()
 
-        with patch.dict(os.environ, {}, clear=True):
+        with clean_env({}):
             with patch("config.SETTINGS_FILE", Path("/nonexistent/secrets.json")):
                 with patch.object(Path, "exists", return_value=False):
                     from config import SynologyConfig
@@ -930,7 +951,7 @@ class TestIterConfiguredSecrets:
 
         reload_config()
 
-        with patch.dict(os.environ, {}, clear=True):
+        with clean_env({}):
             with patch("config.SETTINGS_FILE", secrets_file):
                 from config import SynologyConfig
 
@@ -962,3 +983,63 @@ def test_config_str_representation():
 
                 assert "SynologyConfig" in cfg_str
                 assert "auto_login" in cfg_str
+
+
+class TestCleanEnv:
+    """`clean_env()` is what keeps the config tests' cleared environments
+    usable on Windows: reloading `config` needs a resolvable home directory
+    even when XDG_CONFIG_HOME is set (its default is computed eagerly)."""
+
+    def test_clears_everything_except_the_home_variables(self):
+        ambient = {
+            "USERPROFILE": r"C:\Users\someone",
+            "HOMEDRIVE": "C:",
+            "HOMEPATH": r"\Users\someone",
+            "HOME": "/home/someone",
+            "XDG_CONFIG_HOME": "/some/config",
+            "SYNOLOGY_URL": "https://ambient.example:5001",
+            "SOMETHING_ELSE": "x",
+        }
+        with patch.dict(os.environ, ambient):
+            with clean_env({"MAX_FILE_CONTENT_SIZE": "5"}):
+                for name in ("XDG_CONFIG_HOME", "HOME", "USERPROFILE", "HOMEDRIVE", "HOMEPATH"):
+                    assert os.environ[name] == ambient[name]
+                assert "SYNOLOGY_URL" not in os.environ
+                assert "SOMETHING_ELSE" not in os.environ
+                assert os.environ["MAX_FILE_CONTENT_SIZE"] == "5"
+
+            # The ambient environment comes back afterwards.
+            assert os.environ["SYNOLOGY_URL"] == ambient["SYNOLOGY_URL"]
+            assert "MAX_FILE_CONTENT_SIZE" not in os.environ
+
+    def test_an_override_wins_over_a_kept_variable(self):
+        with patch.dict(os.environ, {"XDG_CONFIG_HOME": "/ambient"}):
+            with clean_env({"XDG_CONFIG_HOME": "/override"}):
+                assert os.environ["XDG_CONFIG_HOME"] == "/override"
+
+    def test_config_still_imports_when_home_comes_only_from_userprofile(
+        self, tmp_path, monkeypatch
+    ):
+        """Windows-shaped home lookup: Path.home() reads USERPROFILE and
+        raises without it. A plain `patch.dict(os.environ, {}, clear=True)`
+        made the (re)import of `config` fail; clean_env() must not."""
+
+        def windows_like_home():
+            try:
+                return Path(os.environ["USERPROFILE"])
+            except KeyError:
+                raise RuntimeError("Could not determine home directory.") from None
+
+        monkeypatch.setattr(Path, "home", windows_like_home)
+        monkeypatch.setenv("USERPROFILE", str(tmp_path))
+
+        reload_config()
+        with clean_env():
+            with patch("config.SETTINGS_FILE", tmp_path / "does-not-exist.json"):
+                import config  # noqa: F401
+
+        # The failure this guards against, for contrast.
+        reload_config()
+        with patch.dict(os.environ, {}, clear=True):
+            with pytest.raises(RuntimeError, match="home directory"):
+                import config  # noqa: F401,F811

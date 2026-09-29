@@ -3,7 +3,7 @@
 Status: Shipped — PR #10
 Initiated: 2026-09-29
 GitHub PR: [Impjegat/mcp-server-synology#10](https://github.com/Impjegat/mcp-server-synology/pull/10)
-Implements: findings 4, 5, 6 from [`REVIEW_REPORT.md`](../../2026-09-28-rereview-followups/REVIEW_REPORT.md) — see [the follow-ups plan](../../2026-09-28-rereview-followups/PLAN.md) for the full verdict table
+Implements: findings 4, 5, 6 from [`REVIEW_REPORT.md`](../2026-09-28-rereview-followups/REVIEW_REPORT.md) — see [the follow-ups plan](../2026-09-28-rereview-followups/PLAN.md) for the full verdict table
 
 ## Why
 
