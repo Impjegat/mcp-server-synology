@@ -945,7 +945,7 @@ class TestIterConfiguredSecrets:
         string — valid JSON, but redact()'s str.replace() call would raise
         on a non-string value, which would surface as an unhandled
         exception from inside an error handler wherever this feeds
-        redact() (see mcp_server.py's _dispatch_tool_call)."""
+        redact() (see mcp_server.py's _call_tool)."""
         secrets_data = {
             "synology": {
                 "nas1": {
