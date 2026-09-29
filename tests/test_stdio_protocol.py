@@ -8,6 +8,11 @@ This is the check that does.
 
 The server runs with no NAS configured, auto-login off and restricted mode
 on, in a temporary config directory, so nothing here can reach a NAS.
+
+By default it is started with `python main.py`. Setting
+`MCP_STDIO_SERVER_COMMAND` (a JSON array of strings) replaces that command,
+which is how CI runs this same test against the Docker image, through the
+`docker compose run --rm` command the README gives MCP clients.
 """
 
 import contextlib
@@ -24,6 +29,7 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 RESPONSE_TIMEOUT = 30  # seconds to wait for any one response
 INVALID_PARAMS = -32602
+COMMAND_OVERRIDE_ENV = "MCP_STDIO_SERVER_COMMAND"
 
 
 class _StdioClient:
@@ -97,10 +103,26 @@ class _StdioClient:
         return self.request("tools/call", params)
 
 
+def _server_command():
+    """The command that starts the server: `python main.py`, unless
+    MCP_STDIO_SERVER_COMMAND holds a JSON array of strings to run instead."""
+    override = os.environ.get(COMMAND_OVERRIDE_ENV)
+    if not override:
+        return [sys.executable, str(ROOT / "main.py")]
+    command = json.loads(override)
+    assert isinstance(command, list) and all(
+        isinstance(part, str) for part in command
+    ), f"{COMMAND_OVERRIDE_ENV} must be a JSON array of strings"
+    return command
+
+
 @contextlib.contextmanager
 def _running_server(directory):
-    """Start `python main.py` and yield a client connected to it."""
+    """Start the server and yield a client connected to it."""
     env = {k: v for k, v in os.environ.items() if not k.startswith("SYNOLOGY_")}
+    # The settings directory the server looks in — and the one the compose
+    # file bind-mounts into the container. Empty, meaning no settings.json.
+    (directory / "xdg" / "synology-mcp").mkdir(parents=True, exist_ok=True)
     env.update(
         {
             # Nothing configured, nothing to log in to, restricted as shipped.
@@ -115,7 +137,7 @@ def _running_server(directory):
     stderr_path = directory / "server-stderr.log"
     with open(stderr_path, "w", encoding="utf-8") as stderr:
         process = subprocess.Popen(
-            [sys.executable, str(ROOT / "main.py")],
+            _server_command(),
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=stderr,
