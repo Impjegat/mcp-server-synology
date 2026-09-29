@@ -1,10 +1,14 @@
 pycryptodome
 requests
-# mcp 2.x replaced the low-level Server decorators (`@server.list_tools()`,
-# `@server.call_tool()`) with constructor callbacks and changed the startup
-# code; src/mcp_server.py is written against 1.x, and against 2.x
-# SynologyMCPServer() fails on construction. Lift the cap once that is migrated.
-mcp>=1.28.1,<2
+# mcp 2.0 replaced the low-level Server decorators (`@server.list_tools()`,
+# `@server.call_tool()`) with constructor callbacks and dropped the SDK's own
+# argument validation, and src/mcp_server.py was migrated to that API; it does
+# not run on 1.x. The upper bound is deliberate: a major release broke this
+# server once (https://github.com/Impjegat/mcp-server-synology/issues/12), so
+# the next one should be a conscious upgrade, not whatever pip resolves.
+mcp>=2.2.0,<3
+# Imported directly for tool-argument validation (an mcp dependency already).
+jsonschema>=4.20.0
 python-dotenv
 
 # Testing dependencies

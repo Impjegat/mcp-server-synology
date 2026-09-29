@@ -3,7 +3,9 @@ dispatch, tool classification, and the restricted synology_login check)."""
 
 from unittest.mock import patch
 
+import mcp.types as types
 import pytest
+from mcp.shared.exceptions import MCPError
 
 
 def _server():
@@ -98,7 +100,7 @@ def test_account_enumeration_tools_are_read_only_but_disallowed(name):
     server = _server()
     assert server._is_tool_allowed(name) is False
     definitions = {t.name: t for t in server._get_tool_definitions()}
-    assert definitions[name].annotations.readOnlyHint is True
+    assert definitions[name].annotations.read_only_hint is True
 
 
 @pytest.mark.asyncio
@@ -141,11 +143,13 @@ async def test_restricted_mode_rejects_modifying_tool_before_any_network_call():
     server = _server()
     with patch("mcp_server.config") as fake_config:
         fake_config.restricted_mode = True
-        result = await server._dispatch_tool_call("delete", {"path": "/share/x"})
+        result = await server._call_tool("delete", {"path": "/share/x"})
 
-    assert len(result) == 1
-    assert "restricted mode" in result[0].text
-    assert "No active session" not in result[0].text
+    # A refusal is a failed call (isError), not a successful one.
+    assert result.is_error is True
+    assert len(result.content) == 1
+    assert "restricted mode" in result.content[0].text
+    assert "no active session" not in result.content[0].text.lower()
 
 
 @pytest.mark.asyncio
@@ -156,10 +160,13 @@ async def test_restricted_mode_still_allows_read_only_tool_dispatch():
     server = _server()
     with patch("mcp_server.config") as fake_config:
         fake_config.restricted_mode = True
-        result = await server._dispatch_tool_call("list_directory", {"path": "/share"})
+        result = await server._call_tool("list_directory", {"path": "/share"})
 
-    assert len(result) == 1
-    assert "restricted mode" not in result[0].text
+    assert len(result.content) == 1
+    assert "restricted mode" not in result.content[0].text
+    # It reached its handler, which failed for want of a session.
+    assert "no active sessions" in result.content[0].text
+    assert result.is_error is True
 
 
 @pytest.mark.asyncio
@@ -167,9 +174,13 @@ async def test_unknown_tool_name_is_rejected_even_when_restriction_would_also_ap
     server = _server()
     with patch("mcp_server.config") as fake_config:
         fake_config.restricted_mode = True
-        result = await server._dispatch_tool_call("not_a_real_tool", {})
+        # An unknown name is a protocol error (a JSON-RPC error response),
+        # not a tool result — and that holds in restricted mode too.
+        with pytest.raises(MCPError) as excinfo:
+            await server._call_tool("not_a_real_tool", {})
 
-    assert "Unknown tool" in result[0].text
+    assert excinfo.value.code == types.INVALID_PARAMS
+    assert "Unknown tool" in excinfo.value.message
 
 
 # ---------------------------------------------------------------------------

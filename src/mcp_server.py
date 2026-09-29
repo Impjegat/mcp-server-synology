@@ -3,7 +3,8 @@
 import asyncio
 import json
 import logging
-from typing import Callable, Dict, Optional
+import traceback
+from typing import Any, Callable, Dict, Optional
 
 import urllib3
 
@@ -11,9 +12,10 @@ logger = logging.getLogger(__name__)
 
 import mcp.server.stdio
 import mcp.types as types
-from mcp.server import Server
-from mcp.server.lowlevel import NotificationOptions
-from mcp.server.models import InitializationOptions
+from jsonschema.exceptions import best_match
+from jsonschema.validators import validator_for
+from mcp.server import NotificationOptions, Server, ServerRequestContext
+from mcp.shared.exceptions import MCPError
 
 from auth import SynologyAuth, iter_all_secrets
 from config import config
@@ -174,11 +176,29 @@ if not config.verify_ssl:
     )
 
 
+class ToolExecutionError(Exception):
+    """A tool ran and failed, and the caller should see it as a failure.
+
+    Handlers raise this wherever they detect a failure — a failed login, a
+    DSM result reporting `success: false`, a missing session — instead of
+    returning failure text. `_call_tool` turns it into a result with
+    `isError: true`, so the error flag is set explicitly by the code that
+    knows a failure happened and never inferred from what a message says.
+    `str(error)` is the text shown to the client; it is redacted like every
+    other response before it leaves the process.
+    """
+
+
 class SynologyMCPServer:
     """MCP Server for Synology NAS operations."""
 
     def __init__(self):
-        self.server = Server(config.server_name)
+        self.server = Server(
+            config.server_name,
+            version=config.server_version,
+            on_list_tools=self._on_list_tools,
+            on_call_tool=self._on_call_tool,
+        )
         self.auth_instances: Dict[str, SynologyAuth] = {}
         self.sessions: Dict[str, str] = {}  # base_url -> session_id
         self.syno_tokens: Dict[str, str] = {}  # base_url -> SynoToken (CSRF, DSM 7.3.2+)
@@ -191,13 +211,15 @@ class SynologyMCPServer:
         self.nas_name_map: Dict[str, str] = {}  # nas_name -> base_url
         # Single source of truth for tool dispatch — see _build_tool_registry.
         self._tool_registry: Dict[str, Callable] = self._build_tool_registry()
-        self._setup_handlers()
+        # One compiled JSON-Schema validator per tool, built from the same
+        # definitions discovery serves — see _compile_input_validators.
+        self._input_validators = self._compile_input_validators()
 
     def _build_tool_registry(self) -> Dict[str, Callable]:
         """Single source of truth: tool name -> async handler.
 
-        Both `handle_list_tools` (via `_is_tool_allowed`) and
-        `handle_call_tool` read from this one registry — replacing the
+        Both tool discovery (`_list_tools`, via `_is_tool_allowed`) and tool
+        dispatch (`_call_tool`) read from this one registry — replacing the
         previous if/elif chain and the separate, already-drifted
         `call_tool_direct` dispatch dict (deleted: it was dead code left
         over from the removed Xiaozhi bridge, and had already missed two
@@ -282,8 +304,8 @@ class SynologyMCPServer:
         on trust-tier grounds)."""
         read_only = tool.name in _READ_ONLY_TOOLS
         tool.annotations = types.ToolAnnotations(
-            readOnlyHint=read_only,
-            destructiveHint=tool.name in _DESTRUCTIVE_TOOLS,
+            read_only_hint=read_only,
+            destructive_hint=tool.name in _DESTRUCTIVE_TOOLS,
         )
         return tool
 
@@ -482,23 +504,31 @@ class SynologyMCPServer:
             raise Exception("Auto-login failed for all configured NAS units — stopping server.")
         logger.info(f"Connected to {success_count}/{len(nas_names)} NAS unit(s)")
 
-    def _setup_handlers(self):
-        """Setup MCP server handlers."""
+    # ------------------------------------------------------------------
+    # MCP SDK wiring. The SDK calls these two handlers (registered in
+    # __init__); each is a thin wrapper around a plain method
+    # (`_list_tools`, `_call_tool`), so the real logic stays directly
+    # testable without going through the SDK.
+    # ------------------------------------------------------------------
 
-        @self.server.list_tools()
-        async def handle_list_tools() -> list[types.Tool]:
-            """List available Synology tools — thin wrapper so the actual
-            listing logic (`_list_tools`) is a plain method, directly
-            testable without going through the MCP SDK's decorator
-            machinery."""
-            return await self._list_tools()
+    async def _on_list_tools(
+        self, ctx: ServerRequestContext, params: Optional[types.PaginatedRequestParams]
+    ) -> types.ListToolsResult:
+        """SDK handler for `tools/list`."""
+        try:
+            return types.ListToolsResult(tools=await self._list_tools())
+        except Exception as e:
+            # Never let an unexpected exception's text reach the client: the
+            # SDK would send str(e) as the JSON-RPC error message.
+            logger.error(f"Failed to list tools: {self._redact_text(str(e))}")
+            self._log_traceback()
+            raise MCPError(types.INTERNAL_ERROR, "Failed to list tools") from None
 
-        @self.server.call_tool()
-        async def handle_call_tool(name: str, arguments: dict) -> list[types.TextContent]:
-            """Handle tool calls — thin wrapper so the actual dispatch logic
-            (`_dispatch_tool_call`) is a plain method, directly testable
-            without going through the MCP SDK's decorator machinery."""
-            return await self._dispatch_tool_call(name, arguments)
+    async def _on_call_tool(
+        self, ctx: ServerRequestContext, params: types.CallToolRequestParams
+    ) -> types.CallToolResult:
+        """SDK handler for `tools/call`."""
+        return await self._call_tool(params.name, params.arguments or {})
 
     async def _list_tools(self) -> list[types.Tool]:
         """List available Synology tools."""
@@ -510,80 +540,140 @@ class SynologyMCPServer:
 
         # Add login/logout tools only if not using auto-login or no credentials configured
         if not config.auto_login or not config.has_synology_credentials():
-            tools.extend(
-                self._annotate_tool(t)
-                for t in [
-                    types.Tool(
-                        name="synology_login",
-                        description=(
-                            "Authenticate with Synology NAS and establish session.\n\n"
-                            "2FA/OTP accounts: pass `otp_code` on the first login only. "
-                            "DSM issues a device token on success, but this tool never "
-                            "returns or logs it (credential-handling policy) — there is "
-                            "no way to retrieve it from this call, so do not retry "
-                            "expecting one. To get a persistent trusted-device token, "
-                            "configure this NAS with `otp_code` in settings.json and "
-                            "enable auto-login instead; the server saves the token to "
-                            "settings.json itself on the first successful auto-login. If "
-                            "you already have a `device_id`, pass it instead of `otp_code` "
-                            "— DSM treats trusted devices as already authenticated."
-                        ),
-                        inputSchema={
-                            "type": "object",
-                            "properties": {
-                                "base_url": {
-                                    "type": "string",
-                                    "description": "Synology NAS base URL (e.g., https://192.168.1.100:5001)",
-                                },
-                                "username": {
-                                    "type": "string",
-                                    "description": "Username for authentication",
-                                },
-                                "password": {
-                                    "type": "string",
-                                    "description": "Password for authentication",
-                                },
-                                "otp_code": {
-                                    "type": "string",
-                                    "description": (
-                                        "One-time 6-digit code from the user's authenticator. "
-                                        "Required only on the first 2FA login for a new device. "
-                                        "Ignored when `device_id` is also given."
-                                    ),
-                                },
-                                "device_id": {
-                                    "type": "string",
-                                    "description": (
-                                        "Long-lived trusted-device token previously issued by DSM "
-                                        "(returned as `did` in a successful 2FA login). When "
-                                        "supplied, DSM skips the OTP step. Preferred over "
-                                        "`otp_code` for repeated logins."
-                                    ),
-                                },
-                            },
-                            "required": ["base_url", "username", "password"],
-                        },
-                    ),
-                    types.Tool(
-                        name="synology_logout",
-                        description="Logout from Synology NAS session",
-                        inputSchema={
-                            "type": "object",
-                            "properties": {
-                                "base_url": {
-                                    "type": "string",
-                                    "description": "Synology NAS base URL",
-                                }
-                            },
-                            "required": ["base_url"],
-                        },
-                    ),
-                ]
-            )
+            tools.extend(self._session_tool_definitions())
 
         return tools
 
-    async def _dispatch_tool_call(self, name: str, arguments: dict) -> list[types.TextContent]:
+    def _session_tool_definitions(self) -> list[types.Tool]:
+        """The synology_login / synology_logout definitions. They are kept
+        apart from `_get_tool_definitions()` because discovery only lists them
+        when auto-login isn't in use, but they are always registered — so
+        argument validation (`_compile_input_validators`) needs their schemas
+        whether or not they are listed."""
+        return [
+            self._annotate_tool(t)
+            for t in [
+                types.Tool(
+                    name="synology_login",
+                    description=(
+                        "Authenticate with Synology NAS and establish session.\n\n"
+                        "2FA/OTP accounts: pass `otp_code` on the first login only. "
+                        "DSM issues a device token on success, but this tool never "
+                        "returns or logs it (credential-handling policy) — there is "
+                        "no way to retrieve it from this call, so do not retry "
+                        "expecting one. To get a persistent trusted-device token, "
+                        "configure this NAS with `otp_code` in settings.json and "
+                        "enable auto-login instead; the server saves the token to "
+                        "settings.json itself on the first successful auto-login. If "
+                        "you already have a `device_id`, pass it instead of `otp_code` "
+                        "— DSM treats trusted devices as already authenticated."
+                    ),
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "base_url": {
+                                "type": "string",
+                                "description": "Synology NAS base URL (e.g., https://192.168.1.100:5001)",
+                            },
+                            "username": {
+                                "type": "string",
+                                "description": "Username for authentication",
+                            },
+                            "password": {
+                                "type": "string",
+                                "description": "Password for authentication",
+                            },
+                            "otp_code": {
+                                "type": "string",
+                                "description": (
+                                    "One-time 6-digit code from the user's authenticator. "
+                                    "Required only on the first 2FA login for a new device. "
+                                    "Ignored when `device_id` is also given."
+                                ),
+                            },
+                            "device_id": {
+                                "type": "string",
+                                "description": (
+                                    "Long-lived trusted-device token previously issued by DSM "
+                                    "(returned as `did` in a successful 2FA login). When "
+                                    "supplied, DSM skips the OTP step. Preferred over "
+                                    "`otp_code` for repeated logins."
+                                ),
+                            },
+                        },
+                        "required": ["base_url", "username", "password"],
+                    },
+                ),
+                types.Tool(
+                    name="synology_logout",
+                    description="Logout from Synology NAS session",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "base_url": {
+                                "type": "string",
+                                "description": "Synology NAS base URL",
+                            }
+                        },
+                        "required": ["base_url"],
+                    },
+                ),
+            ]
+        ]
+
+    def _compile_input_validators(self) -> Dict[str, Any]:
+        """One JSON-Schema validator per tool, compiled once from the same
+        `inputSchema` definitions that discovery serves.
+
+        The MCP SDK validated tool arguments against each tool's inputSchema
+        before calling the handler (through 1.x); 2.x no longer does, so
+        `_call_tool` has to. Compiling here also fails fast, at startup, on a
+        schema that isn't itself valid, and on a registered tool that has no
+        definition (and so nothing to validate its arguments against) —
+        rather than on the first call to it.
+        """
+        validators: Dict[str, Any] = {}
+        for tool in [*self._get_tool_definitions(), *self._session_tool_definitions()]:
+            schema_class = validator_for(tool.input_schema)
+            schema_class.check_schema(tool.input_schema)
+            validators[tool.name] = schema_class(tool.input_schema)
+
+        undefined = set(self._tool_registry) - set(validators)
+        if undefined:
+            raise RuntimeError(f"Registered tool(s) without an input schema: {sorted(undefined)}")
+        return validators
+
+    def _validate_arguments(self, name: str, arguments: dict) -> Optional[str]:
+        """The message describing why `arguments` don't match tool `name`'s
+        input schema, or None if they do."""
+        error = best_match(self._input_validators[name].iter_errors(arguments))
+        return None if error is None else error.message
+
+    def _redact_text(self, text: str) -> str:
+        """`text` with every known/likely secret masked (see utils.redact)."""
+        return redact(text, live_secrets=list(iter_all_secrets()))
+
+    def _log_traceback(self) -> None:
+        """Log the traceback of the exception being handled at DEBUG,
+        already redacted: an exception's text can carry a session id (a
+        `requests` error embeds the full request URL), so the raw traceback
+        is never handed to the logging module."""
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug("Traceback:\n%s", self._redact_text(traceback.format_exc()))
+
+    def _error_result(self, message: str) -> types.CallToolResult:
+        """A tool result flagged `isError: true`, carrying `message`.
+
+        Every code path that reports a tool failure comes through here, and
+        the flag is set by that path because it knows a failure happened —
+        it is never inferred afterwards from what the text says. The message
+        is redacted like every other response."""
+        return types.CallToolResult(
+            content=[types.TextContent(type="text", text=self._redact_text(message))],
+            is_error=True,
+        )
+
+    async def _call_tool(self, name: str, arguments: dict) -> types.CallToolResult:
         """Look up and invoke `name` in `self._tool_registry` — the single
         place a tool name maps to a handler. A second, independent dispatch
         path (the old `call_tool_direct`) used to exist for a
@@ -591,46 +681,65 @@ class SynologyMCPServer:
         one (missing tool names the live path had gained); it's gone, so
         there is exactly one path to audit or extend.
 
-        Deny-by-default: a modifying tool is rejected here, before its
-        handler runs and therefore before any NAS request is made — a
+        How each outcome is reported:
+        - An unknown tool name is a protocol error (`MCPError`, INVALID_PARAMS
+          → a JSON-RPC error response), not a tool result.
+        - A tool that exists but can't run is a result with `isError: true`:
+          a restricted-mode refusal, arguments that don't match the tool's
+          input schema, a `ToolExecutionError` from the handler, or any other
+          exception the handler raises.
+        - Otherwise a normal result (`isError: false`).
+
+        The first three checks — unknown name, restricted mode, argument
+        validation — all happen before the handler runs, and therefore
+        before any NAS request is made. Restricted mode is deny-by-default: a
         direct call by exact name is covered the same way as discovery
-        (`handle_list_tools`), since both consult `_is_tool_allowed` against
-        the same classification.
+        (`_list_tools`), since both consult `_is_tool_allowed` against the
+        same classification. Every message that leaves here is redacted.
         """
+        handler = self._tool_registry.get(name)
+        if handler is None:
+            raise MCPError(types.INVALID_PARAMS, self._redact_text(f"Unknown tool: {name}"))
+
+        if config.restricted_mode and not self._is_tool_allowed(name):
+            return self._error_result(
+                f"Tool '{name}' is not available: the server is running in "
+                "restricted mode (browsing and monitoring only). Set "
+                "restricted_mode to false in settings.json to enable it."
+            )
+
+        invalid = self._validate_arguments(name, arguments)
+        if invalid is not None:
+            message = self._redact_text(f"Invalid arguments for {name}: {invalid}")
+            logger.debug(message)
+            return self._error_result(message)
+
+        # Nothing but the unknown-tool MCPError above may escape past here: the
+        # SDK would send an unexpected exception's text to the client as-is.
+        # Building the result is inside the try for the same reason.
         try:
             logger.debug(f"Executing tool: {name}")
-            handler = self._tool_registry.get(name)
-            if handler is None:
-                raise ValueError(f"Unknown tool: {name}")
-            if config.restricted_mode and not self._is_tool_allowed(name):
-                return self._redact_tool_result(
-                    [
-                        types.TextContent(
-                            type="text",
-                            text=(
-                                f"Tool '{name}' is not available: the server is running in "
-                                "restricted mode (browsing and monitoring only). Set "
-                                "restricted_mode to false in settings.json to enable it."
-                            ),
-                        )
-                    ]
-                )
             result = await handler(arguments)
-            return self._redact_tool_result(result)
+            return types.CallToolResult(content=self._redact_tool_result(result), is_error=False)
+        except ToolExecutionError as e:
+            message = self._redact_text(str(e))
+            logger.warning(f"Tool {name} failed: {message}")
+            return self._error_result(message)
         except Exception as e:
-            error_text = redact(
-                f"Error executing {name}: {str(e)}", live_secrets=list(iter_all_secrets())
-            )
-            return [types.TextContent(type="text", text=error_text)]
+            message = self._redact_text(f"Error executing {name}: {e}")
+            logger.warning(message)
+            self._log_traceback()
+            return self._error_result(message)
 
     def _redact_tool_result(self, result: list[types.TextContent]) -> list[types.TextContent]:
         """Redact known/likely secrets from a tool response before it leaves the process.
 
-        This is the single point every tool response passes through (see
-        `handle_call_tool` above), so a leak anywhere in a handler or the
-        service layer it calls (a raw DSM payload, a network-error message
-        that embedded a `_sid=`-bearing URL, ...) is caught here rather than
-        needing a fix at every individual call site.
+        This is the single point every successful tool response passes through
+        (see `_call_tool`; failures go through `_error_result`), so a leak
+        anywhere in a handler or the service layer it calls (a raw DSM
+        payload, a network-error message that embedded a `_sid=`-bearing URL,
+        ...) is caught here rather than needing a fix at every individual
+        call site.
         """
         live_secrets = list(iter_all_secrets())
         return [
@@ -641,6 +750,26 @@ class SynologyMCPServer:
             )
             for item in result
         ]
+
+    @staticmethod
+    def _dsm_result(result: Any, prefix: str = "") -> list[types.TextContent]:
+        """Format a service-layer result as tool output, raising
+        `ToolExecutionError` if the result reports a failure.
+
+        The API client behind the health, NFS, user-management and container
+        services reports failure as a *returned* dict —
+        `{"success": False, "error": {...}}`, the shape DSM itself uses and
+        the one network errors are mapped to — rather than by raising.
+        Returning that as ordinary output would present a failed call as a
+        successful one, so it becomes a failure here, decided from the
+        structured `success` field and never from the text. A result with no
+        `success` field at all is output as before, and a failure's message
+        is the same JSON a success would have shown.
+        """
+        text = f"{prefix}{json.dumps(result, indent=2)}"
+        if isinstance(result, dict) and result.get("success") is False:
+            raise ToolExecutionError(text)
+        return [types.TextContent(type="text", text=text)]
 
     def _service_instance_dicts(self):
         """Canonical set of per-domain instance caches keyed by base_url.
@@ -767,20 +896,17 @@ class SynologyMCPServer:
 
         # Validate base_url format
         if not self._validate_url(base_url):
-            return [
-                types.TextContent(
-                    type="text",
-                    text=f"Invalid base_url format: {base_url}\n"
-                    "URL must start with https:// and include a hostname "
-                    "(e.g., https://192.168.1.100:5001). Plain http:// is not "
-                    "supported — enable HTTPS in DSM Control Panel > Security > "
-                    "Certificate.",
-                )
-            ]
+            raise ToolExecutionError(
+                f"Invalid base_url format: {base_url}\n"
+                "URL must start with https:// and include a hostname "
+                "(e.g., https://192.168.1.100:5001). Plain http:// is not "
+                "supported — enable HTTPS in DSM Control Panel > Security > "
+                "Certificate."
+            )
 
         restriction_error = self._restricted_login_error(base_url)
         if restriction_error:
-            return [types.TextContent(type="text", text=restriction_error)]
+            raise ToolExecutionError(restriction_error)
 
         # Create or get auth instance
         if base_url not in self.auth_instances:
@@ -824,19 +950,14 @@ class SynologyMCPServer:
             error_info = result.get("error", {})
             error_code = error_info.get("code", "unknown")
             error_message = error_info.get("message", "Unknown error")
-            return [
-                types.TextContent(
-                    type="text",
-                    text=f"Authentication failed: {error_code} - {error_message}",
-                )
-            ]
+            raise ToolExecutionError(f"Authentication failed: {error_code} - {error_message}")
 
     async def _handle_logout(self, arguments: dict) -> list[types.TextContent]:
         """Handle Synology logout."""
         base_url = self._get_base_url(arguments)
 
         if base_url not in self.sessions:
-            return [types.TextContent(type="text", text=f"No active session found for {base_url}")]
+            raise ToolExecutionError(f"No active session found for {base_url}")
 
         session_id = self.sessions[base_url]
         auth = self.auth_instances[base_url]
@@ -881,14 +1002,11 @@ class SynologyMCPServer:
                     )
                 ]
             else:
-                return [
-                    types.TextContent(
-                        type="text",
-                        text=f"❌ Logout failed for {base_url}\n"
-                        f"Error: {error_code} - {error_msg}\n"
-                        f"Full response: {json.dumps(result, indent=2)}",
-                    )
-                ]
+                raise ToolExecutionError(
+                    f"❌ Logout failed for {base_url}\n"
+                    f"Error: {error_code} - {error_msg}\n"
+                    f"Full response: {json.dumps(result, indent=2)}"
+                )
 
     async def _handle_status(self, arguments: dict) -> list[types.TextContent]:
         """Handle status check."""
@@ -1125,11 +1243,7 @@ class SynologyMCPServer:
         downloadstation = self._get_downloadstation(base_url)
         result = downloadstation.create_task(uri, destination, username, password)
 
-        return [
-            types.TextContent(
-                type="text", text=f"Create task result: {json.dumps(result, indent=2)}"
-            )
-        ]
+        return self._dsm_result(result, prefix="Create task result: ")
 
     async def _handle_ds_pause_tasks(self, arguments: dict) -> list[types.TextContent]:
         """Handle pausing one or more download tasks."""
@@ -1139,11 +1253,7 @@ class SynologyMCPServer:
         downloadstation = self._get_downloadstation(base_url)
         result = downloadstation.pause_tasks(task_ids)
 
-        return [
-            types.TextContent(
-                type="text", text=f"Pause tasks result: {json.dumps(result, indent=2)}"
-            )
-        ]
+        return self._dsm_result(result, prefix="Pause tasks result: ")
 
     async def _handle_ds_resume_tasks(self, arguments: dict) -> list[types.TextContent]:
         """Handle resuming one or more paused download tasks."""
@@ -1153,11 +1263,7 @@ class SynologyMCPServer:
         downloadstation = self._get_downloadstation(base_url)
         result = downloadstation.resume_tasks(task_ids)
 
-        return [
-            types.TextContent(
-                type="text", text=f"Resume tasks result: {json.dumps(result, indent=2)}"
-            )
-        ]
+        return self._dsm_result(result, prefix="Resume tasks result: ")
 
     async def _handle_ds_delete_tasks(self, arguments: dict) -> list[types.TextContent]:
         """Handle deleting one or more download tasks."""
@@ -1168,11 +1274,7 @@ class SynologyMCPServer:
         downloadstation = self._get_downloadstation(base_url)
         result = downloadstation.delete_tasks(task_ids, force_complete)
 
-        return [
-            types.TextContent(
-                type="text", text=f"Delete tasks result: {json.dumps(result, indent=2)}"
-            )
-        ]
+        return self._dsm_result(result, prefix="Delete tasks result: ")
 
     async def _handle_ds_get_statistics(self, arguments: dict) -> list[types.TextContent]:
         """Handle getting Download Station download/upload statistics."""
@@ -1204,7 +1306,7 @@ class SynologyMCPServer:
         base_url = self._get_base_url(arguments)
         health = self._get_health(base_url)
         result = getattr(health, method_name)()
-        return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+        return self._dsm_result(result)
 
     async def _handle_disk_smart(self, arguments: dict) -> list[types.TextContent]:
         """Handle getting SMART info for a specific disk."""
@@ -1212,7 +1314,7 @@ class SynologyMCPServer:
         disk_id = arguments["disk_id"]
         health = self._get_health(base_url)
         result = health.disk_smart_info(disk_id)
-        return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+        return self._dsm_result(result)
 
     async def _handle_system_log(self, arguments: dict) -> list[types.TextContent]:
         """Handle getting system log entries."""
@@ -1221,7 +1323,7 @@ class SynologyMCPServer:
         limit = arguments.get("limit", 50)
         health = self._get_health(base_url)
         result = health.system_log(offset=offset, limit=limit)
-        return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+        return self._dsm_result(result)
 
     # ------------------------------------------------------------------
     # NFS management handlers
@@ -1232,7 +1334,7 @@ class SynologyMCPServer:
         base_url = self._get_base_url(arguments)
         nfs = self._get_nfs(base_url)
         result = getattr(nfs, method_name)()
-        return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+        return self._dsm_result(result)
 
     async def _handle_nfs_enable(self, arguments: dict) -> list[types.TextContent]:
         """Handle enabling/disabling NFS service."""
@@ -1241,7 +1343,7 @@ class SynologyMCPServer:
         nfs_v4 = arguments.get("nfs_v4", False)
         nfs = self._get_nfs(base_url)
         result = nfs.nfs_enable(enable=enable, nfs_v4=nfs_v4)
-        return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+        return self._dsm_result(result)
 
     async def _handle_nfs_set_permission(self, arguments: dict) -> list[types.TextContent]:
         """Handle setting NFS permissions on a share."""
@@ -1254,7 +1356,7 @@ class SynologyMCPServer:
             squash=arguments.get("squash", "root_squash"),
             security=arguments.get("security", "sys"),
         )
-        return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+        return self._dsm_result(result)
 
     async def _handle_create_share(self, arguments: dict) -> list[types.TextContent]:
         """Handle creating a new shared folder."""
@@ -1267,7 +1369,7 @@ class SynologyMCPServer:
             enable_recycle_bin=arguments.get("enable_recycle_bin", True),
             recycle_bin_admin_only=arguments.get("recycle_bin_admin_only", True),
         )
-        return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+        return self._dsm_result(result)
 
     # ------------------------------------------------------------------
     # Container Manager handlers
@@ -1397,7 +1499,7 @@ class SynologyMCPServer:
         else:
             raise ValueError(f"Unknown container method: {method_name}")
 
-        return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+        return self._dsm_result(result)
 
     # ------------------------------------------------------------------
     # User management handlers
@@ -1410,13 +1512,13 @@ class SynologyMCPServer:
         base_url = self._get_base_url(arguments)
         usermgr = self._get_usermgr(base_url)
         result = getattr(usermgr, method_name)()
-        return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+        return self._dsm_result(result)
 
     async def _handle_usermgr_get_user(self, arguments: dict) -> list[types.TextContent]:
         base_url = self._get_base_url(arguments)
         usermgr = self._get_usermgr(base_url)
         result = usermgr.get_user(arguments["name"])
-        return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+        return self._dsm_result(result)
 
     async def _handle_usermgr_create_user(self, arguments: dict) -> list[types.TextContent]:
         base_url = self._get_base_url(arguments)
@@ -1429,7 +1531,7 @@ class SynologyMCPServer:
             cannot_chg_passwd=arguments.get("cannot_chg_passwd", False),
             passwd_never_expire=arguments.get("passwd_never_expire", True),
         )
-        return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+        return self._dsm_result(result)
 
     async def _handle_usermgr_set_user(self, arguments: dict) -> list[types.TextContent]:
         base_url = self._get_base_url(arguments)
@@ -1442,43 +1544,43 @@ class SynologyMCPServer:
             email=arguments.get("email"),
             expired=arguments.get("expired"),
         )
-        return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+        return self._dsm_result(result)
 
     async def _handle_usermgr_delete_user(self, arguments: dict) -> list[types.TextContent]:
         base_url = self._get_base_url(arguments)
         usermgr = self._get_usermgr(base_url)
         result = usermgr.delete_user(arguments["name"])
-        return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+        return self._dsm_result(result)
 
     async def _handle_usermgr_list_group_members(self, arguments: dict) -> list[types.TextContent]:
         base_url = self._get_base_url(arguments)
         usermgr = self._get_usermgr(base_url)
         result = usermgr.list_group_members(arguments["group"])
-        return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+        return self._dsm_result(result)
 
     async def _handle_usermgr_add_to_group(self, arguments: dict) -> list[types.TextContent]:
         base_url = self._get_base_url(arguments)
         usermgr = self._get_usermgr(base_url)
         result = usermgr.add_user_to_group(arguments["username"], arguments["groups"])
-        return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+        return self._dsm_result(result)
 
     async def _handle_usermgr_remove_from_group(self, arguments: dict) -> list[types.TextContent]:
         base_url = self._get_base_url(arguments)
         usermgr = self._get_usermgr(base_url)
         result = usermgr.remove_user_from_group(arguments["username"], arguments["groups"])
-        return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+        return self._dsm_result(result)
 
     async def _handle_usermgr_get_permissions(self, arguments: dict) -> list[types.TextContent]:
         base_url = self._get_base_url(arguments)
         usermgr = self._get_usermgr(base_url)
         result = usermgr.get_user_permissions(arguments["name"])
-        return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+        return self._dsm_result(result)
 
     async def _handle_usermgr_set_permissions(self, arguments: dict) -> list[types.TextContent]:
         base_url = self._get_base_url(arguments)
         usermgr = self._get_usermgr(base_url)
         result = usermgr.set_user_permissions(arguments["name"], arguments["permissions"])
-        return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+        return self._dsm_result(result)
 
     def _get_container_tool_definitions(self):
         """Get Container Manager container tool definitions."""
@@ -2915,14 +3017,7 @@ class SynologyMCPServer:
                 await self.server.run(
                     read_stream,
                     write_stream,
-                    InitializationOptions(
-                        server_name=config.server_name,
-                        server_version=config.server_version,
-                        capabilities=self.server.get_capabilities(
-                            notification_options=NotificationOptions(),
-                            experimental_capabilities={},
-                        ),
-                    ),
+                    self.server.create_initialization_options(NotificationOptions()),
                 )
         except KeyboardInterrupt:
             logger.info("Received shutdown signal, cleaning up sessions...")

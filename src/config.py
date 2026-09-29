@@ -504,8 +504,7 @@ class SynologyConfig:
         number rather than a quoted string — valid JSON, but redact()'s
         `str.replace()` would raise on a non-string value, which would
         surface as an unhandled exception from inside an error handler
-        wherever this feeds `redact()` (see `_dispatch_tool_call`'s except
-        clause).
+        wherever this feeds `redact()` (see `_call_tool`'s except clauses).
         """
         for nas_cfg in self.nas_configs.values():
             for key in ("password", "device_id"):
