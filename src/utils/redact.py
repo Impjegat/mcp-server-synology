@@ -36,10 +36,15 @@ def redact(text: Optional[str], *, live_secrets: Iterable[Optional[str]] = ()) -
     Args:
         text: The string to scrub. None passes through unchanged.
         live_secrets: Concrete secret values known to be currently live
-            (session IDs, SynoTokens, device IDs, configured passwords)
-            across all connected NAS units. Each non-empty value is masked
-            wherever it appears verbatim, even outside a `key=value` shape
-            (e.g. in a "Session ID: <sid>" log line).
+            (session IDs, SynoTokens, device IDs, configured passwords —
+            deliberately not one-shot OTP codes, which are always short
+            and purely numeric: see `config.iter_configured_secrets`'s
+            docstring for why blanket-masking those does more harm than
+            good) across all connected NAS units. Each non-empty value is
+            masked wherever it appears verbatim, even outside a `key=value`
+            shape (e.g. in a "Session ID: <sid>" log line). Callers are
+            responsible for not passing a value that's unsafe to
+            blanket-mask this way.
 
     Returns:
         The scrubbed text, or the original value unchanged if it wasn't a
@@ -50,12 +55,66 @@ def redact(text: Optional[str], *, live_secrets: Iterable[Optional[str]] = ()) -
         return text
 
     result = text
-    for secret in live_secrets:
-        if secret:
-            result = result.replace(secret, _MASK)
+    # Longest first: if one live secret happens to be a substring of
+    # another (e.g. a cached device_id that's a prefix of a newer one
+    # during a relogin transition), replacing the shorter one first would
+    # fragment the longer one's literal text in `result` — and the longer
+    # secret's own replacement pass then finds nothing, since its literal
+    # text no longer exists verbatim, leaving a partial, unredacted
+    # remainder behind. Processing longest-first means a secret's full
+    # span is always masked before any of its substrings get a chance to
+    # split it.
+    for secret in sorted((s for s in live_secrets if s), key=len, reverse=True):
+        result = result.replace(secret, _MASK)
 
     result = _mask_known_params(result)
     return result
+
+
+# Used only to render exception tracebacks via formatException() below —
+# never for the record's own message formatting (Formatter.format() isn't
+# called here, just this one helper method, which doesn't depend on any
+# per-formatter state like fmt/datefmt).
+_TRACEBACK_FORMATTER = logging.Formatter()
+
+_REDACTION_FAILED_PLACEHOLDER = "<redaction failed - content suppressed>"
+
+
+def _safe_redact(text: Optional[str], live_secrets: Iterable[Optional[str]]) -> Optional[str]:
+    """Like `redact()`, but never raises and never lets unredacted text
+    through on failure — a placeholder is returned instead.
+
+    `redact()` itself isn't expected to raise on a plain string (its only
+    operations are str.replace and a regex sub, both total functions), but
+    if it ever does, letting that exception propagate out of a logging
+    filter is one failure mode, and quietly catching it and using the
+    original *unredacted* text would be a worse one: a redaction path must
+    fail closed, not open. None passes through unchanged, matching
+    `redact()`'s own contract for non-string input.
+    """
+    if text is None:
+        return None
+    try:
+        return redact(text, live_secrets=live_secrets)
+    except Exception:
+        return _REDACTION_FAILED_PLACEHOLDER
+
+
+def _safe_str_and_redact(value, live_secrets: Iterable[Optional[str]]) -> Optional[str]:
+    """Like `_safe_redact()`, but also accepts a non-string `value` and
+    converts it first — itself guarded, since a pathological `__str__`
+    (or `__repr__`, which `str()` falls back to) can raise. Used for a log
+    record's non-string args, which only ever become text once %-formatted
+    or explicitly converted, so converting them is unavoidable — but that
+    conversion must not be allowed to raise unguarded any more than
+    `redact()` itself is."""
+    if isinstance(value, str):
+        return _safe_redact(value, live_secrets)
+    try:
+        text = str(value)
+    except Exception:
+        return _REDACTION_FAILED_PLACEHOLDER
+    return _safe_redact(text, live_secrets)
 
 
 class RedactingFilter(logging.Filter):
@@ -79,20 +138,76 @@ class RedactingFilter(logging.Filter):
             # the app — fall back to pattern-only redaction.
             live_secrets = []
 
-        if isinstance(record.msg, str):
-            record.msg = redact(record.msg, live_secrets=live_secrets)
-        # Args are formatted into msg by the logging module using %-style
-        # substitution; redact each arg too in case one carries a secret
-        # value on its own (e.g. logger.warning("token: %s", did)).
-        if record.args:
-            if isinstance(record.args, dict):
-                record.args = {
-                    k: redact(v, live_secrets=live_secrets) if isinstance(v, str) else v
-                    for k, v in record.args.items()
-                }
+        # Render the message fully (this is what getMessage() does: str(msg)
+        # % args) and redact the result, rather than redacting record.msg and
+        # each arg separately. A non-string arg — including an exception
+        # object passed as `logger.warning("token: %s", did)` — only ever
+        # becomes text at this %-substitution step, so redacting the pieces
+        # beforehand can't catch a secret that only appears once they're
+        # combined. Clearing record.args afterward stops the logging
+        # module's own formatter from re-applying % substitution to a
+        # message that's already fully rendered.
+        try:
+            formatted = record.getMessage()
+        except Exception:
+            # getMessage() can raise on a malformed format string (e.g. a
+            # %s with no matching arg). Fall back to redacting msg/args
+            # independently rather than losing the record's redaction —
+            # _safe_redact() never lets unredacted text through even if
+            # this fallback hits its own edge case.
+            if isinstance(record.msg, str):
+                record.msg = _safe_redact(record.msg, live_secrets)
+            # Redact every arg regardless of type, not just string ones — a
+            # non-string arg (e.g. an exception object) only ever becomes
+            # text once %-substituted, which is exactly the operation that
+            # just failed; skipping it here (the previous behavior) left it
+            # unredacted, and it can still be a live secret-bearing value
+            # even though getMessage() couldn't render it into the message.
+            if record.args:
+                if isinstance(record.args, dict):
+                    record.args = {
+                        k: _safe_str_and_redact(v, live_secrets) for k, v in record.args.items()
+                    }
+                else:
+                    record.args = tuple(_safe_str_and_redact(a, live_secrets) for a in record.args)
+        else:
+            record.msg = _safe_redact(formatted, live_secrets)
+            record.args = None
+
+        # A traceback (exc_info=True) or an explicit stack trace
+        # (stack_info=True) is appended by Formatter.format() separately
+        # from the message above, and can itself carry a secret — most
+        # commonly a `requests` exception's str(), which often embeds the
+        # full request URL including `_sid=`. Pre-render and redact it here
+        # into record.exc_text; the stdlib formatter uses that pre-filled
+        # value instead of re-rendering the raw (unredacted) traceback. If
+        # rendering the traceback itself fails, exc_info is cleared rather
+        # than left set with exc_text empty: Formatter.format() only calls
+        # formatException() itself when exc_text is still falsy at format
+        # time, which would render the raw, unredacted traceback — leaving
+        # this failure silent would fail open into exactly the leak this
+        # exists to prevent.
+        if record.exc_info and not record.exc_text:
+            try:
+                traceback_text = _TRACEBACK_FORMATTER.formatException(record.exc_info)
+            except Exception:
+                record.exc_text = _REDACTION_FAILED_PLACEHOLDER
+                record.exc_info = None
             else:
-                record.args = tuple(
-                    redact(a, live_secrets=live_secrets) if isinstance(a, str) else a
-                    for a in record.args
-                )
+                record.exc_text = _safe_redact(traceback_text, live_secrets)
+        elif record.exc_text:
+            # exc_text can already be populated before this filter ever
+            # runs: Formatter.format() caches it on the record the first
+            # time ANY handler formats it, so if a different handler
+            # (without this filter attached) formatted the record first —
+            # e.g. a second handler added later without remembering to
+            # attach the filter, though today main.py's setup_logging()
+            # attaches it to every handler on the root logger — the cached
+            # value would be the raw, unredacted traceback. Redacting it
+            # here too closes that gap; redacting already-redacted text is
+            # a safe no-op.
+            record.exc_text = _safe_redact(record.exc_text, live_secrets)
+        if record.stack_info:
+            record.stack_info = _safe_redact(record.stack_info, live_secrets)
+
         return True

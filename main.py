@@ -47,10 +47,10 @@ def setup_logging(level: str = "INFO"):
         datefmt="%Y-%m-%d %H:%M:%S",
     )
 
-    from auth.synology_auth import iter_live_secrets
+    from auth import iter_all_secrets
     from utils.redact import RedactingFilter
 
-    redacting_filter = RedactingFilter(iter_live_secrets)
+    redacting_filter = RedactingFilter(iter_all_secrets)
     for handler in logging.getLogger().handlers:
         handler.addFilter(redacting_filter)
 

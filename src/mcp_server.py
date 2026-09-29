@@ -15,7 +15,7 @@ from mcp.server import Server
 from mcp.server.lowlevel import NotificationOptions
 from mcp.server.models import InitializationOptions
 
-from auth import SynologyAuth, iter_live_secrets
+from auth import SynologyAuth, iter_all_secrets
 from config import config
 from container import SynologyContainer
 from downloadstation import SynologyDownloadStation
@@ -619,7 +619,7 @@ class SynologyMCPServer:
             return self._redact_tool_result(result)
         except Exception as e:
             error_text = redact(
-                f"Error executing {name}: {str(e)}", live_secrets=list(iter_live_secrets())
+                f"Error executing {name}: {str(e)}", live_secrets=list(iter_all_secrets())
             )
             return [types.TextContent(type="text", text=error_text)]
 
@@ -632,7 +632,7 @@ class SynologyMCPServer:
         that embedded a `_sid=`-bearing URL, ...) is caught here rather than
         needing a fix at every individual call site.
         """
-        live_secrets = list(iter_live_secrets())
+        live_secrets = list(iter_all_secrets())
         return [
             (
                 types.TextContent(type="text", text=redact(item.text, live_secrets=live_secrets))

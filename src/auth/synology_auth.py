@@ -6,6 +6,7 @@ from typing import Any, Callable, Dict, Optional, Tuple
 
 import requests
 
+from config import config
 from utils.redact import redact
 
 logger = logging.getLogger(__name__)
@@ -66,6 +67,23 @@ def iter_live_secrets():
             _, password = auth._credentials
             if password:
                 yield password
+
+
+def iter_all_secrets():
+    """Every secret this server currently knows about, live or merely
+    configured.
+
+    Chains `iter_live_secrets()` (session IDs, SynoTokens, device IDs —
+    only exist post-login) with `config.iter_configured_secrets()`
+    (passwords and trusted-device tokens from settings.json/.env — see
+    that method's docstring for why OTP codes are deliberately excluded),
+    so a configured secret is redacted from logs and tool output even
+    before any login using it has happened. The single place both
+    `main.py`'s log filter and `mcp_server.py`'s tool-response redaction
+    pull their secret list from, so the two can't drift apart.
+    """
+    yield from iter_live_secrets()
+    yield from config.iter_configured_secrets()
 
 
 class SynologyAuth:

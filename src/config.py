@@ -8,6 +8,7 @@ import os
 import stat
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -44,6 +45,32 @@ def _parse_verify_ssl(value: str) -> Any:
     if lowered in _VERIFY_SSL_FALSY:
         return False
     return value.strip()
+
+
+def _parse_restricted_mode(value: Any) -> bool:
+    """Parse RESTRICTED_MODE's env-var or settings.json string form.
+
+    Unlike VERIFY_SSL, there's no non-boolean meaning to fall back to here,
+    so this fails closed rather than open: restricted mode is the only
+    barrier against write actions from the (necessarily administrator)
+    account this server runs as, so a value we don't recognize must never
+    silently disable it the way a plain `.lower() == "true"` comparison
+    would (e.g. `RESTRICTED_MODE=1` previously left restricted mode off).
+    Only an explicit falsy value turns it off; everything else — including
+    an unrecognized string — leaves it on and logs a warning.
+    """
+    if isinstance(value, bool):
+        return value
+    lowered = str(value).strip().lower()
+    if lowered in _VERIFY_SSL_FALSY:
+        return False
+    if lowered not in _VERIFY_SSL_TRUTHY:
+        logger.warning(
+            f"RESTRICTED_MODE value {value!r} is not a recognized true/false value "
+            "— leaving restricted mode ON. Use one of "
+            f"{sorted(_VERIFY_SSL_TRUTHY | _VERIFY_SSL_FALSY)} to be explicit."
+        )
+    return True
 
 
 # XDG Base Directory Specification: ~/.config/synology-mcp/
@@ -111,7 +138,7 @@ class SynologyConfig:
         # and container management, ...) are hidden from discovery and
         # rejected before any NAS request is made. Set to false deliberately
         # to enable the full tool set.
-        self.restricted_mode = os.getenv("RESTRICTED_MODE", "true").lower() == "true"
+        self.restricted_mode = _parse_restricted_mode(os.getenv("RESTRICTED_MODE", "true"))
         self.debug = os.getenv("DEBUG", "false").lower() == "true"
         self.log_level = os.getenv("LOG_LEVEL", "INFO").upper()
         # get_file_content refuses to download a file larger than this (checked
@@ -175,15 +202,25 @@ class SynologyConfig:
             logger.warning(f"Could not check permissions for {path}: {e}")
             return False
 
-    def _restrict_file_permissions(self, path: Path) -> None:
-        """Best-effort: restrict `path` to the current user only.
+    def _restrict_file_permissions(self, path: Path) -> bool:
+        """Attempt to restrict `path` to the current user only, and report
+        whether that attempt is known to have succeeded.
 
         POSIX: chmod 0600. Windows: shell out to `icacls` to strip
         inherited permissions and grant the current user Full Control,
         since Windows has no POSIX mode bits (NTFS uses ACLs) and Python's
-        standard library has no built-in ACL API. Failures are logged and
-        swallowed — this is a hardening step, not a correctness requirement,
-        and must never block writing the file itself.
+        standard library has no built-in ACL API.
+
+        Returns True if the restriction is known to have succeeded (or
+        wasn't attempted because this platform is neither of the two
+        handled above — matches this method's original silent-success
+        behavior there), False if it's known to have failed. A caller about
+        to write secret-bearing content to `path` should treat False as a
+        reason not to write yet: reporting success regardless (the previous
+        behavior here) can leave secrets sitting in a file other local
+        users can read, especially on Windows, where a freshly-created file
+        otherwise inherits its containing directory's ACLs rather than
+        being unreadable-by-default the way a POSIX 0600 file is.
         """
         try:
             if hasattr(os, "getuid"):
@@ -202,41 +239,72 @@ class SynologyConfig:
                     check=True,
                     timeout=10,
                 )
+            return True
         except Exception as e:
             logger.warning(
                 f"Could not restrict permissions on {path}: {e}. "
                 "It contains NAS credentials — restrict access to it yourself."
             )
+            return False
 
     def _atomic_write_settings(self, data: Dict[str, Any]) -> bool:
         """Atomically overwrite SETTINGS_FILE with `data`.
 
-        Writes to a temp file in the same directory (so the final
-        `os.replace` is on the same filesystem and therefore atomic),
-        created already restricted to the owner (POSIX 0600) rather than
-        written with default-umask permissions and chmod'd afterward — the
-        latter leaves a window where the temp file (which holds every
-        configured NAS's password, not just the field being updated) is
-        readable at whatever the ambient umask allows. `_restrict_file_permissions`
-        is still called afterward: it's a no-op on POSIX (already 0600) but
-        is where the real restriction happens on Windows, whose `os.open`
-        mode argument doesn't set NTFS ACLs. Returns True on success, False
-        on any failure (logged, never raised — a failed settings write must
-        never crash the server or fall back to printing what it was trying
-        to save).
+        Writes to a uniquely-named temp file in the same directory (so the
+        final `os.replace` is on the same filesystem and therefore atomic;
+        a unique name — rather than the previous fixed `settings.json.tmp`
+        — avoids two concurrent writers colliding on the same temp file).
+
+        Permissions are restricted on the temp file *before* any
+        secret-bearing content is written to it, and writing only proceeds
+        if that restriction is confirmed to have succeeded. On POSIX this
+        makes no practical difference (`tempfile.mkstemp` already creates
+        the file at mode 0600, ignoring umask, so `_restrict_file_permissions`
+        just reconfirms it), but on Windows — where restriction means
+        shelling out to `icacls`, and a freshly-created file otherwise
+        inherits the containing directory's ACLs — restricting only after
+        writing left every configured NAS's password briefly world/group
+        readable, and left it that way indefinitely whenever the `icacls`
+        call itself failed, since this method previously reported success
+        regardless of that failure.
+
+        Returns True on success, False on any failure (logged, and the temp
+        file is always cleaned up on any exit path — never raised, since a
+        failed settings write must never crash the server or fall back to
+        printing what it was trying to save, and must never leave a
+        half-written or insecurely-permissioned temp file behind).
         """
+        tmp_path: Optional[Path] = None
         try:
-            CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-            tmp_path = SETTINGS_FILE.with_suffix(".json.tmp")
-            fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-            with os.fdopen(fd, "w") as f:
-                f.write(json.dumps(data, indent=2))
-            self._restrict_file_permissions(tmp_path)
+            settings_dir = SETTINGS_FILE.parent
+            settings_dir.mkdir(parents=True, exist_ok=True)
+            fd, tmp_name = tempfile.mkstemp(
+                dir=settings_dir, prefix="settings.", suffix=".json.tmp"
+            )
+            tmp_path = Path(tmp_name)
+            os.close(fd)
+
+            if not self._restrict_file_permissions(tmp_path):
+                logger.warning(
+                    f"Refusing to write {SETTINGS_FILE}: could not restrict "
+                    f"permissions on the temp file at {tmp_path}. The "
+                    "existing settings file, if any, was left unchanged."
+                )
+                return False
+
+            tmp_path.write_text(json.dumps(data, indent=2))
             os.replace(tmp_path, SETTINGS_FILE)
+            tmp_path = None  # moved into place — nothing left to clean up
             return True
         except Exception as e:
             logger.warning(f"Failed to save {SETTINGS_FILE}: {e}")
             return False
+        finally:
+            if tmp_path is not None:
+                try:
+                    tmp_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
 
     def save_device_id(self, nas_name: str, device_id: str) -> bool:
         """Persist a freshly-issued DSM trusted-device token for `nas_name`.
@@ -371,7 +439,9 @@ class SynologyConfig:
                     if "log_level" in server_section:
                         self.log_level = server_section["log_level"].upper()
                     if "restricted_mode" in server_section:
-                        self.restricted_mode = server_section["restricted_mode"]
+                        self.restricted_mode = _parse_restricted_mode(
+                            server_section["restricted_mode"]
+                        )
                     if "max_file_content_size" in server_section:
                         self.max_file_content_size = int(server_section["max_file_content_size"])
 
@@ -406,6 +476,44 @@ class SynologyConfig:
         return bool(self.nas_configs) or bool(
             self.synology_url and self.synology_username and self.synology_password
         )
+
+    def iter_configured_secrets(self):
+        """Yield every configured (not necessarily yet-live) secret value
+        that's safe to blanket-mask as a verbatim substring wherever it
+        appears in logs or tool output.
+
+        Covers passwords and trusted-device tokens from settings.json's
+        per-NAS entries, plus the legacy `.env` single-NAS password —
+        across both, whether or not a session has ever been established.
+        Used to redact these even before login makes them "live" (see
+        `auth.iter_live_secrets`, which covers session IDs/SynoTokens/
+        device IDs that only exist post-login).
+
+        Deliberately excludes `otp_code`: DSM's 2FA code is always exactly
+        6 digits, and blanket-masking a short, purely-numeric value as a
+        substring risks corrupting unrelated legitimate output that
+        happens to contain the same digits (a file size, a port number, a
+        timestamp fragment, ...) rather than protecting anything — it's
+        one-shot and typically stale by the time anything would need
+        redacting, and its actual leak vector (a login request's URL/body)
+        is already covered unconditionally by redact()'s own `otp_code=`
+        key=value pattern, independent of this list.
+
+        Always yields `str`: settings.json is user-edited JSON, and nothing
+        stops `password`/`device_id` from being written as a bare JSON
+        number rather than a quoted string — valid JSON, but redact()'s
+        `str.replace()` would raise on a non-string value, which would
+        surface as an unhandled exception from inside an error handler
+        wherever this feeds `redact()` (see `_dispatch_tool_call`'s except
+        clause).
+        """
+        for nas_cfg in self.nas_configs.values():
+            for key in ("password", "device_id"):
+                value = nas_cfg.get(key)
+                if value:
+                    yield str(value)
+        if self.synology_password:
+            yield self.synology_password
 
     def get_synology_config(self, nas_name: Optional[str] = None) -> Dict[str, Any]:
         """Get connection config for a specific NAS (or the first/legacy one).
