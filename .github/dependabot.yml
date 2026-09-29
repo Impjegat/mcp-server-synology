@@ -8,6 +8,14 @@ updates:
     labels:
       - "dependencies"
       - "python"
+    # A major mcp release broke this server once (see requirements.txt and
+    # https://github.com/Impjegat/mcp-server-synology/issues/12), so moving to
+    # the next one is a deliberate migration, not an automatic bump. Minor and
+    # patch releases still come through, and CI (including the stdio
+    # end-to-end test) checks them.
+    ignore:
+      - dependency-name: "mcp"
+        update-types: ["version-update:semver-major"]
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
