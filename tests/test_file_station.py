@@ -865,6 +865,94 @@ def test_a_request_that_never_answers_is_abandoned_at_the_deadline(monkeypatch, 
     assert elapsed < 2.0
 
 
+@pytest.mark.parametrize(
+    "method_name,args,limit_name,expected",
+    [
+        (
+            "delete",
+            ("/share/a.txt",),
+            "_DELETE_LIMIT",
+            "while starting the delete. The NAS may have started it anyway .* /share/a.txt",
+        ),
+        (
+            "move_file",
+            ("/share/a.txt", "/share/dest"),
+            "_MOVE_LIMIT",
+            "while starting the move. The NAS may have started it anyway .* /share/dest",
+        ),
+    ],
+)
+def test_a_start_request_abandoned_at_the_deadline_says_the_outcome_is_unknown(
+    monkeypatch, method_name, args, limit_name, expected
+):
+    """The request that starts a delete or move is not a read: if it is given
+    up on, DSM may have acted on it and we never learn the task id. The error
+    must not read as "nothing happened"."""
+    import threading
+    import time as real_time
+
+    from filestation.synology_filestation import SynologyFileStation
+
+    monkeypatch.setattr(f"filestation.synology_filestation.{limit_name}", 0.3)
+    fs = SynologyFileStation("https://nas.example.test:5001", "sid")
+    release = threading.Event()
+    sent = []
+
+    def fake_get(url, params=None, timeout=None, **kwargs):
+        sent.append(params["method"])
+        if params["method"] == "start":
+            release.wait(5)  # the start request never answers in time
+        return _dsm_reply({"files": [{"name": "a.txt", "path": "/share/a.txt"}]})
+
+    monkeypatch.setattr("filestation.synology_filestation.requests.get", fake_get)
+
+    began = real_time.monotonic()
+    try:
+        with pytest.raises(Exception, match=expected) as excinfo:
+            getattr(fs, method_name)(*args)
+        elapsed = real_time.monotonic() - began
+    finally:
+        release.set()
+
+    assert "timed out after 0.3 seconds" in str(excinfo.value)
+    assert elapsed < 2.0
+    assert "stop" not in sent  # there is no task id to stop
+
+
+def test_delete_looks_the_path_up_for_no_longer_than_an_ordinary_request(monkeypatch):
+    """A lookup that hangs must not use up the budget the start request needs:
+    it is abandoned after a normal request's time, long before the limit, and
+    nothing has been deleted."""
+    import threading
+    import time as real_time
+
+    from filestation.synology_filestation import SynologyFileStation
+
+    monkeypatch.setattr("filestation.synology_filestation._REQUEST_TIMEOUT", 0.3)
+    monkeypatch.setattr("filestation.synology_filestation._DELETE_LIMIT", 100)
+    fs = SynologyFileStation("https://nas.example.test:5001", "sid")
+    release = threading.Event()
+    sent = []
+
+    def fake_get(url, params=None, timeout=None, **kwargs):
+        sent.append(params["method"])
+        release.wait(5)  # the lookup never answers
+        return _dsm_reply({})
+
+    monkeypatch.setattr("filestation.synology_filestation.requests.get", fake_get)
+
+    began = real_time.monotonic()
+    try:
+        with pytest.raises(Exception, match="timed out while looking up the path; nothing was"):
+            fs.delete("/share/a.txt")
+        elapsed = real_time.monotonic() - began
+    finally:
+        release.set()
+
+    assert elapsed < 2.0  # not the 100 s limit
+    assert sent == ["getinfo"]  # nothing was started
+
+
 def test_the_results_of_a_search_get_their_own_allowance(monkeypatch):
     """A search that finishes just inside its limit must not be thrown away
     because almost no time is left to read the results."""
@@ -932,7 +1020,7 @@ def test_delete_that_runs_out_of_time_looking_the_path_up_starts_nothing(monkeyp
 
     monkeypatch.setattr(fs, "_make_request", fake_make_request)
 
-    with pytest.raises(Exception, match="Delete operation timed out after 120 seconds"):
+    with pytest.raises(Exception, match="timed out while looking up the path; nothing was deleted"):
         fs.delete("/share/a.txt")
 
     assert sent == ["getinfo"]  # no "start" — and so no task to stop

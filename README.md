@@ -236,7 +236,7 @@ If you prefer not to use Docker:
 | `delete` | 120 s (includes the initial lookup of the path) | up to 5 s to stop the task after a failure | 125 s |
 | `move_file` | 60 s | up to 5 s to stop the task after a failure | 65 s |
 
-A timed-out call does not prove the operation did not happen: DSM may still finish a `delete` or `move_file` whose status request ran out of time. Check the NAS before retrying.
+A timed-out call does not prove the operation did not happen: DSM may still finish a `delete` or `move_file` whose status request ran out of time. If the request that *starts* a delete or move is itself given up on, the error says so ("The NAS may have started it anyway — check … before retrying"), because no task id ever came back to stop. `delete` looks the path up for at most 15 s, so that lookup can never use up the time the start request needs. Check the NAS before retrying.
 
 ### 📥 Download Station Management
 - **`ds_get_info`** - Get Download Station information

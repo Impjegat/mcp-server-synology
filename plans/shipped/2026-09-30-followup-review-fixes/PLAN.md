@@ -42,6 +42,7 @@ The tool description and README tell the assistant that a partial result is not 
 - One `_wait_for_task` replaces the three copies of the poll loop; it checks the deadline again after each response. One `_stop_task` replaces the three cleanup blocks and bounds them.
 - The limit now covers the request that starts the task (and, for `delete`, the initial path lookup — if that runs out of time nothing is started). Fetching search results and stopping the task have their own allowances, so the longest a call can take is **140 s** (search: 120 + 15 + 5), **125 s** (delete: 120 + 5) and **65 s** (move: 60 + 5). Documented in the method docstrings, the README ("Time limits") and the CHANGELOG.
 - Design note: a response that has already arrived is not discarded for being a few milliseconds late — the hard stop at the deadline is what makes the bound strict, and discarding a finished `delete` would report a timeout for an operation that succeeded. A request that was abandoned at the deadline may still complete on the NAS; the README says so.
+- The request that *starts* a delete or move is not a read: if it is abandoned, DSM may have acted on it and no task id comes back. The error then says so ("may have started it anyway — check … before retrying"), and `delete`'s path lookup is capped at `_REQUEST_TIMEOUT` so it cannot use up the budget and leave that request truncated. (Added after the automated review raised it; the `_run_within` docstring originally claimed abandoned calls were only ever reads.)
 
 ## Tests
 

@@ -240,11 +240,15 @@ class SynologyFileStation:
         it has not finished within `seconds`.
 
         `func` runs in a daemon thread, so giving up on it cannot hold up the
-        caller or the process's exit. An abandoned call is only ever a read —
-        a task's status, a listing, a stop — and its result is discarded; the
-        `requests` timeout inside it still ends it in the background. The
-        caller's context (which carries the secrets being redacted from log
-        output) is copied into the thread.
+        caller or the process's exit. The abandoned request's result is
+        discarded, and the `requests` timeout inside it still ends it in the
+        background. Most such requests are reads (a task's status, a listing,
+        a stop), but the request that *starts* a search, delete or move is
+        not: the NAS may act on it even though no answer — and so no task id —
+        ever reaches us. Callers that start something destructive therefore
+        say so when that request is abandoned (see `delete` and `move_file`).
+        The caller's context (which carries the secrets being redacted from
+        log output) is copied into the thread.
         """
         outcome: Dict[str, Any] = {}
 
@@ -808,14 +812,21 @@ class SynologyFileStation:
         deadline = time.monotonic() + _DELETE_LIMIT  # wall-clock, as in search_files
         timed_out = f"Delete operation timed out after {_DELETE_LIMIT} seconds"
 
-        # Auto-detect if this is a file or directory
+        # Auto-detect if this is a file or directory. The lookup gets no more
+        # than an ordinary request's time, so it can never use up the budget
+        # that the request starting the delete needs: that request is the one
+        # that must not be cut short (see _run_within).
         try:
-            file_info = self.get_file_info(formatted_path, deadline=deadline)
+            file_info = self.get_file_info(
+                formatted_path, deadline=min(deadline, time.monotonic() + _REQUEST_TIMEOUT)
+            )
             recursive = file_info.get("type") == "directory"
         except _DeadlineError:
             # Out of time before anything was started: don't fall through to
             # deleting it as a file on a guess.
-            raise Exception(timed_out) from None
+            raise Exception(
+                "Delete operation timed out while looking up the path; nothing was deleted."
+            ) from None
         except Exception:
             recursive = False  # Default to file behavior if can't determine
 
@@ -837,7 +848,12 @@ class SynologyFileStation:
                 recursive=str(recursive).lower(),
             )
         except _DeadlineError:
-            raise Exception(timed_out) from None
+            # The request was abandoned without an answer, so whether DSM acted
+            # on it is unknown — and there is no task id to stop.
+            raise Exception(
+                f"{timed_out} while starting the delete. The NAS may have started it anyway "
+                f"— check {formatted_path} before retrying."
+            ) from None
 
         task_id = start_data.get("taskid")
         if not task_id:
@@ -1027,7 +1043,12 @@ class SynologyFileStation:
                 remove_src=True,  # This makes it a move operation instead of copy
             )
         except _DeadlineError:
-            raise Exception(timed_out) from None
+            # Abandoned without an answer: DSM may have acted on it, and there
+            # is no task id to stop.
+            raise Exception(
+                f"{timed_out} while starting the move. The NAS may have started it anyway "
+                f"— check {formatted_source} and {formatted_dest} before retrying."
+            ) from None
 
         task_id = start_data.get("taskid")
         if not task_id:
