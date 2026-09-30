@@ -188,9 +188,10 @@ _CREDENTIAL_ARGUMENTS = frozenset({"password", "device_id"})
 # A value shorter than this is not registered. Masking is by substring, so a
 # one- or two-character "password" would blank out those characters wherever
 # they appear in the call's output and logs — the same corruption that keeps
-# `otp_code` out — while protecting nothing: there is no realistic secrecy in a
-# value that short, and no echo of it is left to catch anyway, because a
-# validation message never quotes one.
+# `otp_code` out. The trade-off is accepted: there is little secrecy in a value
+# that short, and a validation message never quotes a value whatever its
+# length — but other text (a NAS's own error message, say) could still quote a
+# short credential, and nothing will mask it.
 _MIN_CREDENTIAL_LENGTH = 4
 
 
@@ -242,10 +243,10 @@ def _describe_validation_error(error: ValidationError) -> str:
             position += 1
         else:
             position += 1
-    subject = field or "arguments"
-    constraint = error.validator_value
     if error.validator == "required":
         return f"{field}: {error.message}" if field else error.message
+    subject = field or "arguments"
+    constraint = error.validator_value
     if error.validator == "type":
         types_ = constraint if isinstance(constraint, list) else [constraint]
         return f"{subject} must be of type {' or '.join(repr(t) for t in types_)}"
