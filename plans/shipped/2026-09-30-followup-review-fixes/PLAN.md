@@ -1,6 +1,6 @@
 # PR: Follow-up review fixes (validation echo, health summary, polling budgets)
 
-Status: In review
+Status: Shipped — pushed to `claude/vibrant-mccarthy-mpyaus` (no pull request opened yet)
 Initiated: 2026-09-30
 Implements: the three open findings in `REVIEW_FOLLOWUP_2026-09-29.md` (a follow-up review of `main` at `587dcfc`; the document lives outside this repository)
 
