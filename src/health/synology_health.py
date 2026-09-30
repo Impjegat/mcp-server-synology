@@ -150,16 +150,23 @@ class SynologyHealth:
     # Combined summary
     # ------------------------------------------------------------------
 
-    # (key in the summary, SynologyHealth method that produces it)
+    # (key in the summary, SynologyHealth method that produces it, optional).
+    # An optional check covers something a NAS may simply not have — a UPS —
+    # so DSM saying the API isn't available is not a gap in the summary.
     _SUMMARY_CHECKS = (
-        ("system", "system_info"),
-        ("utilization", "utilization"),
-        ("disks", "disk_list"),
-        ("volumes", "volume_list"),
-        ("storage_pools", "storage_pool_list"),
-        ("network", "network_info"),
-        ("ups", "ups_info"),
+        ("system", "system_info", False),
+        ("utilization", "utilization", False),
+        ("disks", "disk_list", False),
+        ("volumes", "volume_list", False),
+        ("storage_pools", "storage_pool_list", False),
+        ("network", "network_info", False),
+        ("ups", "ups_info", True),
     )
+
+    # DSM's documented "this NAS doesn't offer that" codes: the API (102), the
+    # method (103) or the requested version (104) doesn't exist. Compared as
+    # strings because the error code may arrive as an int or a string.
+    _API_UNAVAILABLE_CODES = frozenset({"102", "103", "104"})
 
     def health_summary(self) -> Dict[str, Any]:
         """Aggregate system info, utilization, disk health, volume status,
@@ -174,16 +181,30 @@ class SynologyHealth:
           `data` that was gathered;
         - all failed: `success: False` with the same `failed_checks` in the
           error, which is what an unreachable NAS looks like.
+
+        An optional check (the UPS) that DSM reports as not available on this
+        NAS is neither a success nor a failure: it is listed under
+        `unavailable_checks` and does not make the summary partial, so a NAS
+        without that feature can still be `complete`. Any other error from it
+        — a network failure, a permission error — is a failed check like any
+        other.
         """
         summary: Dict[str, Any] = {}
         failed_checks: List[Dict[str, Any]] = []
+        unavailable_checks: List[Dict[str, Any]] = []
 
-        for key, method_name in self._SUMMARY_CHECKS:
+        for key, method_name, optional in self._SUMMARY_CHECKS:
             result = getattr(self, method_name)()
             if result.get("success"):
                 summary[key] = result.get("data", {})
+                continue
+            error = result.get("error", {})
+            entry = {"check": key, "error": error}
+            code = error.get("code") if isinstance(error, dict) else None
+            if optional and str(code) in self._API_UNAVAILABLE_CODES:
+                unavailable_checks.append(entry)
             else:
-                failed_checks.append({"check": key, "error": result.get("error", {})})
+                failed_checks.append(entry)
 
         if not summary:
             return {
@@ -194,12 +215,14 @@ class SynologyHealth:
                     "failed_checks": failed_checks,
                 },
             }
+        outcome: Dict[str, Any] = {"success": True}
         if failed_checks:
-            return {
-                "success": True,
-                "status": "partial",
-                "message": "Some health checks could not be completed.",
-                "failed_checks": failed_checks,
-                "data": summary,
-            }
-        return {"success": True, "status": "complete", "data": summary}
+            outcome["status"] = "partial"
+            outcome["message"] = "Some health checks could not be completed."
+            outcome["failed_checks"] = failed_checks
+        else:
+            outcome["status"] = "complete"
+        if unavailable_checks:
+            outcome["unavailable_checks"] = unavailable_checks
+        outcome["data"] = summary
+        return outcome

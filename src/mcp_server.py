@@ -185,17 +185,26 @@ if not config.verify_ssl:
 # quotes a submitted value (`_describe_validation_error`).
 _CREDENTIAL_ARGUMENTS = frozenset({"password", "device_id"})
 
+# A value shorter than this is not registered. Masking is by substring, so a
+# one- or two-character "password" would blank out those characters wherever
+# they appear in the call's output and logs — the same corruption that keeps
+# `otp_code` out — while protecting nothing: there is no realistic secrecy in a
+# value that short, and no echo of it is left to catch anyway, because a
+# validation message never quotes one.
+_MIN_CREDENTIAL_LENGTH = 4
+
 
 def _credential_strings(value: Any, *, under_credential_key: bool = False) -> list[str]:
-    """Every string supplied under a `_CREDENTIAL_ARGUMENTS` key, however
-    deeply nested (a malformed call may put a list or object there).
+    """Every string of at least `_MIN_CREDENTIAL_LENGTH` characters supplied
+    under a `_CREDENTIAL_ARGUMENTS` key, however deeply nested (a malformed
+    call may put a list or object there).
 
     Collected *before* the arguments are validated, because a wrong-typed
     credential is exactly what fails validation, and its value must already
     be known to the redactor by then.
     """
     if isinstance(value, str):
-        return [value] if under_credential_key and value else []
+        return [value] if under_credential_key and len(value) >= _MIN_CREDENTIAL_LENGTH else []
     found: list[str] = []
     if isinstance(value, dict):
         for key, item in value.items():
@@ -768,7 +777,7 @@ class SynologyMCPServer:
         direct call by exact name is covered the same way as discovery
         (`_list_tools`), since both consult `_is_tool_allowed` against the
         same classification. Every message that leaves here is redacted —
-        including any credential (`password`, `otp_code`, `device_id`)
+        including any `password` or `device_id`
         submitted in this very call, which is registered with the redactor
         before anything else runs, and the validation messages themselves
         never quote a submitted value (see `_describe_validation_error`).
@@ -2646,8 +2655,10 @@ class SynologyMCPServer:
                     "`partial` means some checks could not be completed (listed in "
                     "`failed_checks`) and `data` holds only the rest — a partial result is "
                     "NOT confirmation that the NAS is healthy, so report the failed checks "
-                    "rather than treating the missing sections as fine. If every check "
-                    "fails the tool returns an error."
+                    "rather than treating the missing sections as fine. A check the NAS "
+                    "does not offer at all (a UPS that is not attached) is listed in "
+                    "`unavailable_checks` and does not make the result partial. If every "
+                    "check fails the tool returns an error."
                 ),
                 inputSchema={
                     "type": "object",

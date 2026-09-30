@@ -287,14 +287,18 @@ class TestHealthSummaryAggregation:
         return SynologyHealth("http://nas:5000", "fake-sid", verify_ssl=False)
 
     @staticmethod
-    def _dsm(failing_apis):
-        """A fake DSM: every API answers with data, except `failing_apis`."""
+    def _dsm(failing_apis, codes=None):
+        """A fake DSM: every API answers with data, except `failing_apis`.
+        `codes` maps an API to the error code it fails with (default: a
+        network error)."""
         calls = []
+        codes = codes or {}
 
         def get(api, method, version=1, extra_params=None):
             calls.append(api)
             if api in failing_apis or failing_apis == "all":
-                return {"success": False, "error": {"code": "network_error", "message": "down"}}
+                code = codes.get(api, "network_error")
+                return {"success": False, "error": {"code": code, "message": "down"}}
             return {"success": True, "data": {"from": api}}
 
         get.calls = calls
@@ -353,3 +357,71 @@ class TestHealthSummaryAggregation:
             result = health.health_summary()
 
         assert result["failed_checks"] == [{"check": "ups", "error": {}}]
+
+    @pytest.mark.parametrize("code", [102, 103, 104, "102"])
+    def test_a_ups_the_nas_does_not_offer_does_not_make_the_summary_partial(self, code):
+        """A NAS without a UPS can still be complete: DSM saying the API isn't
+        available is "not applicable", not a check that failed."""
+        health = self._make_health()
+        get = self._dsm({_UPS_API}, codes={_UPS_API: code})
+
+        with patch.object(health._api, "get", side_effect=get):
+            result = health.health_summary()
+
+        assert result["success"] is True
+        assert result["status"] == "complete"
+        assert "failed_checks" not in result and "message" not in result
+        assert result["unavailable_checks"] == [
+            {"check": "ups", "error": {"code": code, "message": "down"}}
+        ]
+        assert list(result["data"]) == [k for k in _SUMMARY_KEYS if k != "ups"]
+
+    @pytest.mark.parametrize("code", [105, 117, "network_error"])
+    def test_any_other_ups_error_is_still_a_failed_check(self, code):
+        """Only "the API isn't available" is excused. A permission error or a
+        network failure means the UPS may well exist and could not be read."""
+        health = self._make_health()
+        get = self._dsm({_UPS_API}, codes={_UPS_API: code})
+
+        with patch.object(health._api, "get", side_effect=get):
+            result = health.health_summary()
+
+        assert result["status"] == "partial"
+        assert [f["check"] for f in result["failed_checks"]] == ["ups"]
+        assert "unavailable_checks" not in result
+
+    def test_a_required_check_the_nas_does_not_offer_is_still_a_failed_check(self):
+        """The same code on a check that every NAS should answer is a gap."""
+        health = self._make_health()
+        api = "SYNO.Core.System.Utilization"
+        get = self._dsm({api}, codes={api: 102})
+
+        with patch.object(health._api, "get", side_effect=get):
+            result = health.health_summary()
+
+        assert result["status"] == "partial"
+        assert [f["check"] for f in result["failed_checks"]] == ["utilization"]
+        assert "unavailable_checks" not in result
+
+    def test_an_unavailable_ups_is_reported_alongside_a_real_failure(self):
+        health = self._make_health()
+        utilization = "SYNO.Core.System.Utilization"
+        get = self._dsm({_UPS_API, utilization}, codes={_UPS_API: 102})
+
+        with patch.object(health._api, "get", side_effect=get):
+            result = health.health_summary()
+
+        assert result["status"] == "partial"
+        assert [f["check"] for f in result["failed_checks"]] == ["utilization"]
+        assert [u["check"] for u in result["unavailable_checks"]] == ["ups"]
+
+    def test_when_nothing_else_succeeds_an_unavailable_ups_does_not_rescue_the_summary(self):
+        health = self._make_health()
+        get = self._dsm("all", codes={_UPS_API: 102})
+
+        with patch.object(health._api, "get", side_effect=get):
+            result = health.health_summary()
+
+        assert result["success"] is False
+        failed = [f["check"] for f in result["error"]["failed_checks"]]
+        assert failed == [k for k in _SUMMARY_KEYS if k != "ups"]

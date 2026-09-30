@@ -18,6 +18,7 @@ The follow-up review confirmed the migration, the Docker image and the missing-f
 
 - `_describe_validation_error` builds the message from the schema alone — field from the schema path, constraint from `validator_value` — and never reads the submitted value: `password must be of type 'string'`. A missing required property keeps jsonschema's wording (`'path' is a required property`), which names a property from the schema.
 - `request_secrets()` (a `ContextVar` context manager beside `iter_all_secrets`) registers values for the length of one call; `iter_all_secrets()` yields them, so the tool-response redaction and the process-wide log filter both pick them up with no other change. `_call_tool` registers every string under a `password` or `device_id` key, at any depth, before anything else runs — so even a well-typed password that a later failure quotes is masked before any login has taught the redactor about it.
+- Values shorter than 4 characters are not registered (`_MIN_CREDENTIAL_LENGTH`): masking is by substring, so a one-character password would blank that character out of everything the call prints — the corruption that keeps `otp_code` out — while protecting nothing, since validation messages no longer quote values. (Added after the automated review raised it.)
 - **`otp_code` is deliberately not registered.** `config.iter_configured_secrets` already documents why: masking a 6-digit code as a substring corrupts unrelated output, and it is one-shot. The OTP echo the review reproduced is closed at the source, by the message no longer quoting values. (This differs from the first draft of this plan, which registered it.)
 - Checked: the mcp 2.x SDK does not log raw `tools/call` parameters at DEBUG, so `_PARAM_PATTERN` needed no change.
 
@@ -30,6 +31,8 @@ The follow-up review confirmed the migration, the Docker image and the missing-f
 | all succeeded | `success: true`, `status: "complete"`, `data` |
 | some failed | `success: true`, `status: "partial"`, `message: "Some health checks could not be completed."`, `failed_checks`, `data` |
 | all failed | `success: false`, error `health_checks_failed` carrying `failed_checks` → `isError: true` via the existing `_dsm_result` |
+
+An optional check — only the UPS — that DSM reports as not available on this NAS (API errors 102 API / 103 method / 104 version, as DSM documents them) is neither a success nor a failure: it is listed under `unavailable_checks` and does not make the summary partial, so a NAS without that feature can still be `complete`. Any other UPS error (permission, network) and the same code on any other check still count as failed. (Added after the automated review pointed out that a NAS without a UPS would otherwise always report `partial`.)
 
 The tool description and README tell the assistant that a partial result is not confirmation that the NAS is healthy.
 

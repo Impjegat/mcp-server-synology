@@ -322,6 +322,25 @@ async def test_a_partial_health_summary_is_a_success_that_says_it_is_partial(unr
 
 
 @pytest.mark.asyncio
+async def test_a_nas_without_a_ups_still_gets_a_complete_health_summary(unrestricted):
+    def fake_get(url, params=None, **kwargs):
+        if params["api"] == "SYNO.Core.ExternalDevice.UPS":
+            return _dsm_response({"success": False, "error": {"code": 102}})
+        return _dsm_response({"success": True, "data": {"api": params["api"]}})
+
+    server = _server_with_session()
+
+    with patch("utils.synology_api.requests.get", side_effect=fake_get):
+        result = await server._call_tool("synology_health_summary", {"base_url": BASE_URL})
+
+    assert result.is_error is False
+    body = json.loads(_text(result))
+    assert body["status"] == "complete"
+    assert body["unavailable_checks"] == [{"check": "ups", "error": {"code": 102}}]
+    assert "failed_checks" not in body
+
+
+@pytest.mark.asyncio
 async def test_a_complete_health_summary_says_so(unrestricted):
     server = _server_with_session()
 
@@ -668,21 +687,58 @@ async def test_concurrent_calls_do_not_share_request_secrets(unrestricted):
     assert _text(second) == f"mine={_MASK} theirs=PASSWORD-A"
 
 
+def test_a_very_short_credential_is_not_registered():
+    """Substring-masking a one- or two-character value would blank those
+    characters out of everything the call prints."""
+    from mcp_server import _MIN_CREDENTIAL_LENGTH, _credential_strings
+
+    assert _credential_strings({"password": "p", "device_id": "ab"}) == []
+    assert _credential_strings({"password": "x" * (_MIN_CREDENTIAL_LENGTH - 1)}) == []
+    assert _credential_strings({"password": "x" * _MIN_CREDENTIAL_LENGTH}) == [
+        "x" * _MIN_CREDENTIAL_LENGTH
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_short_password_does_not_corrupt_the_output_of_the_call(restricted):
+    """The restricted-login refusal quotes the URL; a one-character password
+    must not turn every "p" in it into a mask."""
+    restricted.nas_configs = {"nas1": {"base_url": "https://configured.example:5001"}}
+    restricted.synology_url = None
+    server = _server()
+
+    with patch("mcp_server.SynologyAuth"):
+        result = await server._call_tool(
+            "synology_login",
+            {"base_url": "https://attacker.example:5001", "username": "u", "password": "p"},
+        )
+
+    assert result.is_error is True
+    assert "https://attacker.example:5001" in _text(result)
+
+
 def test_credential_strings_are_found_at_any_depth():
     from mcp_server import _credential_strings
 
     found = _credential_strings(
         {
-            "password": ["a", ["b"], {"x": "c"}],
-            "device_id": "d",
+            "password": ["pw-aaaa", ["pw-bbbb"], {"x": "pw-cccc"}],
+            "device_id": "did-dddd",
             "otp_code": "one-shot-codes-are-left-out",
-            "nested": {"password": "e", "note": "not-a-credential"},
+            "nested": {"password": "pw-eeee", "note": "not-a-credential"},
             "path": "/share",
-            "items": [{"device_id": "f"}],
+            "items": [{"device_id": "did-ffff"}],
         }
     )
 
-    assert sorted(found) == ["a", "b", "c", "d", "e", "f"]
+    assert sorted(found) == [
+        "did-dddd",
+        "did-ffff",
+        "pw-aaaa",
+        "pw-bbbb",
+        "pw-cccc",
+        "pw-eeee",
+    ]
 
 
 @pytest.mark.asyncio

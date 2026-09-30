@@ -266,7 +266,7 @@ A timed-out call does not prove the operation did not happen: DSM may still fini
 - **`synology_ups`** - Get UPS status, battery level, power readings
 - **`synology_services`** - List installed packages and their running status
 - **`synology_system_log`** - Get recent system log entries
-- **`synology_health_summary`** - Aggregate system info, utilization, disk health, volume status, storage pools, network, and UPS. The result carries a `status`: `complete`, or `partial` with a message and `failed_checks` naming each check that could not be completed (the gathered `data` is still returned, but a partial result does not show the NAS is healthy). If every check fails it is reported as an error.
+- **`synology_health_summary`** - Aggregate system info, utilization, disk health, volume status, storage pools, network, and UPS. The result carries a `status`: `complete`, or `partial` with a message and `failed_checks` naming each check that could not be completed (the gathered `data` is still returned, but a partial result does not show the NAS is healthy). A UPS check that DSM reports as not available on this NAS is listed under `unavailable_checks` and does not make the result partial. If every check fails it is reported as an error.
 
 ### 🐳 Container Manager
 - **`synology_container_list`** - List Container Manager containers
