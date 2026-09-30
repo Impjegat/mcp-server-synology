@@ -753,54 +753,189 @@ def test_get_file_content_size_cap_fires_against_a_realistic_dsm_response(monkey
 # ---------------------------------------------------------------------------
 
 
+def _dsm_reply(data):
+    """A stand-in `requests` response carrying a successful DSM payload."""
+    from unittest.mock import MagicMock
+
+    response = MagicMock()
+    response.json.return_value = {"success": True, "data": data}
+    return response
+
+
 @pytest.mark.parametrize(
-    "method_name,args,api,limit_seconds",
+    "method_name,args,api,limit_seconds,max_total_seconds",
     [
-        ("search_files", ("/share", "*.txt"), "SYNO.FileStation.Search", 120),
-        ("delete", ("/share/a.txt",), "SYNO.FileStation.Delete", 120),
-        ("move_file", ("/share/a.txt", "/share/dest"), "SYNO.FileStation.CopyMove", 60),
+        ("search_files", ("/share", "*.txt"), "SYNO.FileStation.Search", 120, 140),
+        ("delete", ("/share/a.txt",), "SYNO.FileStation.Delete", 120, 125),
+        ("move_file", ("/share/a.txt", "/share/dest"), "SYNO.FileStation.CopyMove", 60, 65),
     ],
 )
-def test_polling_deadline_counts_the_time_each_status_request_takes(
-    monkeypatch, method_name, args, api, limit_seconds
+@pytest.mark.parametrize("start_seconds", [0, 14])
+def test_polling_never_outlives_its_time_limit(
+    monkeypatch, method_name, args, api, limit_seconds, max_total_seconds, start_seconds
 ):
-    """The deadline used to be a tally of time spent *sleeping* (0.5 s per
-    poll), which never sees how long the status requests themselves take.
-    With each request taking 14 s (close to the 15 s request timeout), a
-    120 s limit meant 240 polls — about an hour — not 2 minutes. The
-    deadline must be wall-clock: with 14 s requests plus the 0.5 s sleep,
-    a limit of L seconds allows only ceil(L / 14.5) polls."""
-    import math
+    """The deadline used to be checked only *before* each status request, and
+    each request still got a fixed 15 s timeout — so a request begun with 4 s
+    left ran to 14 s and a 120 s limit was reported at 130.5 s. Now every
+    request is given at most the time left, the request that starts the task
+    counts against the same budget, and the limit is reported when it is hit.
+
+    This goes through the real `_make_request`: only `requests.get` (and the
+    clock) are replaced. Each status request here takes 14 s if it is allowed
+    to, and otherwise times out exactly when its timeout says — as a real one
+    would."""
+    import requests
 
     from filestation.synology_filestation import SynologyFileStation
 
     fs = SynologyFileStation("https://nas.example.test:5001", "sid")
     clock = _FakeClock()
-    calls = {"status": 0, "stop": 0}
+    sent = []  # (api, method, timeout, time it was sent)
 
-    def fake_make_request(request_api, version, method, use_post=False, **params):
-        assert request_api == api
+    def fake_get(url, params=None, timeout=None, **kwargs):
+        request_api, method = params["api"], params["method"]
+        sent.append((request_api, method, timeout, clock.now))
+        if request_api == "SYNO.FileStation.List":  # delete()'s lookup
+            return _dsm_reply({"files": [{"name": "a.txt", "path": "/share/a.txt"}]})
         if method == "start":
-            return {"taskid": "task123"}
+            clock.advance(start_seconds)
+            return _dsm_reply({"taskid": "task123"})
         if method == "status":
-            calls["status"] += 1
-            clock.advance(14)  # a slow status request
-            return {"finished": False}  # never finishes
+            if timeout < 14:
+                clock.advance(timeout)
+                raise requests.ReadTimeout("read timed out")
+            clock.advance(14)
+            return _dsm_reply({"finished": False})  # never finishes
         if method == "stop":
-            calls["stop"] += 1
-            return {}
+            return _dsm_reply({})
         raise AssertionError(f"unexpected method {method}")
 
-    monkeypatch.setattr(fs, "_make_request", fake_make_request)
-    monkeypatch.setattr(fs, "get_file_info", lambda path: {"type": "file"})
+    monkeypatch.setattr("filestation.synology_filestation.requests.get", fake_get)
     monkeypatch.setattr("filestation.synology_filestation.time", clock)
 
     with pytest.raises(Exception, match=f"timed out after {limit_seconds} seconds"):
         getattr(fs, method_name)(*args)
 
-    assert calls["status"] == math.ceil(limit_seconds / 14.5)
-    # The existing cleanup still runs when the deadline is what ended it.
-    assert calls["stop"] == 1
+    # The limit is honoured: reported at the limit, not limit + one request.
+    assert clock.now <= limit_seconds
+    # No request was allowed to run past the limit...
+    worked = [(t, at) for _, m, t, at in sent if m not in ("stop",)]
+    assert all(at + t <= limit_seconds + 1e-9 for t, at in worked)
+    # ...and the last poll really was cut short, not a full 15 s one.
+    assert min(t for _, m, t, _ in sent if m == "status") < 14
+    # Cleanup still runs, with its own small allowance.
+    stops = [t for _, m, t, _ in sent if m == "stop"]
+    assert len(stops) == 1 and stops[0] <= 5
+    assert clock.now + stops[0] <= max_total_seconds
+
+
+@pytest.mark.parametrize("blocking_method", ["start", "status"])
+def test_a_request_that_never_answers_is_abandoned_at_the_deadline(monkeypatch, blocking_method):
+    """A `requests` timeout limits each connect and each read, not the whole
+    exchange: a server that keeps trickling bytes can outlast it. So the wait
+    itself is bounded. Real time, real clock — a request that blocks for up to
+    5 s must be given up on after the 0.3 s limit."""
+    import threading
+    import time as real_time
+
+    from filestation.synology_filestation import SynologyFileStation
+
+    monkeypatch.setattr("filestation.synology_filestation._SEARCH_LIMIT", 0.3)
+    fs = SynologyFileStation("https://nas.example.test:5001", "sid")
+    release = threading.Event()
+
+    def fake_get(url, params=None, timeout=None, **kwargs):
+        method = params["method"]
+        if method == blocking_method:
+            release.wait(5)  # a server trickling bytes: never finishes in time
+        if method == "start":
+            return _dsm_reply({"taskid": "task123"})
+        return _dsm_reply({"finished": False})
+
+    monkeypatch.setattr("filestation.synology_filestation.requests.get", fake_get)
+
+    began = real_time.monotonic()
+    try:
+        with pytest.raises(Exception, match="timed out after 0.3 seconds"):
+            fs.search_files("/share", "*.txt")
+        elapsed = real_time.monotonic() - began
+    finally:
+        release.set()
+
+    assert elapsed < 2.0
+
+
+def test_the_results_of_a_search_get_their_own_allowance(monkeypatch):
+    """A search that finishes just inside its limit must not be thrown away
+    because almost no time is left to read the results."""
+    from filestation.synology_filestation import SynologyFileStation
+
+    monkeypatch.setattr("filestation.synology_filestation._SEARCH_LIMIT", 10)
+    fs = SynologyFileStation("https://nas.example.test:5001", "sid")
+    clock = _FakeClock()
+    timeouts = {}
+
+    def fake_get(url, params=None, timeout=None, **kwargs):
+        method = params["method"]
+        timeouts[method] = timeout
+        if method == "start":
+            return _dsm_reply({"taskid": "task123"})
+        if method == "status":
+            clock.advance(9)  # finishes with 1 s of the 10 s budget left
+            return _dsm_reply({"finished": True})
+        if method == "list":
+            return _dsm_reply({"files": [{"name": "a.txt", "path": "/share/a.txt"}]})
+        return _dsm_reply({})
+
+    monkeypatch.setattr("filestation.synology_filestation.requests.get", fake_get)
+    monkeypatch.setattr("filestation.synology_filestation.time", clock)
+
+    assert fs.search_files("/share", "*.txt")[0]["name"] == "a.txt"
+    assert timeouts["list"] == 15  # not the 1 s that was left of the search budget
+    assert timeouts["stop"] <= 5
+
+
+def test_a_real_network_timeout_is_still_reported_as_a_network_error(monkeypatch):
+    """Only a timeout that was *cut down* to the time left means the deadline
+    arrived; an ordinary 15 s timeout is still a slow or unreachable NAS."""
+    import requests
+
+    from filestation.synology_filestation import SynologyFileStation
+
+    fs = SynologyFileStation("https://nas.example.test:5001", "sid")
+
+    def fake_get(url, params=None, timeout=None, **kwargs):
+        if params["method"] == "start":
+            return _dsm_reply({"taskid": "task123"})
+        raise requests.ConnectTimeout("connect timed out")
+
+    monkeypatch.setattr("filestation.synology_filestation.requests.get", fake_get)
+    monkeypatch.setattr("time.sleep", lambda _seconds: None)
+
+    with pytest.raises(Exception, match="Network error: connect timed out"):
+        fs.search_files("/share", "*.txt")
+
+
+def test_delete_that_runs_out_of_time_looking_the_path_up_starts_nothing(monkeypatch):
+    """If the lookup uses up the budget, delete must not carry on and start a
+    delete on a guess that the path is a file."""
+    from filestation.synology_filestation import SynologyFileStation
+
+    fs = SynologyFileStation("https://nas.example.test:5001", "sid")
+    sent = []
+
+    def fake_make_request(api, version, method, use_post=False, **params):
+        sent.append(method)
+        from filestation.synology_filestation import _DeadlineError
+
+        raise _DeadlineError()
+
+    monkeypatch.setattr(fs, "_make_request", fake_make_request)
+
+    with pytest.raises(Exception, match="Delete operation timed out after 120 seconds"):
+        fs.delete("/share/a.txt")
+
+    assert sent == ["getinfo"]  # no "start" — and so no task to stop
 
 
 class _FakeStreamingResponse:

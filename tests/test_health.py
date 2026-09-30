@@ -271,3 +271,85 @@ def test_health_verify_ssl_parameter():
     assert health2.verify_ssl is False
 
     print("✅ verify_ssl parameter tests passed")
+
+
+# Every DSM API the summary's seven checks call first, by the key they fill.
+_UPS_API = "SYNO.Core.ExternalDevice.UPS"
+_SUMMARY_KEYS = ["system", "utilization", "disks", "volumes", "storage_pools", "network", "ups"]
+
+
+class TestHealthSummaryAggregation:
+    """health_summary() must say how complete it is (no live NAS required)."""
+
+    def _make_health(self):
+        from health.synology_health import SynologyHealth
+
+        return SynologyHealth("http://nas:5000", "fake-sid", verify_ssl=False)
+
+    @staticmethod
+    def _dsm(failing_apis):
+        """A fake DSM: every API answers with data, except `failing_apis`."""
+        calls = []
+
+        def get(api, method, version=1, extra_params=None):
+            calls.append(api)
+            if api in failing_apis or failing_apis == "all":
+                return {"success": False, "error": {"code": "network_error", "message": "down"}}
+            return {"success": True, "data": {"from": api}}
+
+        get.calls = calls
+        return get
+
+    def test_when_every_check_fails_the_summary_is_a_failure(self):
+        """The P2 finding: an unreachable NAS used to come back as
+        `{"success": True, "data": {}}`."""
+        health = self._make_health()
+        get = self._dsm("all")
+
+        with patch.object(health._api, "get", side_effect=get):
+            result = health.health_summary()
+
+        assert result["success"] is False
+        assert result["error"]["code"] == "health_checks_failed"
+        assert "data" not in result
+        failed = result["error"]["failed_checks"]
+        assert [f["check"] for f in failed] == _SUMMARY_KEYS
+        assert all(f["error"]["code"] == "network_error" for f in failed)
+        assert len(get.calls) == 11  # each check, including the DSM 6 fallbacks
+
+    def test_when_some_checks_fail_the_summary_says_it_is_partial(self):
+        health = self._make_health()
+
+        with patch.object(health._api, "get", side_effect=self._dsm({_UPS_API})):
+            result = health.health_summary()
+
+        assert result["success"] is True
+        assert result["status"] == "partial"
+        assert result["message"] == "Some health checks could not be completed."
+        assert [f["check"] for f in result["failed_checks"]] == ["ups"]
+        assert result["failed_checks"][0]["error"]["message"] == "down"
+        assert list(result["data"]) == [k for k in _SUMMARY_KEYS if k != "ups"]
+        # The warning is read before the data it qualifies.
+        assert list(result)[:4] == ["success", "status", "message", "failed_checks"]
+
+    def test_when_every_check_succeeds_the_summary_is_complete(self):
+        health = self._make_health()
+
+        with patch.object(health._api, "get", side_effect=self._dsm(set())):
+            result = health.health_summary()
+
+        assert result["success"] is True
+        assert result["status"] == "complete"
+        assert "failed_checks" not in result and "message" not in result
+        assert list(result["data"]) == _SUMMARY_KEYS
+
+    def test_a_check_whose_failure_carries_no_error_is_still_reported(self):
+        health = self._make_health()
+
+        def get(api, method, version=1, extra_params=None):
+            return {"success": api != _UPS_API, "data": {}}  # failure with no "error" key
+
+        with patch.object(health._api, "get", side_effect=get):
+            result = health.health_summary()
+
+        assert result["failed_checks"] == [{"check": "ups", "error": {}}]

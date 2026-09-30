@@ -7,8 +7,12 @@
 - `VERIFY_SSL` (and every `verify_ssl` constructor default across the service classes) now defaults to `true` instead of `false`.
 - The `synology_login` tool's URL validator now requires `https://`.
 - Removed the false "RSA encrypted password transmission" claim from the README.
+- **Credentials typed into a tool call are no longer echoed back.** A `password`, `device_id` or `otp_code` of the wrong type used to appear in the error message (`Invalid arguments for synology_login: ['…'] is not of type 'string'`) and in DEBUG logs, because the redactor only knew secrets from settings and established sessions. Validation messages are now built from the schema alone and never quote a submitted value, and every `password` and `device_id` in a call is treated as a secret for the duration of that call, before any login has taken place.
 
 ### Changed
+- **`synology_health_summary` now says how complete it is.** The result carries `status: "complete"`, or `status: "partial"` with a `message` and `failed_checks` naming each check that could not be completed (the data gathered is still returned, but a partial result does not show the NAS is healthy). If every check fails, the tool returns an error.
+- **Invalid-argument messages are worded differently**: `path must be of type 'string'` instead of `123 is not of type 'string'`. The field is still named; the submitted value no longer is. A missing required property still reads `'path' is a required property`.
+- **`search_files`, `delete` and `move_file` time limits are now enforced on every request.** Starting the task counts against the limit, each request is cut off at the time left, and a response that never completes is abandoned at the limit. Fetching search results and stopping a task keep small separate allowances, so the longest a call can take is 140 s (search), 125 s (delete) and 65 s (move) — see the README's "Time limits". Previously a 120 s search could take 130 s or more.
 - **The server now requires the `mcp` Python SDK 2.x** (`mcp>=2.2.0,<3`) and no longer runs on 1.x. It uses the 2.x low-level API: the tool handlers are passed to the `Server` constructor instead of registered with decorators, and tool arguments are validated against each tool's `inputSchema` by the server itself, because the SDK no longer does it. A fresh install of `requirements.txt` had been resolving to mcp 2.x, where the previous code failed on startup. Docker users: rebuild the image (`docker-compose build`). (#12)
 - **Tool failures are now reported as errors — an intentional behavior change.** Previously nearly every failure came back as an ordinary, successful-looking text result; only an argument-schema violation was flagged. Now:
   - A tool that fails — an exception in a handler, a failed login or logout, a DSM call that reports `success: false`, no active session — returns a result with `isError: true`.
@@ -18,6 +22,7 @@
   - Every error path is redacted — the message, the log line, and the DEBUG traceback (which is now redacted by the server itself before it is logged).
 
 ### Fixed
+- `synology_health_summary` no longer reports `success: true` with empty data when the NAS cannot be reached. It used to drop every failed check and always succeed, so an unavailable NAS looked like a healthy, empty summary.
 - `get_file_info` no longer reports a nonexistent path as an empty file. DSM answers `getinfo` for a missing path with `success: true` and an error `code` (408) inside the file entry; that is now raised as "File not found" (any other per-entry code as an error), so the tool returns `isError: true`.
 
 ### Removed

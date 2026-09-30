@@ -2,7 +2,9 @@
 
 import logging
 import threading
-from typing import Any, Callable, Dict, Optional, Tuple
+from contextlib import contextmanager
+from contextvars import ContextVar
+from typing import Any, Callable, Dict, Iterable, Iterator, Optional, Tuple
 
 import requests
 
@@ -69,21 +71,51 @@ def iter_live_secrets():
                 yield password
 
 
+# Credentials submitted in the tool call being handled right now. A password,
+# OTP code or device token typed into `synology_login` is in none of the other
+# inventories until a login has succeeded, so a validation error or a failed
+# login would otherwise be free to echo it. A ContextVar, not a module-level
+# set, so concurrent calls never see (or clear) each other's values.
+_REQUEST_SECRETS: ContextVar[Tuple[str, ...]] = ContextVar("_REQUEST_SECRETS", default=())
+
+
+@contextmanager
+def request_secrets(values: Iterable[Optional[str]]) -> Iterator[None]:
+    """Treat `values` as secrets, for redaction, until the block exits.
+
+    Wraps one tool call: everything `iter_all_secrets()` feeds — the
+    tool-response redaction and the process-wide log filter — masks these
+    values wherever they appear, including on the error paths that run
+    before any authentication has happened.
+
+    The caller decides what counts as a secret; `mcp_server` passes the
+    `password` and `device_id` arguments, and leaves out one-shot OTP codes
+    for the reason `config.iter_configured_secrets()` gives.
+    """
+    token = _REQUEST_SECRETS.set(tuple(v for v in values if v))
+    try:
+        yield
+    finally:
+        _REQUEST_SECRETS.reset(token)
+
+
 def iter_all_secrets():
     """Every secret this server currently knows about, live or merely
-    configured.
+    configured, plus those submitted in the call being handled.
 
     Chains `iter_live_secrets()` (session IDs, SynoTokens, device IDs —
     only exist post-login) with `config.iter_configured_secrets()`
     (passwords and trusted-device tokens from settings.json/.env — see
-    that method's docstring for why OTP codes are deliberately excluded),
-    so a configured secret is redacted from logs and tool output even
-    before any login using it has happened. The single place both
-    `main.py`'s log filter and `mcp_server.py`'s tool-response redaction
-    pull their secret list from, so the two can't drift apart.
+    that method's docstring for why OTP codes are deliberately excluded)
+    and with the current `request_secrets()` block, so a secret is
+    redacted from logs and tool output even before any login using it has
+    happened. The single place both `main.py`'s log filter and
+    `mcp_server.py`'s tool-response redaction pull their secret list from,
+    so the two can't drift apart.
     """
     yield from iter_live_secrets()
     yield from config.iter_configured_secrets()
+    yield from _REQUEST_SECRETS.get()
 
 
 class SynologyAuth:

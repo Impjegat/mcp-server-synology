@@ -1,7 +1,7 @@
 # src/health/synology_health.py - Synology NAS health monitoring
 # Supports both DSM 6 and DSM 7 APIs with automatic fallback.
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from utils.synology_api import SynologyAPIClient
 
@@ -150,36 +150,56 @@ class SynologyHealth:
     # Combined summary
     # ------------------------------------------------------------------
 
+    # (key in the summary, SynologyHealth method that produces it)
+    _SUMMARY_CHECKS = (
+        ("system", "system_info"),
+        ("utilization", "utilization"),
+        ("disks", "disk_list"),
+        ("volumes", "volume_list"),
+        ("storage_pools", "storage_pool_list"),
+        ("network", "network_info"),
+        ("ups", "ups_info"),
+    )
+
     def health_summary(self) -> Dict[str, Any]:
-        """Aggregate system info, utilization, disk health, and volume status."""
-        summary = {}
+        """Aggregate system info, utilization, disk health, volume status,
+        storage pools, network, and UPS into one result.
 
-        sys_info = self.system_info()
-        if sys_info.get("success"):
-            summary["system"] = sys_info.get("data", {})
+        The result says how complete it is, so a summary with holes is never
+        mistaken for a clean bill of health:
 
-        util = self.utilization()
-        if util.get("success"):
-            summary["utilization"] = util.get("data", {})
+        - every check succeeded: `success: True`, `status: "complete"`;
+        - some failed: `success: True`, `status: "partial"`, a `message`, and
+          `failed_checks` (each failed check and its error) next to the
+          `data` that was gathered;
+        - all failed: `success: False` with the same `failed_checks` in the
+          error, which is what an unreachable NAS looks like.
+        """
+        summary: Dict[str, Any] = {}
+        failed_checks: List[Dict[str, Any]] = []
 
-        disks = self.disk_list()
-        if disks.get("success"):
-            summary["disks"] = disks.get("data", {})
+        for key, method_name in self._SUMMARY_CHECKS:
+            result = getattr(self, method_name)()
+            if result.get("success"):
+                summary[key] = result.get("data", {})
+            else:
+                failed_checks.append({"check": key, "error": result.get("error", {})})
 
-        volumes = self.volume_list()
-        if volumes.get("success"):
-            summary["volumes"] = volumes.get("data", {})
-
-        pools = self.storage_pool_list()
-        if pools.get("success"):
-            summary["storage_pools"] = pools.get("data", {})
-
-        net = self.network_info()
-        if net.get("success"):
-            summary["network"] = net.get("data", {})
-
-        ups = self.ups_info()
-        if ups.get("success"):
-            summary["ups"] = ups.get("data", {})
-
-        return {"success": True, "data": summary}
+        if not summary:
+            return {
+                "success": False,
+                "error": {
+                    "code": "health_checks_failed",
+                    "message": "None of the health checks could be completed.",
+                    "failed_checks": failed_checks,
+                },
+            }
+        if failed_checks:
+            return {
+                "success": True,
+                "status": "partial",
+                "message": "Some health checks could not be completed.",
+                "failed_checks": failed_checks,
+                "data": summary,
+            }
+        return {"success": True, "status": "complete", "data": summary}

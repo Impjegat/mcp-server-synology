@@ -117,8 +117,9 @@ def _server_command():
 
 
 @contextlib.contextmanager
-def _running_server(directory):
-    """Start the server and yield a client connected to it."""
+def _running_server(directory, log_level="WARNING"):
+    """Start the server and yield a client connected to it. `client.stderr_path`
+    is the file the server's log output goes to."""
     env = {k: v for k, v in os.environ.items() if not k.startswith("SYNOLOGY_")}
     # The settings directory the server looks in — and the one the compose
     # file bind-mounts into the container. Empty, meaning no settings.json.
@@ -129,7 +130,7 @@ def _running_server(directory):
             "XDG_CONFIG_HOME": str(directory / "xdg"),
             "AUTO_LOGIN": "false",
             "RESTRICTED_MODE": "true",
-            "LOG_LEVEL": "WARNING",
+            "LOG_LEVEL": log_level,
             "PYTHONUNBUFFERED": "1",
             "PYTHONUTF8": "1",
         }
@@ -148,6 +149,7 @@ def _running_server(directory):
             bufsize=1,
         )
         client = _StdioClient(process)
+        client.stderr_path = stderr_path
         try:
             yield client
         except BaseException:
@@ -259,7 +261,7 @@ def test_invalid_arguments_are_refused_as_an_error_result(server):
     assert _is_error(missing) is True
     assert "'path' is a required property" in _result_text(missing)
     assert _is_error(wrong_type) is True
-    assert "123 is not of type 'string'" in _result_text(wrong_type)
+    assert "path must be of type 'string'" in _result_text(wrong_type)
 
 
 def test_a_tool_that_fails_is_reported_as_an_error_result(server):
@@ -268,6 +270,46 @@ def test_a_tool_that_fails_is_reported_as_an_error_result(server):
 
     assert _is_error(response) is True
     assert "no active sessions" in _result_text(response)
+
+
+@pytest.mark.skipif(
+    COMMAND_OVERRIDE_ENV in os.environ,
+    reason="needs DEBUG logging, which a container command set by the caller does not get",
+)
+def test_a_submitted_credential_reaches_neither_the_client_nor_the_debug_log(tmp_path):
+    """Credentials typed into a login call that fails validation, or fails
+    before any NAS is contacted, are in no inventory of known secrets. Nothing
+    in a result or in the DEBUG log — the server's own lines or the SDK's —
+    may carry them."""
+    wrong_type = {"password": "PW-WRONG-TYPE-31c1", "device_id": "DID-WRONG-TYPE-8a2e"}
+    otp = "OTP-WRONG-TYPE-5e77"
+    valid = "PW-WELL-TYPED-9b40"
+    base = {"base_url": "https://nas.example.test:5001", "username": "admin", "password": "x" * 9}
+
+    with _running_server(tmp_path, log_level="DEBUG") as client:
+        client.initialize("2025-06-18")
+        responses = [
+            client.call_tool("synology_login", {**base, field: [value]})
+            for field, value in wrong_type.items()
+        ]
+        responses.append(client.call_tool("synology_login", {**base, "otp_code": [otp]}))
+        # Well-typed, rejected later: http:// is refused before any request.
+        responses.append(
+            client.call_tool(
+                "synology_login",
+                {**base, "base_url": "http://nas.example.test:5000", "password": valid},
+            )
+        )
+        log = client.stderr_path.read_text(encoding="utf-8")
+
+    for response in responses:
+        assert _is_error(response) is True
+    returned = " ".join(_result_text(response) for response in responses)
+    for secret in [*wrong_type.values(), otp, valid]:
+        assert secret not in returned
+        assert secret not in log
+    assert "password must be of type 'string'" in returned
+    assert "Executing tool" in log or "Invalid arguments" in log  # DEBUG really was on
 
 
 def test_a_failed_login_step_is_reported_as_an_error_result(server):
