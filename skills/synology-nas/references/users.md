@@ -18,6 +18,8 @@
 
 All accept `nas_name` / `base_url`.
 
+**Restricted mode** (the default) hides **all** of these tools — the read-only listings too, because enumerating every account, its groups and its permissions is treated as a different trust level from browsing files. If the user wants any of this, tell them to set `RESTRICTED_MODE=false` (see [../SKILL.md](../SKILL.md)).
+
 ## When to use this domain
 
 User management is **admin-level**. The MCP must be authenticated as a user with admin rights for these calls to succeed. If the user is connecting with a non-admin account (recommended for safety), most of these tools will fail with permission errors — surface that clearly rather than retrying.
@@ -36,28 +38,28 @@ DSM's user model is additive (group membership grants permissions, plus per-user
 
 ### Creating a new user
 
-`synology_create_user` requires at minimum a name and password. Common optional fields:
+`synology_create_user` requires at minimum a `name` and `password`. Optional fields:
 
 - `email` — for password recovery and notifications.
 - `description` — surface this when listing users.
-- `groups` — initial group memberships. Common groups: `users`, `administrators`, `http`.
-- `expired` — account expiry date.
-- `password_never_expire` — boolean.
+- `cannot_chg_passwd` — boolean (default false): stop the user changing their own password.
+- `passwd_never_expire` — boolean (default true).
 
-For most setups: create with `groups: ["users"]` and add to additional groups via `synology_add_user_to_group` afterward. Putting someone in `administrators` is a meaningful trust decision — confirm before doing it.
+There is no group option at creation: add the user to groups afterwards with `synology_add_user_to_group(username=..., groups=[...])`. Common groups: `users`, `administrators`, `http`. Putting someone in `administrators` is a meaningful trust decision — confirm before doing it. To disable an account later, use `synology_set_user(name=..., expired="now")` (`"normal"` re-enables it).
 
 ### Setting share permissions
 
-`synology_set_user_permissions` controls per-share access (read, write, none). Permission entries look like:
+`synology_set_user_permissions(name=..., permissions=[...])` sets per-share access for a user. Each entry in `permissions` looks like:
 
 ```json
 {
-  "share_name": "Photos",
-  "permission": "rw"  // or "ro", "no_access"
+  "name": "Photos",
+  "is_writable": false,
+  "is_deny": false
 }
 ```
 
-Pass an array of entries; not-mentioned shares retain their existing permission. To revoke access, set `"permission": "no_access"` explicitly — don't just omit the share.
+`name` is the shared folder, `is_writable` grants write access, and `is_deny` denies access entirely. Don't assume what happens to shares you leave out: read the result back with `synology_get_user_permissions(name=...)` to confirm the final state, and set `"is_deny": true` explicitly to revoke a share.
 
 ### Deleting users
 
@@ -77,28 +79,28 @@ Pass an array of entries; not-mentioned shares retain their existing permission.
 
 ```
 synology_create_user(
-  username="photographer",
+  name="photographer",
   password="<strong-pass>",
   description="Read-only photo access",
-  groups=["users"],
 )
+synology_add_user_to_group(username="photographer", groups=["users"])
 synology_set_user_permissions(
-  username="photographer",
-  permissions=[{"share_name": "Photos", "permission": "ro"}]
+  name="photographer",
+  permissions=[{"name": "Photos", "is_writable": false, "is_deny": false}]
 )
 ```
 
 ### "Who's in the administrators group?"
 
 ```
-synology_list_group_members(group_name="administrators")
+synology_list_group_members(group="administrators")
 ```
 
 ### "Remove user 'temp-contractor'"
 
 ```
-synology_get_user(username="temp-contractor")        # confirm it's the right one
-synology_delete_user(username="temp-contractor")     # permanent
+synology_get_user(name="temp-contractor")           # confirm it's the right one
+synology_delete_user(name="temp-contractor")        # permanent
 # optionally:
 delete(path="/homes/temp-contractor")                # cleanup home dir
 ```

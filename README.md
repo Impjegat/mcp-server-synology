@@ -4,12 +4,16 @@
 
 A Model Context Protocol (MCP) server for Synology NAS devices. Enables AI assistants to manage files and downloads through secure authentication and session management.
 
+> **About this fork:** this is a security-hardened fork of [atom2ueki/mcp-server-synology](https://github.com/atom2ueki/mcp-server-synology). Compared with upstream it connects over HTTPS only, starts in a read-only restricted mode by default, masks secrets in logs and responses, reports tool failures as MCP errors, and runs on the MCP Python SDK 2.x. See [Differences from upstream](#differences-from-upstream) and the [CHANGELOG](CHANGELOG.md).
+
 ## 🚀 Quick Start with Docker
+
+**Requirements:** Docker with Compose v2.24 or later, **or** Python 3.10 or later for a local install (the MCP SDK 2.x this server uses does not support older Pythons).
 
 ### 1️⃣ Setup Environment
 ```bash
 # Clone repository
-git clone https://github.com/atom2ueki/mcp-server-synology.git
+git clone https://github.com/Impjegat/mcp-server-synology.git
 cd mcp-server-synology
 
 # Create environment file
@@ -36,6 +40,8 @@ AUTO_LOGIN=true
 VERIFY_SSL=true
 ```
 
+> **🔒 Restricted mode is on by default.** The server starts exposing only browsing and monitoring tools; every tool that changes anything on the NAS (creating, deleting or moving files, managing downloads, containers, shares or users, …) is hidden and refused. Set `RESTRICTED_MODE=false` once you deliberately want them. The **Available MCP Tools** section below lists which tools each mode offers, and **Security Recommendations** has the details.
+
 **How Docker reads `.env`:** `docker-compose.yml` hands `.env` to the container when it starts (an optional `env_file`). It is never copied into the image, so editing it needs no rebuild. This needs Docker Compose v2.24 or later — check with `docker compose version`. Compose expands `$` in `.env` values, so if a password contains `$`, wrap the value in single quotes (`SYNOLOGY_PASSWORD='pa$word'`) or it will be silently altered. If you'd rather not keep credentials in `.env`, configure the server through `settings.json` instead (see below).
 
 ### 3️⃣ Build the Image
@@ -47,6 +53,8 @@ docker-compose build
 There's nothing to start or leave running here: this is a per-session stdio process, not a background service. Your MCP client launches it itself via `docker-compose run --rm` — see the "Client Setup" section below for the exact config each client uses.
 
 ### 4️⃣ Alternative: Local Python
+
+Needs Python 3.10 or later.
 
 ```bash
 # Install dependencies
@@ -62,7 +70,7 @@ Docker Desktop (with the WSL2 backend) is the easiest path on Windows — the `d
 
 ```powershell
 # Clone repository
-git clone https://github.com/atom2ueki/mcp-server-synology.git
+git clone https://github.com/Impjegat/mcp-server-synology.git
 cd mcp-server-synology
 
 # Create environment file
@@ -190,6 +198,18 @@ If you prefer not to use Docker:
 
 ## 🛠️ Available MCP Tools
 
+**Restricted mode** (the default) offers only the tools in the middle column below; the rest are hidden from tool discovery and refused if called by name. Set `RESTRICTED_MODE=false` to enable them all.
+
+| Domain | Available in restricted mode | Hidden until `RESTRICTED_MODE=false` |
+|---|---|---|
+| Authentication | all four (once a NAS is configured, `synology_login` only works for a NAS already in your configuration) | — |
+| File System | `list_shares`, `list_directory`, `get_file_info`, `search_files`, `get_file_content` | `create_file`, `create_directory`, `delete`, `rename_file`, `move_file` |
+| Download Station | `ds_get_info`, `ds_list_tasks`, `ds_get_statistics`, `ds_list_downloaded_files` | `ds_create_task`, `ds_pause_tasks`, `ds_resume_tasks`, `ds_delete_tasks` |
+| Health Monitoring | all | — |
+| Container Manager | listing and inspection: containers (`list`, `get`, `logs`, `resource`), projects (`list`, `get`), images (`list`, `get`), registries (`list`, `search`, `tags`), networks (`list`, `get`) | starting, stopping, restarting and deleting containers; creating, updating, running and deleting projects; deleting and pulling images; registry download; creating and deleting networks |
+| NFS and shared folders | `synology_nfs_status`, `synology_nfs_list_shares` | `synology_nfs_enable`, `synology_nfs_set_permission`, `synology_create_share` |
+| User & Group Management | none | all of them, including the read-only listings (enumerating accounts and permissions is treated as a separate trust level) |
+
 ### 🔐 Authentication
 - **`synology_status`** - Check authentication status and active sessions
 - **`synology_list_nas`** - List all configured NAS units from settings.json
@@ -254,6 +274,8 @@ A timed-out call does not prove the operation did not happen: DSM may still fini
   - `task_ids` (required): Array of task IDs
   - `force_complete` (optional): Force delete completed
 - **`ds_get_statistics`** - Get download/upload statistics
+- **`ds_list_downloaded_files`** - List files in the Download Station destination folder
+  - `destination` (optional): Folder to list (defaults to Download Station's default)
 
 ### 🏥 Health Monitoring
 - **`synology_system_info`** - Get system model, serial, DSM version, uptime, temperature
@@ -365,6 +387,43 @@ A timed-out call does not prove the operation did not happen: DSM may still fini
 - **`synology_nfs_enable`** - Enable or disable the NFS service
 - **`synology_nfs_list_shares`** - List all shared folders with their NFS permissions
 - **`synology_nfs_set_permission`** - Set NFS client access permissions on a shared folder
+- **`synology_create_share`** - Create a new shared folder on a volume
+  - `share_name` (required): Name of the shared folder
+  - `vol_path` (required): Volume path, e.g. `/volume1`
+  - `description` (optional): Description of the folder
+  - `enable_recycle_bin` (optional): Enable the recycle bin (default: true)
+  - `recycle_bin_admin_only` (optional): Restrict recycle bin access to administrators (default: true)
+
+### 👥 User & Group Management
+
+These need an administrator account and are all hidden in restricted mode.
+
+- **`synology_list_users`** - List all local users
+- **`synology_get_user`** - Get details of one user
+  - `name` (required): Username
+- **`synology_create_user`** - Create a local user
+  - `name` (required): Username
+  - `password` (required): Password
+  - `description`, `email` (optional)
+  - `cannot_chg_passwd` (optional): Prevent the user changing their password (default: false)
+  - `passwd_never_expire` (optional): Password never expires (default: true)
+- **`synology_set_user`** - Modify a user (rename, change password, enable/disable)
+  - `name` (required): User to modify
+  - `new_name`, `password`, `description`, `email` (optional)
+  - `expired` (optional): `normal` to enable, `now` to disable
+- **`synology_delete_user`** - Delete a local user
+  - `name` (required): Username
+- **`synology_list_groups`** - List all local groups
+- **`synology_list_group_members`** - List the members of a group
+  - `group` (required): Group name
+- **`synology_add_user_to_group`** / **`synology_remove_user_from_group`** - Change a user's group membership
+  - `username` (required): Username
+  - `groups` (required): Array of group names
+- **`synology_get_user_permissions`** - Get a user's shared-folder permissions
+  - `name` (required): Username
+- **`synology_set_user_permissions`** - Set a user's shared-folder permissions (read/write/deny per folder)
+  - `name` (required): Username
+  - `permissions` (required): Array of `{name, is_writable, is_deny}` objects
 
 ## 🧠 Claude Code / Claude.ai Skill
 
@@ -383,29 +442,35 @@ The skill is purely additive — it works alongside the MCP and only triggers on
 
 > **⚠️ Security Warning: Use a Dedicated Account**
 >
-> For this MCP server, create a dedicated Synology user account with appropriate permissions. This account should:
-> - Have minimal required permissions only (not admin!)
+> For this MCP server, create a dedicated Synology user account (not your personal one). This account should:
+> - Have only the permissions you need. Note that DSM's monitoring APIs generally require an administrator, so if you want monitoring to work, see **Restricted Mode** under Security Recommendations below for how to scope a dedicated admin account
 > - Be used exclusively for MCP server automation
 > - **2FA is now supported** — if your DSM account has 2FA enabled, see the
->   [2FA / OTP Accounts](#2fa--otp-accounts-optional) section below to supply
+>   **2FA / OTP Accounts** section below to supply
 >   an `otp_code` (one-shot) or `device_id` (persistent) field. Older guidance
 >   of "no 2FA" is no longer required.
 
-### Using settings.json (Recommended)
+### Environment variables (`.env`)
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `SYNOLOGY_URL` | Yes* | - | NAS base URL, **must be HTTPS** (e.g., `https://192.168.1.100:5001`) |
 | `SYNOLOGY_USERNAME` | Yes* | - | Username for authentication |
 | `SYNOLOGY_PASSWORD` | Yes* | - | Password for authentication |
+| `SYNOLOGY_OTP_CODE` | No | - | One-shot 2FA code for the first login (see **2FA / OTP Accounts** below) |
 | `AUTO_LOGIN` | No | `true` | Auto-login on server start |
 | `VERIFY_SSL` | No | `true` | Verify SSL certificates; `false` disables verification (avoid), or set to a CA bundle file path to trust a private CA/self-signed cert |
+| `RESTRICTED_MODE` | No | `true` | Expose only browsing and monitoring tools; `false` enables every tool. Any value other than an explicit false (`false`/`0`/`no`/`off`) keeps it on |
 | `MAX_FILE_CONTENT_SIZE` | No | `1000000` | `get_file_content` refuses files larger than this (bytes) |
+| `SESSION_TIMEOUT` | No | `3600` | Session timeout in seconds (minimum 60) |
+| `LOG_LEVEL` | No | `INFO` | Log level (`DEBUG`, `INFO`, `WARNING`, ...) |
 | `DEBUG` | No | `false` | Enable debug logging |
 
 *Required for auto-login and default operations
 
-### Using settings.json (Multi-NAS Support)
+Every option except the credentials can also be set under `"server"` in `settings.json` (see below, e.g. `"restricted_mode": false`). Both can be used together; `settings.json` takes priority.
+
+### Using settings.json (Recommended, Multi-NAS Support)
 
 For managing multiple Synology NAS devices, use the XDG standard config directory (`~/.config/synology-mcp/settings.json`):
 
@@ -444,7 +509,9 @@ The docker-compose.yml automatically mounts your `~/.config/synology-mcp` direct
     "verify_ssl": true,
     "session_timeout": 3600,
     "debug": false,
-    "log_level": "INFO"
+    "log_level": "INFO",
+    "restricted_mode": true,
+    "max_file_content_size": 1000000
   }
 }
 ```
@@ -474,6 +541,12 @@ The docker-compose.yml automatically mounts your `~/.config/synology-mcp` direct
 - While restricted, `synology_login`'s `base_url` is also pinned to a NAS already configured in `settings.json` or `SYNOLOGY_URL` — a client can't point your credentials at an arbitrary host. This check is skipped only when no NAS is configured yet (nothing to pin against on a fresh install).
 - Local user/group listing and permission-lookup tools are hidden too, even though they don't write anything — enumerating every account, its group memberships, and its per-share permissions is a different trust tier than file browsing or NAS health monitoring.
 - Because DSM's monitoring APIs (`SYNO.Core.*`, `SYNO.Storage.CGI.*`) generally require an administrator account, a non-admin account will see most monitoring tools fail even though they're read-only. If you want monitoring to work, use a **dedicated admin account created for this server** (not your personal one): enable 2FA with the device-token flow described below, and deny it any DSM application privilege the server doesn't need (Download Station, Container Manager, file-sharing protocols, etc.) wherever DSM's privilege controls allow it. With an admin account, restricted mode and your MCP client's own tool allowlist are the only barriers to writes — DSM per-share permissions can't make an administrator read-only.
+
+**Secret redaction:**
+- Session IDs, SynoTokens, device tokens and configured passwords are masked (`***REDACTED***`) in log output, tool results and error messages, including exception tracebacks, so a failing request can't leak them.
+- Any `password` or `device_id` you pass to a tool is masked for the duration of that call, even before a login has happened.
+- Values shorter than 4 characters are not masked (masking by substring would blank those characters out of everything the call prints), and a one-shot `otp_code` is not masked by value. Text such as a NAS's own error message could therefore still quote a very short credential.
+- Argument-validation errors never quote what you submitted — see **Tool results and errors** below.
 
 **SSL Certificate Verification (VERIFY_SSL):**
 - Default is `true` — certificates are verified against the system trust store
@@ -524,6 +597,15 @@ The MCP server supports DSM accounts with 2FA enabled. There are two ways to use
    When `device_id` is present, it takes precedence over `otp_code` (trusted-device path). Legacy `.env` users can set the one-shot `SYNOLOGY_OTP_CODE` env var; for persistent `device_id`, migrate to `settings.json` (long opaque token doesn't fit an env var cleanly).
 
    **On Windows**, saving the device token also requires restricting `settings.json`'s permissions via `icacls` (see the Windows Installation section's "File permissions" note above) — if that fails, the token isn't saved at all (a warning is logged; nothing is left half-written) and you'll be prompted for `otp_code` again on the next start.
+
+## Tool results and errors
+
+- **Success:** an ordinary result (`isError: false`).
+- **Failure:** a result with `isError: true` and a text message. This covers a failed login or logout, a DSM call that reports `success: false`, a missing session or path, a restricted-mode refusal, and any exception inside a tool. Clients and scripts should check `isError`, not the message text.
+- **Invalid arguments** (a missing field, a wrong type) are refused before any request reaches the NAS, with a message such as `Invalid arguments for synology_login: password must be of type 'string'`. The message names the field but never quotes the value you submitted.
+- **Protocol errors:** an unknown tool name, or a malformed `tools/call` request, returns a standard JSON-RPC `-32602` error instead of a tool result.
+- **Health summary:** `synology_health_summary` reports `status: "partial"` when some checks failed and an error when all of them did; see its entry above.
+- **Timeouts:** see [Time limits](#time-limits).
 
 ## 📖 Usage Examples
 
@@ -592,27 +674,53 @@ The MCP server supports DSM accounts with 2FA enabled. There are two ways to use
 ## ✨ Features
 
 - ✅ **Secure Authentication** - HTTPS-only NAS connections with certificate verification enabled by default
-- ✅ **Session Management** - Persistent sessions across multiple NAS devices  
-- ✅ **Complete File Operations** - Create, delete, list, search, rename, move files with detailed metadata
-- ✅ **Directory Management** - Recursive directory operations with safety checks
+- ✅ **Restricted Mode** - Read-only browsing and monitoring tools by default; modifying tools stay hidden until you opt in
+- ✅ **Secret Redaction** - Passwords, session IDs and tokens are masked in logs, results and errors
+- ✅ **Session Management** - Persistent sessions across multiple NAS devices, with 2FA support
+- ✅ **File Operations** - Create, delete, list, search, rename, move and read files, with bounded read size and time limits
 - ✅ **Download Station** - Complete torrent and download management
-- ✅ **Docker Support** - Easy containerized deployment
-- ✅ **Backward Compatible** - Existing configurations work unchanged
-- ✅ **Error Handling** - Comprehensive error reporting and recovery
+- ✅ **Health Monitoring** - System, disk, volume, storage pool, network and UPS status
+- ✅ **Container Manager** - Containers, Compose projects, images, registries and networks
+- ✅ **NFS and Shared Folders** - NFS permissions and shared-folder creation
+- ✅ **User & Group Management** - Local users, groups and shared-folder permissions
+- ✅ **Docker Support** - Containerized deployment with credentials supplied at runtime, never baked into the image
+- ✅ **Clear Error Reporting** - Failures are returned as MCP errors (`isError`), never as successful-looking text
+
+## Differences from upstream
+
+This fork changes some defaults and behaviours of [atom2ueki/mcp-server-synology](https://github.com/atom2ueki/mcp-server-synology). If you are moving over from upstream, or from an older checkout of this fork, check these first (the [CHANGELOG](CHANGELOG.md) has the full list):
+
+- **HTTPS only.** `http://` URLs are rejected at startup; upstream built `http://` URLs for `settings.json` hosts on any port other than `5001`. The default `port` is now `5001`.
+- **`VERIFY_SSL` defaults to `true`**, and also accepts a CA bundle path for a private CA.
+- **`RESTRICTED_MODE` defaults to `true`.** Modifying tools, and the user/group tools, are hidden until you set it to `false`.
+- **Tool failures are `isError` results**, and unknown tools or malformed requests are JSON-RPC errors, instead of successful-looking text.
+- **MCP Python SDK 2.x and Python 3.10+.** Docker users need to rebuild the image (`docker-compose build`).
+- **Credentials are handled differently:** `.env` is passed to the container at start instead of being copied into the image, `settings.json` must have restricted permissions, and secrets are redacted from logs and responses.
+- **Removed:** the Xiaozhi WebSocket bridge and the HTTP/SSE remote-deployment path (`docker-compose.http.yml`).
+- **Bounded operations:** `search_files`, `delete` and `move_file` have enforced [time limits](#time-limits), and `get_file_content` refuses files over `MAX_FILE_CONTENT_SIZE`.
 
 ## 🏗️ Architecture
 
 ### File Structure
 ```
 mcp-server-synology/
-├── main.py                    # 🎯 Entry point
+├── main.py                    # 🎯 Entry point (stdio server, log redaction)
 ├── src/
-│   ├── mcp_server.py         # MCP server (stdio)
-│   ├── auth/                 # Authentication modules
+│   ├── mcp_server.py         # MCP server: tool registry, restricted mode, argument validation
+│   ├── config.py             # .env and settings.json loading
+│   ├── auth/                 # Login, sessions, 2FA
 │   ├── filestation/          # File operations
-│   └── downloadstation/      # Download management
+│   ├── downloadstation/      # Download management
+│   ├── health/               # Health monitoring
+│   ├── container/            # Container Manager
+│   ├── nfs/                  # NFS and shared folders
+│   ├── usermanagement/       # Users, groups, permissions
+│   └── utils/                # DSM API client, secret redaction
+├── tests/                    # Unit and end-to-end tests (see tests/README.md)
+├── skills/synology-nas/      # Claude Agent Skill
+├── plans/                    # Design notes for shipped changes
 ├── docker-compose.yml
 ├── Dockerfile
 ├── requirements.txt
-└── .env                      # Configuration
+└── env.example               # Configuration template (copy to .env)
 ```

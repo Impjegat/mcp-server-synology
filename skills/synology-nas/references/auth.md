@@ -26,6 +26,8 @@ Every operational tool accepts:
 - `nas_name` — the identifier from settings.json (e.g., `"nas1"`, `"backup"`). Preferred.
 - `base_url` — full HTTPS URL like `"https://192.168.1.100:5001"`. Fallback when the NAS isn't configured. Plain `http://` is rejected.
 
+In restricted mode (the default), once any NAS is configured, `synology_login` refuses a `base_url` that isn't one of the configured NAS units — so a one-off login to an unconfigured NAS needs `RESTRICTED_MODE=false`. All four tools in this domain stay available in restricted mode.
+
 ### Picking a target
 
 1. Call `synology_list_nas` to see what's configured.
@@ -60,14 +62,17 @@ Lives at `~/.config/synology-mcp/settings.json` (XDG standard). The file require
 
 Every connection is HTTPS-only regardless of port — there is no HTTP fallback. 5001 is DSM's default HTTPS port (and the default here when `port` is omitted); a custom port still connects over HTTPS. The `note` is for the user's reference — surface it when listing NAS units to a user, since human-readable notes ("primary", "backup") are easier to reason about than `nas1`/`nas2`.
 
+The same file has a `"server"` block for the server's own options: `auto_login`, `verify_ssl` (`true`, `false`, or a CA bundle file path for a private CA), `restricted_mode` (default `true`), `max_file_content_size`, `session_timeout`, `log_level` and `debug`.
+
 ## Gotchas
 
+- **Failures are errors**: a failed login or logout, or a call with no active session, comes back as a result with `isError: true`. An argument of the wrong type is refused with a message that names the field but never repeats the value, so a mistyped password is not echoed back.
 - **2FA / OTP**: the server supports DSM accounts with 2FA enabled. Two ways to log in:
   - Interactive (one-shot): call `synology_login` with an `otp_code` argument. DSM issues a device token on success, but the tool never returns, logs, or persists it (credential-handling policy) — there's no way to retrieve it from this call, so don't retry expecting one. Every future interactive login needs a fresh OTP code.
   - Persistent: store `device_id` (long-lived trusted-device token) per-NAS in `settings.json`. Auto-login then skips OTP, and silent re-login after DSM error 119 also uses the device token. When `device_id` is set, `otp_code` is ignored.
   For `.env` legacy single-NAS, `SYNOLOGY_OTP_CODE` is honored as a one-shot code on first login; for ongoing reuse, migrate to `settings.json`.
 - **Session expiry**: long-idle sessions can be invalidated by DSM. If a tool returns a session error, re-running after a `synology_login` usually fixes it. Don't loop on retry — diagnose with `synology_status` first.
-- **Stale `secrets.json` references**: some tool descriptions still say "from secrets.json". The actual file is `settings.json`. This is a docs bug in the MCP, not a config you need to recreate.
+- **Old `secrets.json` wording**: older builds of the MCP said "from secrets.json" in some tool descriptions, and a `synology_list_nas` message told users to create `~/.config/synology-mcp/secrets.json`. The actual file has always been `settings.json`; there is nothing to recreate.
 
 ## Workflow examples
 

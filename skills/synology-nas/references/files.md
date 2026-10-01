@@ -17,6 +17,8 @@
 
 All accept the optional `nas_name` / `base_url` target.
 
+**Restricted mode** (the default) offers only `list_shares`, `list_directory`, `get_file_info`, `get_file_content` and `search_files`. `create_file`, `create_directory`, `rename_file`, `move_file` and `delete` are hidden until the user sets `RESTRICTED_MODE=false`.
+
 ## Path conventions
 
 - Every path **must start with `/`**. Relative paths are rejected.
@@ -46,7 +48,7 @@ create_directory(folder_path="/volume1/projects", name="2026/q2/budgets", force_
 
 ### Reading file content
 
-`get_file_content` returns the file bytes. For large files this is wasteful; use `get_file_info` first if the user only wants metadata (size, mtime). Don't dump file content to chat unless the user asked to see it.
+`get_file_content` returns the file as text. It refuses files larger than the server's `MAX_FILE_CONTENT_SIZE` (1,000,000 bytes unless the user changed it) with an error, because file contents are sent on to the AI provider — don't retry, tell the user. Use `get_file_info` first if the user only wants metadata (size, mtime). Don't dump file content to chat unless the user asked to see it.
 
 ### Move vs. rename
 
@@ -56,6 +58,9 @@ create_directory(folder_path="/volume1/projects", name="2026/q2/budgets", force_
 ## Gotchas
 
 - **`delete` is recursive on directories.** It auto-detects file vs. directory. Confirm with the user before deleting anything that looks like a folder, especially if it's not empty.
+- **Missing paths are errors.** `get_file_info` and `get_file_content` on a path that doesn't exist fail with "File not found" rather than returning an empty file.
+- **Some paths are refused outright**: a volume root such as `/volume1` itself, `/homes` itself, and anything under `/var`, `/etc`, `/usr`, `/bin` or `/sbin`. Shares and folders underneath a volume are fine.
+- **Time limits.** `search_files` and `delete` stop waiting after 2 minutes, `move_file` after 1 minute, and the call returns an error saying it "timed out". A timeout doesn't prove nothing happened: DSM may still finish a `delete` or `move_file`, and if the error says the NAS "may have started it anyway", the request that starts the operation was given up on without an answer. Check with `get_file_info` / `list_directory` before retrying.
 - **Overwrite is opt-in.** `create_file` and `move_file` default `overwrite: false`. If the user says "replace the existing one", set `overwrite: true` explicitly — don't silently fail and retry.
 - **Trash isn't automatic.** `delete` is permanent unless DSM Recycle Bin is enabled on the share. Mention this if the user is deleting something irreplaceable.
 - **Case sensitivity** depends on the underlying filesystem (Btrfs/ext4 are case-sensitive, eCryptfs may differ). Don't assume.
