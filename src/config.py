@@ -518,13 +518,13 @@ class SynologyConfig:
         """Get connection config for a specific NAS (or the first/legacy one).
 
         Args:
-            nas_name: Key from secrets.json (e.g. 'nas1'). If None, returns
+            nas_name: Key from settings.json (e.g. 'nas1'). If None, returns
                       the first configured NAS or falls back to .env values.
         """
         if nas_name and nas_name in self.nas_configs:
             return self.nas_configs[nas_name]
 
-        # Return first available from secrets.json
+        # Return first available from settings.json
         if self.nas_configs:
             first = next(iter(self.nas_configs.values()))
             return first
@@ -548,7 +548,7 @@ class SynologyConfig:
         """Validate configuration and return list of errors."""
         errors = []
         if not self.has_synology_credentials():
-            errors.append("No Synology credentials found in secrets.json or .env")
+            errors.append("No Synology credentials found in settings.json or .env")
         if self.default_session_timeout < 60:
             errors.append("SESSION_TIMEOUT must be at least 60 seconds")
         return errors

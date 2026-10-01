@@ -551,6 +551,75 @@ async def test_no_tool_quotes_a_rejected_value_for_any_property(unrestricted, no
         handler.assert_not_awaited()
 
 
+# ---------------------------------------------------------------------------
+# The settings file is settings.json — nothing the server says may call it
+# anything else. The text used to say "secrets.json" (and told users to create
+# that file), but the server only ever reads settings.json.
+# ---------------------------------------------------------------------------
+
+
+def test_no_tool_definition_calls_the_settings_file_secrets_json(unrestricted):
+    server = _server()
+    definitions = [*server._get_tool_definitions(), *server._session_tool_definitions()]
+
+    stale = [
+        tool.name
+        for tool in definitions
+        if "secrets.json" in (tool.description or "") + json.dumps(tool.input_schema)
+    ]
+
+    assert stale == []
+    # ...and the two places that used to carry the stale name now say the right one.
+    by_name = {tool.name: tool for tool in definitions}
+    assert "settings.json" in by_name["synology_list_nas"].description
+    assert (
+        "settings.json"
+        in by_name["list_shares"].input_schema["properties"]["nas_name"]["description"]
+    )
+
+
+@pytest.mark.parametrize(
+    "synology_url,expected",
+    [
+        (
+            None,
+            "No NAS configured. Set up credentials in .env or ~/.config/synology-mcp/settings.json",
+        ),
+        (
+            "https://nas.example.test:5001",
+            "No multi-NAS configured. Add credentials to ~/.config/synology-mcp/settings.json "
+            "for multi-NAS support.",
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_list_nas_points_users_at_settings_json(unrestricted, synology_url, expected):
+    unrestricted.get_nas_names.return_value = []
+    unrestricted.synology_url = synology_url
+    unrestricted.synology_username = "admin"
+
+    result = await _server()._call_tool("synology_list_nas", {})
+
+    assert result.is_error is False
+    messages = [entry["message"] for entry in json.loads(_text(result)) if "message" in entry]
+    assert messages == [expected]
+    assert "secrets.json" not in _text(result)
+
+
+def test_the_source_never_calls_the_settings_file_secrets_json():
+    """The catch-all: tool text, messages, validation errors, comments."""
+    from pathlib import Path
+
+    src = Path(__file__).resolve().parent.parent / "src"
+    offenders = [
+        str(path.relative_to(src))
+        for path in sorted(src.rglob("*.py"))
+        if "secrets.json" in path.read_text(encoding="utf-8")
+    ]
+
+    assert offenders == []
+
+
 @pytest.mark.parametrize(
     "tool,arguments,expected",
     [

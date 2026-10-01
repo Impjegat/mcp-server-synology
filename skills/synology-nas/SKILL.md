@@ -139,4 +139,4 @@ Avoid:
 
 ## When tool descriptions disagree with this skill
 
-The MCP's own tool descriptions sometimes say "from secrets.json" — settings actually live at `~/.config/synology-mcp/settings.json`. Trust this skill over those stale strings. If the user reports an actual auth/config bug, point them at the project README's "Configuration Options" section and don't try to "fix" it from inside Claude.
+Settings live at `~/.config/synology-mcp/settings.json`. Older builds of the MCP called that file "secrets.json" in some tool descriptions and in a `synology_list_nas` message; if you see that, it is the same `settings.json` and the user does not need to create anything new. If the user reports an actual auth/config bug, point them at the project README's "Configuration Options" section and don't try to "fix" it from inside Claude.

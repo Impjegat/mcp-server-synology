@@ -72,7 +72,7 @@ The same file has a `"server"` block for the server's own options: `auto_login`,
   - Persistent: store `device_id` (long-lived trusted-device token) per-NAS in `settings.json`. Auto-login then skips OTP, and silent re-login after DSM error 119 also uses the device token. When `device_id` is set, `otp_code` is ignored.
   For `.env` legacy single-NAS, `SYNOLOGY_OTP_CODE` is honored as a one-shot code on first login; for ongoing reuse, migrate to `settings.json`.
 - **Session expiry**: long-idle sessions can be invalidated by DSM. If a tool returns a session error, re-running after a `synology_login` usually fixes it. Don't loop on retry — diagnose with `synology_status` first.
-- **Stale `secrets.json` references**: some tool descriptions still say "from secrets.json". The actual file is `settings.json`. This is a docs bug in the MCP, not a config you need to recreate.
+- **Old `secrets.json` wording**: older builds of the MCP said "from secrets.json" in some tool descriptions, and a `synology_list_nas` message told users to create `~/.config/synology-mcp/secrets.json`. The actual file has always been `settings.json`; there is nothing to recreate.
 
 ## Workflow examples
 

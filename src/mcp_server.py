@@ -888,7 +888,7 @@ class SynologyMCPServer:
 
         Accepts either:
           - base_url: a full URL like https://10.0.0.51:5001
-          - nas_name: a key from secrets.json like 'nas1', 'nas2'
+          - nas_name: a key from settings.json like 'nas1', 'nas2'
         Falls back to the first connected NAS if neither is provided.
         """
         # Try nas_name first
@@ -1141,14 +1141,14 @@ class SynologyMCPServer:
         return [types.TextContent(type="text", text="\n".join(status_info))]
 
     async def _handle_list_nas(self, arguments: dict) -> list[types.TextContent]:
-        """Handle listing configured NAS units from secrets.json."""
+        """Handle listing configured NAS units from settings.json."""
         nas_list = []
 
         # Get NAS names from config
         nas_names = config.get_nas_names()
 
         if not nas_names:
-            # Fall back to .env if no secrets.json
+            # Fall back to .env if no settings.json
             if config.synology_url:
                 nas_list.append(
                     {
@@ -1160,17 +1160,17 @@ class SynologyMCPServer:
                 )
                 nas_list.append(
                     {
-                        "message": "No multi-NAS configured. Add credentials to ~/.config/synology-mcp/secrets.json for multi-NAS support."
+                        "message": "No multi-NAS configured. Add credentials to ~/.config/synology-mcp/settings.json for multi-NAS support."
                     }
                 )
             else:
                 nas_list.append(
                     {
-                        "message": "No NAS configured. Set up credentials in .env or ~/.config/synology-mcp/secrets.json"
+                        "message": "No NAS configured. Set up credentials in .env or ~/.config/synology-mcp/settings.json"
                     }
                 )
         else:
-            # List each NAS from secrets.json
+            # List each NAS from settings.json
             for nas_name in nas_names:
                 nas_cfg = config.get_synology_config(nas_name)
                 url = nas_cfg.get("base_url", "unknown")
@@ -1684,7 +1684,7 @@ class SynologyMCPServer:
         target = {
             "nas_name": {
                 "type": "string",
-                "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')",
+                "description": "NAS identifier from settings.json (e.g. 'nas1', 'nas2')",
             },
             "base_url": {
                 "type": "string",
@@ -2014,7 +2014,7 @@ class SynologyMCPServer:
             ),
             types.Tool(
                 name="synology_list_nas",
-                description="List all configured NAS units from secrets.json. Returns NAS names, URLs, and connection status.",
+                description="List all configured NAS units from settings.json. Returns NAS names, URLs, and connection status.",
                 inputSchema={"type": "object", "properties": {}, "required": []},
             ),
             types.Tool(
@@ -2025,7 +2025,7 @@ class SynologyMCPServer:
                     "properties": {
                         "nas_name": {
                             "type": "string",
-                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')",
+                            "description": "NAS identifier from settings.json (e.g. 'nas1', 'nas2')",
                         },
                         "base_url": {
                             "type": "string",
@@ -2043,7 +2043,7 @@ class SynologyMCPServer:
                     "properties": {
                         "nas_name": {
                             "type": "string",
-                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')",
+                            "description": "NAS identifier from settings.json (e.g. 'nas1', 'nas2')",
                         },
                         "base_url": {
                             "type": "string",
@@ -2065,7 +2065,7 @@ class SynologyMCPServer:
                     "properties": {
                         "nas_name": {
                             "type": "string",
-                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')",
+                            "description": "NAS identifier from settings.json (e.g. 'nas1', 'nas2')",
                         },
                         "base_url": {
                             "type": "string",
@@ -2087,7 +2087,7 @@ class SynologyMCPServer:
                     "properties": {
                         "nas_name": {
                             "type": "string",
-                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')",
+                            "description": "NAS identifier from settings.json (e.g. 'nas1', 'nas2')",
                         },
                         "base_url": {
                             "type": "string",
@@ -2113,7 +2113,7 @@ class SynologyMCPServer:
                     "properties": {
                         "nas_name": {
                             "type": "string",
-                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')",
+                            "description": "NAS identifier from settings.json (e.g. 'nas1', 'nas2')",
                         },
                         "base_url": {
                             "type": "string",
@@ -2132,7 +2132,7 @@ class SynologyMCPServer:
                     "properties": {
                         "nas_name": {
                             "type": "string",
-                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')",
+                            "description": "NAS identifier from settings.json (e.g. 'nas1', 'nas2')",
                         },
                         "base_url": {
                             "type": "string",
@@ -2158,7 +2158,7 @@ class SynologyMCPServer:
                     "properties": {
                         "nas_name": {
                             "type": "string",
-                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')",
+                            "description": "NAS identifier from settings.json (e.g. 'nas1', 'nas2')",
                         },
                         "base_url": {
                             "type": "string",
@@ -2188,7 +2188,7 @@ class SynologyMCPServer:
                     "properties": {
                         "nas_name": {
                             "type": "string",
-                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')",
+                            "description": "NAS identifier from settings.json (e.g. 'nas1', 'nas2')",
                         },
                         "base_url": {
                             "type": "string",
@@ -2218,7 +2218,7 @@ class SynologyMCPServer:
                     "properties": {
                         "nas_name": {
                             "type": "string",
-                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')",
+                            "description": "NAS identifier from settings.json (e.g. 'nas1', 'nas2')",
                         },
                         "base_url": {
                             "type": "string",
@@ -2248,7 +2248,7 @@ class SynologyMCPServer:
                     "properties": {
                         "nas_name": {
                             "type": "string",
-                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')",
+                            "description": "NAS identifier from settings.json (e.g. 'nas1', 'nas2')",
                         },
                         "base_url": {
                             "type": "string",
@@ -2271,7 +2271,7 @@ class SynologyMCPServer:
                     "properties": {
                         "nas_name": {
                             "type": "string",
-                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')",
+                            "description": "NAS identifier from settings.json (e.g. 'nas1', 'nas2')",
                         },
                         "base_url": {
                             "type": "string",
@@ -2289,7 +2289,7 @@ class SynologyMCPServer:
                     "properties": {
                         "nas_name": {
                             "type": "string",
-                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')",
+                            "description": "NAS identifier from settings.json (e.g. 'nas1', 'nas2')",
                         },
                         "base_url": {
                             "type": "string",
@@ -2315,7 +2315,7 @@ class SynologyMCPServer:
                     "properties": {
                         "nas_name": {
                             "type": "string",
-                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')",
+                            "description": "NAS identifier from settings.json (e.g. 'nas1', 'nas2')",
                         },
                         "base_url": {
                             "type": "string",
@@ -2346,7 +2346,7 @@ class SynologyMCPServer:
                     "properties": {
                         "nas_name": {
                             "type": "string",
-                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')",
+                            "description": "NAS identifier from settings.json (e.g. 'nas1', 'nas2')",
                         },
                         "base_url": {
                             "type": "string",
@@ -2369,7 +2369,7 @@ class SynologyMCPServer:
                     "properties": {
                         "nas_name": {
                             "type": "string",
-                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')",
+                            "description": "NAS identifier from settings.json (e.g. 'nas1', 'nas2')",
                         },
                         "base_url": {
                             "type": "string",
@@ -2392,7 +2392,7 @@ class SynologyMCPServer:
                     "properties": {
                         "nas_name": {
                             "type": "string",
-                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')",
+                            "description": "NAS identifier from settings.json (e.g. 'nas1', 'nas2')",
                         },
                         "base_url": {
                             "type": "string",
@@ -2419,7 +2419,7 @@ class SynologyMCPServer:
                     "properties": {
                         "nas_name": {
                             "type": "string",
-                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')",
+                            "description": "NAS identifier from settings.json (e.g. 'nas1', 'nas2')",
                         },
                         "base_url": {
                             "type": "string",
@@ -2437,7 +2437,7 @@ class SynologyMCPServer:
                     "properties": {
                         "nas_name": {
                             "type": "string",
-                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')",
+                            "description": "NAS identifier from settings.json (e.g. 'nas1', 'nas2')",
                         },
                         "base_url": {
                             "type": "string",
@@ -2462,7 +2462,7 @@ class SynologyMCPServer:
                     "properties": {
                         "nas_name": {
                             "type": "string",
-                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')",
+                            "description": "NAS identifier from settings.json (e.g. 'nas1', 'nas2')",
                         },
                         "base_url": {
                             "type": "string",
@@ -2480,7 +2480,7 @@ class SynologyMCPServer:
                     "properties": {
                         "nas_name": {
                             "type": "string",
-                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')",
+                            "description": "NAS identifier from settings.json (e.g. 'nas1', 'nas2')",
                         },
                         "base_url": {
                             "type": "string",
@@ -2498,7 +2498,7 @@ class SynologyMCPServer:
                     "properties": {
                         "nas_name": {
                             "type": "string",
-                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')",
+                            "description": "NAS identifier from settings.json (e.g. 'nas1', 'nas2')",
                         },
                         "base_url": {
                             "type": "string",
@@ -2516,7 +2516,7 @@ class SynologyMCPServer:
                     "properties": {
                         "nas_name": {
                             "type": "string",
-                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')",
+                            "description": "NAS identifier from settings.json (e.g. 'nas1', 'nas2')",
                         },
                         "base_url": {
                             "type": "string",
@@ -2538,7 +2538,7 @@ class SynologyMCPServer:
                     "properties": {
                         "nas_name": {
                             "type": "string",
-                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')",
+                            "description": "NAS identifier from settings.json (e.g. 'nas1', 'nas2')",
                         },
                         "base_url": {
                             "type": "string",
@@ -2556,7 +2556,7 @@ class SynologyMCPServer:
                     "properties": {
                         "nas_name": {
                             "type": "string",
-                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')",
+                            "description": "NAS identifier from settings.json (e.g. 'nas1', 'nas2')",
                         },
                         "base_url": {
                             "type": "string",
@@ -2574,7 +2574,7 @@ class SynologyMCPServer:
                     "properties": {
                         "nas_name": {
                             "type": "string",
-                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')",
+                            "description": "NAS identifier from settings.json (e.g. 'nas1', 'nas2')",
                         },
                         "base_url": {
                             "type": "string",
@@ -2592,7 +2592,7 @@ class SynologyMCPServer:
                     "properties": {
                         "nas_name": {
                             "type": "string",
-                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')",
+                            "description": "NAS identifier from settings.json (e.g. 'nas1', 'nas2')",
                         },
                         "base_url": {
                             "type": "string",
@@ -2610,7 +2610,7 @@ class SynologyMCPServer:
                     "properties": {
                         "nas_name": {
                             "type": "string",
-                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')",
+                            "description": "NAS identifier from settings.json (e.g. 'nas1', 'nas2')",
                         },
                         "base_url": {
                             "type": "string",
@@ -2628,7 +2628,7 @@ class SynologyMCPServer:
                     "properties": {
                         "nas_name": {
                             "type": "string",
-                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')",
+                            "description": "NAS identifier from settings.json (e.g. 'nas1', 'nas2')",
                         },
                         "base_url": {
                             "type": "string",
@@ -2666,7 +2666,7 @@ class SynologyMCPServer:
                     "properties": {
                         "nas_name": {
                             "type": "string",
-                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')",
+                            "description": "NAS identifier from settings.json (e.g. 'nas1', 'nas2')",
                         },
                         "base_url": {
                             "type": "string",
@@ -2691,7 +2691,7 @@ class SynologyMCPServer:
                     "properties": {
                         "nas_name": {
                             "type": "string",
-                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')",
+                            "description": "NAS identifier from settings.json (e.g. 'nas1', 'nas2')",
                         },
                         "base_url": {
                             "type": "string",
@@ -2709,7 +2709,7 @@ class SynologyMCPServer:
                     "properties": {
                         "nas_name": {
                             "type": "string",
-                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')",
+                            "description": "NAS identifier from settings.json (e.g. 'nas1', 'nas2')",
                         },
                         "base_url": {
                             "type": "string",
@@ -2735,7 +2735,7 @@ class SynologyMCPServer:
                     "properties": {
                         "nas_name": {
                             "type": "string",
-                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')",
+                            "description": "NAS identifier from settings.json (e.g. 'nas1', 'nas2')",
                         },
                         "base_url": {
                             "type": "string",
@@ -2753,7 +2753,7 @@ class SynologyMCPServer:
                     "properties": {
                         "nas_name": {
                             "type": "string",
-                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')",
+                            "description": "NAS identifier from settings.json (e.g. 'nas1', 'nas2')",
                         },
                         "base_url": {
                             "type": "string",
@@ -2794,7 +2794,7 @@ class SynologyMCPServer:
                     "properties": {
                         "nas_name": {
                             "type": "string",
-                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')",
+                            "description": "NAS identifier from settings.json (e.g. 'nas1', 'nas2')",
                         },
                         "base_url": {
                             "type": "string",
@@ -2835,7 +2835,7 @@ class SynologyMCPServer:
                     "properties": {
                         "nas_name": {
                             "type": "string",
-                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')",
+                            "description": "NAS identifier from settings.json (e.g. 'nas1', 'nas2')",
                         },
                         "base_url": {
                             "type": "string",
@@ -2853,7 +2853,7 @@ class SynologyMCPServer:
                     "properties": {
                         "nas_name": {
                             "type": "string",
-                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')",
+                            "description": "NAS identifier from settings.json (e.g. 'nas1', 'nas2')",
                         },
                         "base_url": {
                             "type": "string",
@@ -2872,7 +2872,7 @@ class SynologyMCPServer:
                     "properties": {
                         "nas_name": {
                             "type": "string",
-                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')",
+                            "description": "NAS identifier from settings.json (e.g. 'nas1', 'nas2')",
                         },
                         "base_url": {
                             "type": "string",
@@ -2908,7 +2908,7 @@ class SynologyMCPServer:
                     "properties": {
                         "nas_name": {
                             "type": "string",
-                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')",
+                            "description": "NAS identifier from settings.json (e.g. 'nas1', 'nas2')",
                         },
                         "base_url": {
                             "type": "string",
@@ -2939,7 +2939,7 @@ class SynologyMCPServer:
                     "properties": {
                         "nas_name": {
                             "type": "string",
-                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')",
+                            "description": "NAS identifier from settings.json (e.g. 'nas1', 'nas2')",
                         },
                         "base_url": {
                             "type": "string",
@@ -2958,7 +2958,7 @@ class SynologyMCPServer:
                     "properties": {
                         "nas_name": {
                             "type": "string",
-                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')",
+                            "description": "NAS identifier from settings.json (e.g. 'nas1', 'nas2')",
                         },
                         "base_url": {
                             "type": "string",
@@ -2976,7 +2976,7 @@ class SynologyMCPServer:
                     "properties": {
                         "nas_name": {
                             "type": "string",
-                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')",
+                            "description": "NAS identifier from settings.json (e.g. 'nas1', 'nas2')",
                         },
                         "base_url": {
                             "type": "string",
@@ -2995,7 +2995,7 @@ class SynologyMCPServer:
                     "properties": {
                         "nas_name": {
                             "type": "string",
-                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')",
+                            "description": "NAS identifier from settings.json (e.g. 'nas1', 'nas2')",
                         },
                         "base_url": {
                             "type": "string",
@@ -3019,7 +3019,7 @@ class SynologyMCPServer:
                     "properties": {
                         "nas_name": {
                             "type": "string",
-                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')",
+                            "description": "NAS identifier from settings.json (e.g. 'nas1', 'nas2')",
                         },
                         "base_url": {
                             "type": "string",
@@ -3046,7 +3046,7 @@ class SynologyMCPServer:
                     "properties": {
                         "nas_name": {
                             "type": "string",
-                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')",
+                            "description": "NAS identifier from settings.json (e.g. 'nas1', 'nas2')",
                         },
                         "base_url": {
                             "type": "string",
@@ -3068,7 +3068,7 @@ class SynologyMCPServer:
                     "properties": {
                         "nas_name": {
                             "type": "string",
-                            "description": "NAS identifier from secrets.json (e.g. 'nas1', 'nas2')",
+                            "description": "NAS identifier from settings.json (e.g. 'nas1', 'nas2')",
                         },
                         "base_url": {
                             "type": "string",

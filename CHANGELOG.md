@@ -33,6 +33,7 @@
   - Every error path is redacted — the message, the log line, and the DEBUG traceback (which is now redacted by the server itself before it is logged).
 
 ### Fixed
+- Tool descriptions and messages no longer call the settings file `secrets.json`. The server only ever reads `settings.json`, but the `nas_name` description of nearly every tool, the description of `synology_list_nas`, and the validation error for missing credentials said `secrets.json`, and two `synology_list_nas` messages told users to create `~/.config/synology-mcp/secrets.json`, a file that is never read.
 - `search_files` had no time limit at all and could poll an unresponsive NAS forever; `delete` and `move_file` counted only the time they spent sleeping between polls, so a slow NAS could stretch their limits to about an hour. All three now use a wall-clock deadline (see the time-limits entry above).
 - A JSON download bypassed the `get_file_content` size cap (the body was parsed before its size was checked), and a real `.json` file was mistaken for a DSM error and could not be read at all.
 - Starting a container from the Docker quick start did not pass `.env` to it, although the README said to create one.
