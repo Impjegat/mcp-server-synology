@@ -1,162 +1,90 @@
 # Synology MCP Server Tests
 
-Integration tests for each module of the Synology MCP Server.
+Two kinds of tests live here:
 
-## Quick Setup
+- **Offline tests** need no NAS. They mock the network, and a guard in `conftest.py` refuses any real outbound connection from them, so they cannot reach a NAS by accident. This is what CI runs, and almost everything is in this group.
+- **`real_nas` tests** talk to a real Synology NAS with real credentials. They are skipped when no credentials are configured.
 
-1. **Copy environment file:**
+## Quick start (offline)
+
+```bash
+pip install -r requirements.txt     # Python 3.10 or later; also installs pytest
+
+python -m pytest -m "not real_nas"
+```
+
+The suite does not read your `~/.config/synology-mcp/settings.json` or a local `.env`: `conftest.py` points `XDG_CONFIG_HOME` at a fresh temporary directory, and the config tests run from an empty one.
+
+## Running against a real NAS
+
+1. Copy the template and fill in your NAS details:
    ```bash
    cp env.example .env
    ```
-
-2. **Edit `.env` with your NAS details:**
    ```env
    SYNOLOGY_URL=https://your-nas-ip:5001
-   SYNOLOGY_USERNAME=your-username  
+   SYNOLOGY_USERNAME=your-username
    SYNOLOGY_PASSWORD=your-password
    ```
-
-3. **Install dependencies:**
+2. Run the `real_nas` tests:
    ```bash
-   pip install -r requirements.txt
+   python -m pytest -m real_nas
    ```
 
-4. **Run tests:**
-   ```bash
-   pytest
-   ```
-
-## Test Files
-
-### `test_auth.py` - Authentication Tests
-- ✅ **FileStation login/logout**
-- ✅ **Download Station login/logout** 
-- ✅ **API version fallback**
-- ✅ **Invalid credentials handling**
-- ✅ **Different session types**
-- ✅ **URL construction**
-
-### `test_download_station.py` - Download Station Tests  
-- ✅ **Connection and info**
-- ✅ **List current downloads**
-- ✅ **Download statistics**
-- ✅ **Destination validation**
-- ⚠️ **Create downloads** (destructive)
-- ✅ **Configuration**
-
-### `test_file_station.py` - File Station Tests
-- ✅ **List shares**
-- ✅ **Directory listing**
-- ✅ **File information**
-- 🔍 **File search** (slow)
-- ✅ **Path formatting**
-- ✅ **Error handling**
-
-## Test Commands
+Use a throwaway or dedicated account if you can. Tests marked `destructive` change state on the NAS (they create and remove Download Station tasks and change NFS settings), and tests marked `slow` run searches that can take a while:
 
 ```bash
-# Run all tests
-pytest
-
-# Run tests by module
-pytest tests/test_auth.py
-pytest tests/test_download_station.py
-pytest tests/test_file_station.py
-
-# Quick connectivity tests only
-pytest -k "connectivity"
-
-# Skip destructive tests (no download creation)
-pytest -m "not destructive"
-
-# Skip slow tests (no search operations)
-pytest -m "not slow"
-
-# Run with live output
-pytest -s -v
-
-# Run specific test
-pytest tests/test_auth.py::TestSynologyAuth::test_filestation_login_success
+python -m pytest -m "real_nas and not destructive"   # read-only against the NAS
+python -m pytest -m "real_nas and not slow"          # skip the searches
 ```
 
-## Expected Output
+## Test files
 
+| File | What it covers |
+|---|---|
+| `test_tool_calls.py` | How a tool call is reported: success versus `isError`, protocol errors, restricted-mode and invalid-argument refusals before any NAS request, and that no message, log line or result echoes a submitted credential |
+| `test_restricted_mode.py` | The tool registry, restricted-mode classification (and that discovery and dispatch agree), and the restricted `synology_login` check |
+| `test_stdio_protocol.py` | End to end: starts the real server over stdio and speaks MCP to it, as Claude Desktop or Cursor would |
+| `test_redact.py` | Secret redaction, used on tool responses and the log filter |
+| `test_config.py` | `.env` and `settings.json` loading, HTTPS-only validation, `VERIFY_SSL`, restricted-mode parsing, file permissions |
+| `test_auth.py` | Login, logout, 2FA and API-version fallback (partly `real_nas`) |
+| `test_logout.py` | Logout evicts every cached service instance |
+| `test_file_station.py` | File Station: paths and critical-path denylist, size cap, time limits and deadlines (offline), plus `real_nas` operations |
+| `test_download_station.py` | Download Station (mostly `real_nas`; creating tasks is `destructive`) |
+| `test_health.py` | Health monitoring, including how the summary reports partial and failed checks (partly `real_nas`) |
+| `test_container_manager.py` | Container Manager module |
+| `test_nfs.py` | NFS and shared-folder management (partly `real_nas`; changing settings is `destructive`) |
+| `test_network_guard.py` | The socket guard in `conftest.py` that keeps offline tests off the network |
+
+`conftest.py` holds the shared fixtures and the guard; `socket_guard.py` is the guard's address classification, kept separate so the guard itself can be tested.
+
+## The stdio end-to-end test
+
+`test_stdio_protocol.py` starts the server as `python main.py` with no NAS configured and restricted mode on, in a temporary config directory. Setting `MCP_STDIO_SERVER_COMMAND` (a JSON array of strings) replaces that command, which is how CI runs the same test against the Docker image through the `docker compose run --rm` command the README gives MCP clients:
+
+```bash
+docker compose build
+MCP_STDIO_SERVER_COMMAND='["docker","compose","run","--rm","-e","AUTO_LOGIN","-e","RESTRICTED_MODE","-e","LOG_LEVEL","synology-mcp"]' \
+  python -m pytest tests/test_stdio_protocol.py
 ```
-🏠 SYNOLOGY DOWNLOAD STATION INTEGRATION TESTS
-============================================================
-📡 Target NAS: https://192.168.1.100:5001
-👤 Username: admin
-🔒 SSL Verify: False
-============================================================
 
-tests/test_auth.py::test_auth_connectivity 
-🔗 Auth service reachable: https://192.168.1.100:5001/webapi/auth.cgi
-✅ Auth service responding (test credentials rejected as expected)
-PASSED
+One test in it needs DEBUG logging and is skipped when the command is overridden.
 
-tests/test_auth.py::TestSynologyAuth::test_filestation_login_success 
-✅ FileStation login successful
-   Session ID: 1a2b3c4d5e...
-✅ Logout result: True
-PASSED
+## Markers
 
-tests/test_download_station.py::test_basic_connectivity 
-🔗 Connected to Download Station: 3.8.16-3566
-PASSED
+| Marker | Meaning |
+|---|---|
+| `real_nas` | Needs a real NAS and credentials (excluded by `-m "not real_nas"`) |
+| `destructive` | Modifies state on the NAS |
+| `slow` | May take several seconds, for example searches |
 
-tests/test_file_station.py::test_filestation_connectivity 
-🔗 FileStation connected: 3 shares available
-PASSED
+## Handy commands
+
+```bash
+python -m pytest -m "not real_nas" -q        # the offline suite, as CI runs it
+python -m pytest tests/test_tool_calls.py    # one module
+python -m pytest -k "restricted"             # by name
+python -m pytest -s -v                       # live output
 ```
 
-## Troubleshooting
-
-**"No credentials found"**
-- Check `.env` file exists and has correct values
-- Verify variable names match `env.example`
-
-**"Authentication failed"**  
-- Verify NAS IP/port is correct
-- Check username/password
-- Ensure services are enabled
-
-**"FileStation/Download Station not accessible"**
-- User may not have required permissions
-- Services may be disabled in DSM
-- Network connectivity issues
-
-## Test Organization
-
-Each test file focuses on a specific module:
-
-- **Authentication** (`test_auth.py`) - Core login/logout functionality
-- **Download Station** (`test_download_station.py`) - Torrent/download management  
-- **File Station** (`test_file_station.py`) - File/directory operations
-
-## Test Markers
-
-- `@pytest.mark.real_nas` - Requires real NAS connection
-- `@pytest.mark.destructive` - May create/modify data
-- `@pytest.mark.slow` - Takes several seconds to complete
-
-## Adding New Tests
-
-When adding tests for new functionality:
-
-1. Add to the appropriate test file by module
-2. Use proper markers and error handling
-3. Include helpful print statements for successful operations
-4. Handle expected failures gracefully with `pytest.skip()`
-
-Example:
-```python
-def test_new_feature(self, download_station):
-    """Test description."""
-    try:
-        result = download_station.new_method()
-        assert result is not None
-        print("✅ New feature works")
-    except Exception as e:
-        if "permission" in str(e).lower():
-            pytest.skip(f"Permission issue (expected): {e}")
-        raise
+CI also runs `ruff check src/ main.py tests/` and `black --check src main.py tests`.

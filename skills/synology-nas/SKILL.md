@@ -17,6 +17,21 @@ Three things shape almost every interaction:
 
 Once those three are settled, the rest is picking the right domain.
 
+## Restricted mode (the default)
+
+The server ships in **restricted mode**: only browsing and monitoring tools are offered. File reads, health, and listing/inspection of downloads, containers and NFS shares work; every tool that *changes* something (creating, deleting, moving or renaming files, Download Station tasks, container/project/image/network changes, creating shares, NFS changes) is missing from the tool list, and so are **all** the user/group tools. Calling a hidden tool by name is refused with an error that says the server is in restricted mode.
+
+- Look at the tools you actually have before planning a write. If the one you need isn't there, or a call is refused for restricted mode, **tell the user** the server is read-only and that enabling changes means setting `RESTRICTED_MODE=false` (or `"restricted_mode": false` under `"server"` in settings.json) and restarting it. Don't retry, don't look for a workaround with another tool, and don't change the setting yourself.
+- While restricted, `synology_login` only accepts a `base_url` for a NAS that is already configured.
+- Each reference below says which of its tools survive restricted mode.
+
+## Tool results and errors
+
+- A failed call returns a result flagged as an error (`isError: true`) whose text says why — a failed login, a DSM error, a missing path or session, a restricted-mode refusal, an exception. Read the text; don't assume success because you got text back.
+- An invalid argument is refused before anything reaches the NAS, with a message like `Invalid arguments for synology_login: password must be of type 'string'`. It names the field and the expected type but never repeats the value you sent. Fix the argument; don't retry the same call.
+- An unknown tool name or a malformed request is a protocol error rather than a tool result.
+- `search_files`, `delete` and `move_file` are time-limited (about 2 minutes, 2 minutes and 1 minute). If one times out, the NAS may still have done the work — see [references/files.md](references/files.md) before retrying.
+
 ## Always start here
 
 Before any operation, run discovery — it's two cheap calls and answers "which NAS?" and "am I logged in?":
@@ -61,7 +76,7 @@ If the user asks "is the NAS healthy?" or "give me a system report," call `synol
 
 ### Read-only first
 
-When in doubt about a destructive action, list/inspect first:
+When in doubt about a destructive action (in restricted mode these tools aren't available at all), list/inspect first:
 
 - Before `delete`: `get_file_info` to confirm the path resolves to what you think.
 - Before `ds_delete_tasks`: `ds_list_tasks` to confirm the IDs.
@@ -116,7 +131,7 @@ User says: "Check on my NAS — anything I should worry about?"
 Good response:
 1. `synology_list_nas` → confirm which NAS (or that there's only one).
 2. `synology_health_summary` → one call, full picture.
-3. Read the result, surface anything red (degraded volumes, failing disks, high temps), and tell the user.
+3. Read the result. Check its `status` first: if it is `partial`, say which checks failed (`failed_checks`) instead of treating the missing sections as fine. Then surface anything red (degraded volumes, failing disks, high temps), and tell the user.
 
 Avoid:
 1. `synology_login` (unnecessary).

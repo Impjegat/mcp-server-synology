@@ -15,6 +15,8 @@
 
 All accept `nas_name` / `base_url` for targeting.
 
+**Restricted mode** (the default) offers only `ds_get_info`, `ds_list_tasks`, `ds_get_statistics` and `ds_list_downloaded_files`. `ds_create_task`, `ds_pause_tasks`, `ds_resume_tasks` and `ds_delete_tasks` are hidden until the user sets `RESTRICTED_MODE=false`.
+
 ## Task lifecycle
 
 1. **Create** — `ds_create_task` with a URI (HTTP URL, magnet link, `https://…/foo.torrent`). Optionally specify `destination` (a folder path under `/volume1/`).

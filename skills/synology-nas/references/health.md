@@ -4,7 +4,7 @@
 
 | Tool | What it returns |
 |------|-----------------|
-| `synology_health_summary` | **Aggregate**: system info + utilization + disk health + volume status in one call |
+| `synology_health_summary` | **Aggregate**: system info, utilization, disks, volumes, storage pools, network and UPS in one call, with a `status` saying how complete it is |
 | `synology_system_info` | Model, serial, DSM version, uptime, system temp |
 | `synology_utilization` | Real-time CPU, memory, swap, disk I/O |
 | `synology_disk_health` | Per-disk: SMART status, model, temp, size |
@@ -16,7 +16,7 @@
 | `synology_services` | Installed packages + running status |
 | `synology_system_log` | Recent system log entries |
 
-All accept `nas_name` / `base_url`.
+All accept `nas_name` / `base_url`, and all of them stay available in restricted mode.
 
 ## The aggregate-first rule
 
@@ -27,17 +27,24 @@ If the user asks anything like:
 - "Give me a status report"
 - "Check the NAS"
 
-→ call `synology_health_summary` once. It returns system info, utilization, disk health, and volume status in a single payload. Anything finer is a follow-up call only if the summary surfaces something interesting.
+→ call `synology_health_summary` once. It returns system info, utilization, disks, volumes, storage pools, network and UPS in a single payload. Anything finer is a follow-up call only if the summary surfaces something interesting.
 
 Use the individual tools when:
 
 - The user asked a specific question (e.g., "what's the CPU at?" → `synology_utilization`).
 - You're drilling into something the summary flagged (e.g., disk shows warning → `synology_disk_smart` for that disk).
-- The summary tool isn't enough — `storage_pool`, `network`, `ups`, `services`, `system_log` aren't included in the summary.
+- The summary tool isn't enough — `services` and `system_log` aren't included in it, and the individual tools give more detail than its sections.
 
 ## Reading the summary
 
-The summary returns four sections. When presenting to a user, scan for these red flags first:
+The summary returns system, utilization, disks, volumes, storage pools, network and UPS sections, plus a `status`:
+
+- **`complete`** — every check ran.
+- **`partial`** — some checks could not be completed. `failed_checks` names each one with DSM's error, and `data` holds only the rest. **A partial summary is not a clean bill of health**: report the failed checks, and don't treat a missing section as fine. Re-run the individual tool (e.g. `synology_disk_health`) to see the error.
+- If **every** check fails, the call returns an error instead (typically the NAS is unreachable or the session is bad).
+- A UPS that DSM reports as not available on this NAS (API error 102–104) is listed under `unavailable_checks`, and the summary can still be `complete`.
+
+When presenting to a user, scan for these red flags first:
 
 - **System**: temperature unusually high (CPU > 80°C, system > 60°C is worth flagging), uptime extremely short (recent unplanned reboot?).
 - **Utilization**: CPU sustained >80%, memory near 100% with high swap, disk I/O wait time elevated.
@@ -80,7 +87,7 @@ Don't speculate beyond the data. If a disk is degraded, recommend the user back 
 - **Don't fan out by default.** Calling 4 individual health tools when `synology_health_summary` would have done is wasteful and slow.
 - **Don't speculate on temperature thresholds.** Drive-specific thresholds vary (a WD Red at 50°C is fine; a Seagate Ironwolf at 60°C might be flagged). Report the number and DSM's own status field; let the user decide whether it's concerning unless the value is clearly extreme.
 - **`synology_system_log` can be large.** Default limits apply, but explicitly summarize for the user — don't dump raw logs to chat.
-- **UPS not present**: `synology_ups` will return an empty/no-device response on NASes without a UPS attached. Don't treat that as an error.
+- **UPS not present**: `synology_ups` will return an empty/no-device response on NASes without a UPS attached, and in the summary a UPS the NAS doesn't offer appears under `unavailable_checks`. Don't treat either as a problem.
 
 ## Examples
 
@@ -90,7 +97,7 @@ Don't speculate beyond the data. If a disk is degraded, recommend the user back 
 synology_health_summary
 ```
 
-Then summarize: green check on system/CPU/memory/disks/volumes, or call out anything not normal.
+Check `status` first, then summarize: green check on system/CPU/memory/disks/volumes, or call out anything not normal and any `failed_checks`.
 
 ### "One disk is yellow — what's wrong?"
 

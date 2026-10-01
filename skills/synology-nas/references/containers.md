@@ -19,6 +19,8 @@
 
 All accept `nas_name` / `base_url`.
 
+**Restricted mode** (the default) offers only listing and inspection: `synology_container_list`, `_get`, `_logs`, `_resource`, `_project_list`, `_project_get`, `_image_list`, `_image_get`, `_registry_list`, `_registry_search`, `_registry_tags`, `_network_list` and `_network_get`. Starting, stopping, restarting or deleting containers, every project change (create, update, start, stop, restart, build, clean, delete), image delete and pull, registry download, and network create/delete are hidden until the user sets `RESTRICTED_MODE=false`.
+
 ## Workflow patterns
 
 ### Inspect before mutating
