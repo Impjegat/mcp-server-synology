@@ -1,10 +1,12 @@
 # src/synology_filestation.py - Synology FileStation API utilities
 
+import contextvars
 import json
 import os
 import posixpath
 import re
 import tempfile
+import threading
 import time
 import unicodedata
 from typing import Any, Dict, List, Optional
@@ -27,6 +29,29 @@ _CRITICAL_PATHS_EXACT = ("/homes",)
 # True OS-level directories have no legitimate DSM share overlap at all, so
 # every path under them is blocked too (e.g. /etc/passwd, not just /etc).
 _CRITICAL_PATHS_PREFIX = ("/var", "/etc", "/usr", "/bin", "/sbin")
+
+# Time limits for the operations that start a DSM task and poll it (search,
+# delete, move). Each limit is one wall-clock budget that covers the request
+# that starts the task and the polling that follows; every request made inside
+# it is cut off at whatever time is left (see _make_request's `deadline`).
+# Fetching a finished search's results, and stopping the task during cleanup,
+# are not inside that budget: each gets its own short allowance below, which
+# is why the worst case is a little more than the stated limit —
+#   search_files  _SEARCH_LIMIT + _RESULTS_TIMEOUT + _CLEANUP_TIMEOUT = 140 s
+#   delete        _DELETE_LIMIT + _CLEANUP_TIMEOUT                    = 125 s
+#   move_file     _MOVE_LIMIT + _CLEANUP_TIMEOUT                      =  65 s
+_SEARCH_LIMIT = 120
+_DELETE_LIMIT = 120
+_MOVE_LIMIT = 60
+_REQUEST_TIMEOUT = 15  # a single request, when no deadline is bounding it
+_RESULTS_TIMEOUT = 15  # fetching a finished search's results
+_CLEANUP_TIMEOUT = 5  # stopping a task that is abandoned or failed
+_POLL_INTERVAL = 0.5
+
+
+class _DeadlineError(Exception):
+    """A time budget ran out. Raised by `_make_request` and `_wait_for_task`;
+    each operation turns it into its own "timed out after N seconds" error."""
 
 
 def _decode_downloaded_text(content: bytes, declared_encoding: Optional[str]) -> str:
@@ -115,9 +140,26 @@ class SynologyFileStation:
         return redact(message, live_secrets=[self.session_id, self.syno_token])
 
     def _make_request(
-        self, api: str, version: str, method: str, use_post: bool = False, **params
+        self,
+        api: str,
+        version: str,
+        method: str,
+        use_post: bool = False,
+        *,
+        deadline: Optional[float] = None,
+        **params,
     ) -> Dict[str, Any]:
-        """Make a request to Synology API."""
+        """Make a request to Synology API.
+
+        `deadline` is a `time.monotonic()` timestamp the request must not
+        outlive. Without one the request is limited only by its own timeout
+        (`_REQUEST_TIMEOUT`). With one, the request is given at most the time
+        that is left: it is not sent at all if none is, its timeout is capped
+        to what remains, and — because a `requests` timeout limits each
+        connect and each read, not the whole exchange, so a server that keeps
+        trickling bytes can outlast it — it is also abandoned outright when the
+        time is up. Running out of time raises `_DeadlineError`.
+        """
         request_params = {
             "api": api,
             "version": version,
@@ -126,14 +168,22 @@ class SynologyFileStation:
             **params,
         }
 
-        try:
+        timeout: float = _REQUEST_TIMEOUT
+        remaining: Optional[float] = None
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise _DeadlineError()
+            timeout = min(_REQUEST_TIMEOUT, remaining)
+
+        def send() -> Any:
             if use_post:
                 response = requests.post(
                     self.api_url,
                     data=request_params,
                     headers=self._csrf_headers(post=True),
                     verify=self.verify_ssl,
-                    timeout=15,
+                    timeout=timeout,
                 )
             else:
                 response = requests.get(
@@ -141,11 +191,22 @@ class SynologyFileStation:
                     params=request_params,
                     headers=self._csrf_headers(post=False) or None,
                     verify=self.verify_ssl,
-                    timeout=15,
+                    timeout=timeout,
                 )
             response.raise_for_status()
-            data = response.json()
+            return response.json()
+
+        try:
+            data = send() if remaining is None else self._run_within(send, remaining)
         except requests.RequestException as e:
+            if (
+                isinstance(e, requests.Timeout)
+                and remaining is not None
+                and remaining < _REQUEST_TIMEOUT
+            ):
+                # The timeout that fired was the one cut down to the time left,
+                # so it is the deadline arriving, not a slow NAS.
+                raise _DeadlineError() from None
             # This GET request's URL carries `_sid=<session_id>` directly, and
             # `str(e)` on a RequestException commonly embeds the full URL —
             # redact before it propagates. Backstop; the tool-response
@@ -172,6 +233,73 @@ class SynologyFileStation:
             raise Exception(error_message)
 
         return data.get("data", {})
+
+    @staticmethod
+    def _run_within(func, seconds: float) -> Any:
+        """Call `func()` and return its result, or raise `_DeadlineError` if
+        it has not finished within `seconds`.
+
+        `func` runs in a daemon thread, so giving up on it cannot hold up the
+        caller or the process's exit. The abandoned request's result is
+        discarded, and the `requests` timeout inside it still ends it in the
+        background. Most such requests are reads (a task's status, a listing,
+        a stop), but the request that *starts* a search, delete or move is
+        not: the NAS may act on it even though no answer — and so no task id —
+        ever reaches us. Callers that start something destructive therefore
+        say so when that request is abandoned (see `delete` and `move_file`).
+        The caller's context (which carries the secrets being redacted from
+        log output) is copied into the thread.
+        """
+        outcome: Dict[str, Any] = {}
+
+        def target() -> None:
+            try:
+                outcome["value"] = func()
+            except Exception as e:  # handed back to the caller's thread below
+                outcome["error"] = e
+
+        thread = threading.Thread(
+            target=contextvars.copy_context().run, args=(target,), daemon=True
+        )
+        thread.start()
+        thread.join(seconds)
+        if thread.is_alive():
+            raise _DeadlineError()
+        if "error" in outcome:
+            raise outcome["error"]
+        return outcome["value"]
+
+    def _wait_for_task(self, api: str, version: str, task_id: str, deadline: float) -> Dict:
+        """Poll a DSM task's status until it reports `finished`, and return that
+        status. Raises `_DeadlineError` once `deadline` (a `time.monotonic()`
+        timestamp) passes: every status request is cut off at the time left,
+        and the deadline is checked again after each response, so the poll
+        loop never starts another round it has no time for."""
+        while True:
+            status_data = self._make_request(
+                api, version, "status", taskid=task_id, deadline=deadline
+            )
+            if status_data.get("finished"):
+                return status_data
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise _DeadlineError()
+            time.sleep(min(_POLL_INTERVAL, remaining))
+
+    def _stop_task(self, api: str, version: str, task_id: str) -> None:
+        """Ask DSM to stop a task that is being abandoned or has failed. Bounded
+        by `_CLEANUP_TIMEOUT`, and any failure is ignored: this is cleanup, and
+        must not replace the error that made it necessary."""
+        try:
+            self._make_request(
+                api,
+                version,
+                "stop",
+                taskid=task_id,
+                deadline=time.monotonic() + _CLEANUP_TIMEOUT,
+            )
+        except Exception:
+            pass
 
     def _make_upload_request(
         self, api: str, version: str, method: str, files: Dict[str, Any], **params
@@ -309,8 +437,10 @@ class SynologyFileStation:
 
         return result
 
-    def get_file_info(self, path: str) -> Dict[str, Any]:
-        """Get detailed information about a file or directory."""
+    def get_file_info(self, path: str, *, deadline: Optional[float] = None) -> Dict[str, Any]:
+        """Get detailed information about a file or directory. `deadline` is
+        passed to the request (see `_make_request`); `delete` uses it so that
+        looking the path up counts against its time limit."""
         formatted_path = self._format_path(path)
         self._check_critical_path(formatted_path)
 
@@ -318,6 +448,7 @@ class SynologyFileStation:
             "SYNO.FileStation.List",
             "2",
             "getinfo",
+            deadline=deadline,
             path=formatted_path,
             # DSM 7.3.2 requires JSON array; comma-string is silently ignored.
             additional=json.dumps(["time", "size", "owner", "perm"]),
@@ -381,14 +512,35 @@ class SynologyFileStation:
         return result
 
     def search_files(self, path: str, pattern: str) -> List[Dict[str, Any]]:
-        """Search for files matching a pattern."""
+        """Search for files matching a pattern.
+
+        Starting the search and waiting for it to finish share one
+        `_SEARCH_LIMIT` (120 s) budget; every request inside it is cut off at
+        the time left. Fetching the results (up to `_RESULTS_TIMEOUT`) and
+        stopping the task afterwards (up to `_CLEANUP_TIMEOUT`) have their own
+        allowances, so the call takes at most 140 s in all.
+        """
         formatted_path = self._format_path(path)
         self._check_critical_path(formatted_path)
 
+        # A wall-clock deadline, not a tally of time spent sleeping: each
+        # request can itself take time a sleep counter never sees.
+        deadline = time.monotonic() + _SEARCH_LIMIT
+        timed_out = f"Search operation timed out after {_SEARCH_LIMIT} seconds"
+
         # Start search
-        start_data = self._make_request(
-            "SYNO.FileStation.Search", "2", "start", folder_path=formatted_path, pattern=pattern
-        )
+        try:
+            start_data = self._make_request(
+                "SYNO.FileStation.Search",
+                "2",
+                "start",
+                deadline=deadline,
+                folder_path=formatted_path,
+                pattern=pattern,
+            )
+        except _DeadlineError:
+            # No task id came back, so there is nothing to stop.
+            raise Exception(timed_out) from None
 
         task_id = start_data.get("taskid")
         if not task_id:
@@ -396,26 +548,26 @@ class SynologyFileStation:
 
         try:
             # Wait for search to complete
-            max_wait_time = 120  # Maximum wait time (2 minutes)
-            # A wall-clock deadline, not a tally of time spent sleeping: each
-            # status request can itself take up to its 15 s timeout, which a
-            # sleep counter never sees (240 polls x 15 s is an hour, not 2 min).
-            deadline = time.monotonic() + max_wait_time
+            try:
+                self._wait_for_task("SYNO.FileStation.Search", "2", task_id, deadline)
+            except _DeadlineError:
+                raise Exception(timed_out) from None
 
-            while time.monotonic() < deadline:
-                status_data = self._make_request(
-                    "SYNO.FileStation.Search", "2", "status", taskid=task_id
+            # Get results — a fresh allowance, so a search that finishes just
+            # inside its limit is not thrown away for want of time to read it.
+            try:
+                result_data = self._make_request(
+                    "SYNO.FileStation.Search",
+                    "2",
+                    "list",
+                    deadline=time.monotonic() + _RESULTS_TIMEOUT,
+                    taskid=task_id,
                 )
-
-                if status_data.get("finished"):
-                    break
-
-                time.sleep(0.5)
-            else:
-                raise Exception(f"Search operation timed out after {max_wait_time} seconds")
-
-            # Get results
-            result_data = self._make_request("SYNO.FileStation.Search", "2", "list", taskid=task_id)
+            except _DeadlineError:
+                raise Exception(
+                    f"Search finished, but fetching its results timed out after "
+                    f"{_RESULTS_TIMEOUT} seconds"
+                ) from None
 
             files = result_data.get("files", [])
             return [
@@ -430,10 +582,7 @@ class SynologyFileStation:
 
         finally:
             # Clean up search task
-            try:
-                self._make_request("SYNO.FileStation.Search", "2", "stop", taskid=task_id)
-            except Exception:
-                pass  # Ignore cleanup errors
+            self._stop_task("SYNO.FileStation.Search", "2", task_id)
 
     def rename_file(self, path: str, new_name: str) -> Dict[str, Any]:
         """Rename a file or directory.
@@ -641,6 +790,11 @@ class SynologyFileStation:
     def delete(self, path: str) -> Dict[str, Any]:
         """Delete a file or directory (auto-detects type).
 
+        Looking the path up, starting the delete and waiting for it to finish
+        share one `_DELETE_LIMIT` (120 s) budget, and every request inside it
+        is cut off at the time left. Stopping the task after a failure gets its
+        own `_CLEANUP_TIMEOUT`, so the call takes at most 125 s.
+
         Args:
             path: Full path to the file/directory to delete (must start with /)
 
@@ -655,10 +809,24 @@ class SynologyFileStation:
 
         self._check_critical_path(formatted_path)
 
-        # Auto-detect if this is a file or directory
+        deadline = time.monotonic() + _DELETE_LIMIT  # wall-clock, as in search_files
+        timed_out = f"Delete operation timed out after {_DELETE_LIMIT} seconds"
+
+        # Auto-detect if this is a file or directory. The lookup gets no more
+        # than an ordinary request's time, so it can never use up the budget
+        # that the request starting the delete needs: that request is the one
+        # that must not be cut short (see _run_within).
         try:
-            file_info = self.get_file_info(formatted_path)
+            file_info = self.get_file_info(
+                formatted_path, deadline=min(deadline, time.monotonic() + _REQUEST_TIMEOUT)
+            )
             recursive = file_info.get("type") == "directory"
+        except _DeadlineError:
+            # Out of time before anything was started: don't fall through to
+            # deleting it as a file on a guess.
+            raise Exception(
+                "Delete operation timed out while looking up the path; nothing was deleted."
+            ) from None
         except Exception:
             recursive = False  # Default to file behavior if can't determine
 
@@ -669,14 +837,23 @@ class SynologyFileStation:
         path_array = json.dumps([formatted_path])
 
         # Start the delete task (async operation)
-        start_data = self._make_request(
-            "SYNO.FileStation.Delete",
-            "2",
-            "start",
-            path=path_array,
-            accurate_progress="true",
-            recursive=str(recursive).lower(),
-        )
+        try:
+            start_data = self._make_request(
+                "SYNO.FileStation.Delete",
+                "2",
+                "start",
+                deadline=deadline,
+                path=path_array,
+                accurate_progress="true",
+                recursive=str(recursive).lower(),
+            )
+        except _DeadlineError:
+            # The request was abandoned without an answer, so whether DSM acted
+            # on it is unknown — and there is no task id to stop.
+            raise Exception(
+                f"{timed_out} while starting the delete. The NAS may have started it anyway "
+                f"— check {formatted_path} before retrying."
+            ) from None
 
         task_id = start_data.get("taskid")
         if not task_id:
@@ -684,41 +861,30 @@ class SynologyFileStation:
 
         try:
             # Wait for delete to complete
-            max_wait_time = 120  # Maximum wait time (2 minutes)
-            deadline = time.monotonic() + max_wait_time  # wall-clock, as in search_files
+            status_data = self._wait_for_task("SYNO.FileStation.Delete", "2", task_id, deadline)
 
-            while time.monotonic() < deadline:
-                status_data = self._make_request(
-                    "SYNO.FileStation.Delete", "2", "status", taskid=task_id
-                )
+            # Check if there were any errors
+            if "error" in status_data:
+                error_info = status_data["error"]
+                raise Exception(f"Delete failed: {error_info}")
 
-                if status_data.get("finished"):
-                    # Check if there were any errors
-                    if "error" in status_data:
-                        error_info = status_data["error"]
-                        raise Exception(f"Delete failed: {error_info}")
+            return {
+                "success": True,
+                "path": formatted_path,
+                "item_name": item_name,
+                "item_type": item_type,
+                "recursive": recursive,
+                "task_id": task_id,
+                "message": f"Successfully deleted {item_type} '{item_name}'",
+            }
 
-                    return {
-                        "success": True,
-                        "path": formatted_path,
-                        "item_name": item_name,
-                        "item_type": item_type,
-                        "recursive": recursive,
-                        "task_id": task_id,
-                        "message": f"Successfully deleted {item_type} '{item_name}'",
-                    }
-
-                time.sleep(0.5)
-
-            raise Exception(f"Delete operation timed out after {max_wait_time} seconds")
-
-        except Exception as e:
+        except _DeadlineError:
+            self._stop_task("SYNO.FileStation.Delete", "2", task_id)
+            raise Exception(timed_out) from None
+        except Exception:
             # Try to stop the task if it's still running
-            try:
-                self._make_request("SYNO.FileStation.Delete", "2", "stop", taskid=task_id)
-            except Exception:
-                pass  # Ignore cleanup errors
-            raise e
+            self._stop_task("SYNO.FileStation.Delete", "2", task_id)
+            raise
 
     def _check_critical_path(self, path: str) -> None:
         """Check if path is a critical system path, or inside one — raise if so.
@@ -835,6 +1001,11 @@ class SynologyFileStation:
     ) -> Dict[str, Any]:
         """Move a file or directory to a new location.
 
+        Starting the move and waiting for it to finish share one `_MOVE_LIMIT`
+        (60 s) budget, and every request inside it is cut off at the time
+        left. Stopping the task after a failure gets its own
+        `_CLEANUP_TIMEOUT`, so the call takes at most 65 s.
+
         Args:
             source_path: Full path to the file/directory to move
             destination_path: Destination path (can be directory or full path with new name)
@@ -858,15 +1029,26 @@ class SynologyFileStation:
             raise Exception("Invalid destination path")
 
         # Start the move operation
-        start_data = self._make_request(
-            "SYNO.FileStation.CopyMove",
-            "3",
-            "start",
-            path=formatted_source,
-            dest_folder_path=formatted_dest,
-            overwrite=overwrite,
-            remove_src=True,  # This makes it a move operation instead of copy
-        )
+        deadline = time.monotonic() + _MOVE_LIMIT  # wall-clock, as in search_files
+        timed_out = f"Move operation timed out after {_MOVE_LIMIT} seconds"
+        try:
+            start_data = self._make_request(
+                "SYNO.FileStation.CopyMove",
+                "3",
+                "start",
+                deadline=deadline,
+                path=formatted_source,
+                dest_folder_path=formatted_dest,
+                overwrite=overwrite,
+                remove_src=True,  # This makes it a move operation instead of copy
+            )
+        except _DeadlineError:
+            # Abandoned without an answer: DSM may have acted on it, and there
+            # is no task id to stop.
+            raise Exception(
+                f"{timed_out} while starting the move. The NAS may have started it anyway "
+                f"— check {formatted_source} and {formatted_dest} before retrying."
+            ) from None
 
         task_id = start_data.get("taskid")
         if not task_id:
@@ -874,45 +1056,34 @@ class SynologyFileStation:
 
         try:
             # Wait for move to complete
-            max_wait_time = 60  # Maximum wait time in seconds
-            deadline = time.monotonic() + max_wait_time  # wall-clock, as in search_files
+            status_data = self._wait_for_task("SYNO.FileStation.CopyMove", "3", task_id, deadline)
 
-            while time.monotonic() < deadline:
-                status_data = self._make_request(
-                    "SYNO.FileStation.CopyMove", "3", "status", taskid=task_id
-                )
+            # Check if there were any errors
+            if "error" in status_data:
+                error_info = status_data["error"]
+                raise Exception(f"Move failed: {error_info}")
 
-                if status_data.get("finished"):
-                    # Check if there were any errors
-                    if "error" in status_data:
-                        error_info = status_data["error"]
-                        raise Exception(f"Move failed: {error_info}")
+            # Determine the final destination path
+            source_name = os.path.basename(formatted_source)
+            if formatted_dest.endswith("/") or not os.path.splitext(formatted_dest)[1]:
+                # Destination is a directory
+                final_dest = os.path.join(formatted_dest, source_name).replace("\\", "/")
+            else:
+                # Destination includes the new filename
+                final_dest = formatted_dest
 
-                    # Determine the final destination path
-                    source_name = os.path.basename(formatted_source)
-                    if formatted_dest.endswith("/") or not os.path.splitext(formatted_dest)[1]:
-                        # Destination is a directory
-                        final_dest = os.path.join(formatted_dest, source_name).replace("\\", "/")
-                    else:
-                        # Destination includes the new filename
-                        final_dest = formatted_dest
+            return {
+                "success": True,
+                "source_path": formatted_source,
+                "destination_path": final_dest,
+                "task_id": task_id,
+                "message": f"Successfully moved '{formatted_source}' to '{final_dest}'",
+            }
 
-                    return {
-                        "success": True,
-                        "source_path": formatted_source,
-                        "destination_path": final_dest,
-                        "task_id": task_id,
-                        "message": f"Successfully moved '{formatted_source}' to '{final_dest}'",
-                    }
-
-                time.sleep(0.5)
-
-            raise Exception(f"Move operation timed out after {max_wait_time} seconds")
-
-        except Exception as e:
+        except _DeadlineError:
+            self._stop_task("SYNO.FileStation.CopyMove", "3", task_id)
+            raise Exception(timed_out) from None
+        except Exception:
             # Try to stop the task if it's still running
-            try:
-                self._make_request("SYNO.FileStation.CopyMove", "3", "stop", taskid=task_id)
-            except Exception:
-                pass  # Ignore cleanup errors
-            raise e
+            self._stop_task("SYNO.FileStation.CopyMove", "3", task_id)
+            raise

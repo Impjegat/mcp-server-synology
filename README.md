@@ -202,7 +202,7 @@ If you prefer not to use Docker:
   - `path` (required): Directory path starting with `/`
 - **`get_file_info`** - Get detailed file/directory information
   - `path` (required): File path starting with `/`
-- **`search_files`** - Search files matching pattern (times out after 2 minutes rather than polling indefinitely)
+- **`search_files`** - Search files matching pattern (waiting for the search is limited to 2 minutes, so the call takes at most 140 s in all — see [Time limits](#time-limits))
   - `path` (required): Search directory
   - `pattern` (required): Search pattern (e.g., `*.pdf`)
 - **`get_file_content`** - Read a text file's contents (sent to the MCP client's AI provider)
@@ -216,15 +216,27 @@ If you prefer not to use Docker:
   - `folder_path` (required): Parent directory path starting with `/`
   - `name` (required): New directory name
   - `force_parent` (optional): Create parent directories if needed (default: false)
-- **`delete`** - Delete files or directories (auto-detects type)
+- **`delete`** - Delete files or directories (auto-detects type; limited to 2 minutes, at most 125 s in all — see [Time limits](#time-limits))
   - `path` (required): File/directory path starting with `/`
 - **`rename_file`** - Rename files or directories
   - `path` (required): Current file path
   - `new_name` (required): New filename
-- **`move_file`** - Move files to new location
+- **`move_file`** - Move files to new location (limited to 1 minute, at most 65 s in all — see [Time limits](#time-limits))
   - `source_path` (required): Source file path
   - `destination_path` (required): Destination path
   - `overwrite` (optional): Overwrite existing files
+
+#### Time limits
+
+`search_files`, `delete` and `move_file` start a task on the NAS and wait for it to finish. Each has a time limit that covers starting the task and waiting for it; every request made during that wait is cut off at whatever time is left, so a slow NAS cannot stretch the limit. If the limit is reached the call returns an error ("… timed out after N seconds") and the task is asked to stop.
+
+| Tool | Limit | Also allowed | Longest a call can take |
+|---|---|---|---|
+| `search_files` | 120 s | up to 15 s to fetch the results of a search that finished, then up to 5 s to stop the task | 140 s |
+| `delete` | 120 s (includes the initial lookup of the path) | up to 5 s to stop the task after a failure | 125 s |
+| `move_file` | 60 s | up to 5 s to stop the task after a failure | 65 s |
+
+A timed-out call does not prove the operation did not happen: DSM may still finish a `delete` or `move_file` whose status request ran out of time. If the request that *starts* a delete or move is itself given up on, the error says so ("The NAS may have started it anyway — check … before retrying"), because no task id ever came back to stop. `delete` looks the path up for at most 15 s, so that lookup can never use up the time the start request needs. Check the NAS before retrying.
 
 ### 📥 Download Station Management
 - **`ds_get_info`** - Get Download Station information
@@ -254,7 +266,7 @@ If you prefer not to use Docker:
 - **`synology_ups`** - Get UPS status, battery level, power readings
 - **`synology_services`** - List installed packages and their running status
 - **`synology_system_log`** - Get recent system log entries
-- **`synology_health_summary`** - Aggregate system info, utilization, disk health, and volume status
+- **`synology_health_summary`** - Aggregate system info, utilization, disk health, volume status, storage pools, network, and UPS. The result carries a `status`: `complete`, or `partial` with a message and `failed_checks` naming each check that could not be completed (the gathered `data` is still returned, but a partial result does not show the NAS is healthy). A UPS check that DSM reports as not available on this NAS is listed under `unavailable_checks` and does not make the result partial. If every check fails it is reported as an error.
 
 ### 🐳 Container Manager
 - **`synology_container_list`** - List Container Manager containers

@@ -1,7 +1,7 @@
 # src/health/synology_health.py - Synology NAS health monitoring
 # Supports both DSM 6 and DSM 7 APIs with automatic fallback.
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from utils.synology_api import SynologyAPIClient
 
@@ -150,36 +150,79 @@ class SynologyHealth:
     # Combined summary
     # ------------------------------------------------------------------
 
+    # (key in the summary, SynologyHealth method that produces it, optional).
+    # An optional check covers something a NAS may simply not have — a UPS —
+    # so DSM saying the API isn't available is not a gap in the summary.
+    _SUMMARY_CHECKS = (
+        ("system", "system_info", False),
+        ("utilization", "utilization", False),
+        ("disks", "disk_list", False),
+        ("volumes", "volume_list", False),
+        ("storage_pools", "storage_pool_list", False),
+        ("network", "network_info", False),
+        ("ups", "ups_info", True),
+    )
+
+    # DSM's documented "this NAS doesn't offer that" codes: the API (102), the
+    # method (103) or the requested version (104) doesn't exist. Compared as
+    # strings because the error code may arrive as an int or a string.
+    _API_UNAVAILABLE_CODES = frozenset({"102", "103", "104"})
+
     def health_summary(self) -> Dict[str, Any]:
-        """Aggregate system info, utilization, disk health, and volume status."""
-        summary = {}
+        """Aggregate system info, utilization, disk health, volume status,
+        storage pools, network, and UPS into one result.
 
-        sys_info = self.system_info()
-        if sys_info.get("success"):
-            summary["system"] = sys_info.get("data", {})
+        The result says how complete it is, so a summary with holes is never
+        mistaken for a clean bill of health:
 
-        util = self.utilization()
-        if util.get("success"):
-            summary["utilization"] = util.get("data", {})
+        - every check succeeded: `success: True`, `status: "complete"`;
+        - some failed: `success: True`, `status: "partial"`, a `message`, and
+          `failed_checks` (each failed check and its error) next to the
+          `data` that was gathered;
+        - all failed: `success: False` with the same `failed_checks` in the
+          error, which is what an unreachable NAS looks like.
 
-        disks = self.disk_list()
-        if disks.get("success"):
-            summary["disks"] = disks.get("data", {})
+        An optional check (the UPS) that DSM reports as not available on this
+        NAS is neither a success nor a failure: it is listed under
+        `unavailable_checks` and does not make the summary partial, so a NAS
+        without that feature can still be `complete`. Any other error from it
+        — a network failure, a permission error — is a failed check like any
+        other.
+        """
+        summary: Dict[str, Any] = {}
+        failed_checks: List[Dict[str, Any]] = []
+        unavailable_checks: List[Dict[str, Any]] = []
 
-        volumes = self.volume_list()
-        if volumes.get("success"):
-            summary["volumes"] = volumes.get("data", {})
+        for key, method_name, optional in self._SUMMARY_CHECKS:
+            result = getattr(self, method_name)()
+            if result.get("success"):
+                summary[key] = result.get("data", {})
+                continue
+            error = result.get("error", {})
+            entry = {"check": key, "error": error}
+            code = error.get("code") if isinstance(error, dict) else None
+            if optional and str(code) in self._API_UNAVAILABLE_CODES:
+                unavailable_checks.append(entry)
+            else:
+                failed_checks.append(entry)
 
-        pools = self.storage_pool_list()
-        if pools.get("success"):
-            summary["storage_pools"] = pools.get("data", {})
-
-        net = self.network_info()
-        if net.get("success"):
-            summary["network"] = net.get("data", {})
-
-        ups = self.ups_info()
-        if ups.get("success"):
-            summary["ups"] = ups.get("data", {})
-
-        return {"success": True, "data": summary}
+        if not summary:
+            return {
+                "success": False,
+                "error": {
+                    "code": "health_checks_failed",
+                    "message": "None of the health checks could be completed.",
+                    "failed_checks": failed_checks,
+                },
+            }
+        outcome: Dict[str, Any] = {"success": True}
+        if failed_checks:
+            outcome["status"] = "partial"
+            outcome["message"] = "Some health checks could not be completed."
+            outcome["failed_checks"] = failed_checks
+        else:
+            outcome["status"] = "complete"
+        if unavailable_checks:
+            outcome["unavailable_checks"] = unavailable_checks
+        outcome["data"] = summary
+        return outcome

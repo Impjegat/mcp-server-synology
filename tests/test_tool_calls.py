@@ -8,6 +8,7 @@ restricted or invalid call is rejected before any handler runs — so before
 any request reaches the NAS.
 """
 
+import json
 import logging
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -16,7 +17,39 @@ import pytest
 from mcp.shared.exceptions import MCPError
 
 SECRET = "TopSecretSessionId123"
+# A secret typed into a call: unlike SECRET, no fixture registers it anywhere.
+NEW_SECRET = "NeverSeenBefore-7f3a9c"
+SWEEP_SENTINEL = "SWEEP-SENTINEL-d41d8c"
 BASE_URL = "https://nas.example.test:5001"
+_MASK = "***REDACTED***"
+
+
+def _valid_value(schema):
+    """Some value that satisfies `schema` (enough to get past `required`)."""
+    if "enum" in schema:
+        return schema["enum"][0]
+    return {
+        "string": "ok",
+        "integer": 1,
+        "number": 1,
+        "boolean": True,
+        "array": [_valid_value(schema["items"])] if "items" in schema else [],
+        "object": {},
+    }[schema["type"]]
+
+
+def _poison(schema):
+    """A value of the wrong type for `schema`, carrying SWEEP_SENTINEL at the
+    deepest level the schema describes."""
+    kind = schema["type"]
+    if kind == "string":
+        return [SWEEP_SENTINEL]
+    if kind == "array":
+        return [_poison(schema["items"])] if "items" in schema else SWEEP_SENTINEL
+    if kind == "object" and schema.get("properties"):
+        name, sub = next(iter(schema["properties"].items()))
+        return {name: _poison(sub)}
+    return SWEEP_SENTINEL
 
 
 def _server():
@@ -234,6 +267,93 @@ def test_dsm_result_decides_from_the_structured_success_field():
     assert dsm_result({}, prefix="Result: ")[0].text == "Result: {}"
 
 
+def _server_with_session():
+    """A real server, logged in to BASE_URL, whose health calls go through the
+    real SynologyHealth/SynologyAPIClient — only the HTTP layer is replaced."""
+    server = _server()
+    server.sessions[BASE_URL] = "a-session-id"
+    return server
+
+
+def _dsm_response(payload):
+    response = MagicMock()
+    response.json.return_value = payload
+    return response
+
+
+@pytest.mark.asyncio
+async def test_a_health_summary_of_an_unreachable_nas_is_an_error_result(unrestricted):
+    """The P2 finding, at the tool boundary: with the NAS unreachable every
+    underlying request fails, and the tool used to answer `isError: false`
+    with `{"success": true, "data": {}}`."""
+    import requests
+
+    server = _server_with_session()
+
+    with patch(
+        "utils.synology_api.requests.get", side_effect=requests.ConnectionError("unreachable")
+    ) as get:
+        result = await server._call_tool("synology_health_summary", {"base_url": BASE_URL})
+
+    assert get.call_count == 11
+    assert result.is_error is True
+    assert '"health_checks_failed"' in _text(result)
+    assert '"success": true' not in _text(result)
+
+
+@pytest.mark.asyncio
+async def test_a_partial_health_summary_is_a_success_that_says_it_is_partial(unrestricted):
+    def fake_get(url, params=None, **kwargs):
+        if params["api"] == "SYNO.Core.ExternalDevice.UPS":
+            return _dsm_response({"success": False, "error": {"code": 117}})
+        return _dsm_response({"success": True, "data": {"api": params["api"]}})
+
+    server = _server_with_session()
+
+    with patch("utils.synology_api.requests.get", side_effect=fake_get):
+        result = await server._call_tool("synology_health_summary", {"base_url": BASE_URL})
+
+    assert result.is_error is False
+    body = json.loads(_text(result))
+    assert body["status"] == "partial"
+    assert body["message"] == "Some health checks could not be completed."
+    assert body["failed_checks"] == [{"check": "ups", "error": {"code": 117}}]
+    assert "ups" not in body["data"] and "system" in body["data"]
+
+
+@pytest.mark.asyncio
+async def test_a_nas_without_a_ups_still_gets_a_complete_health_summary(unrestricted):
+    def fake_get(url, params=None, **kwargs):
+        if params["api"] == "SYNO.Core.ExternalDevice.UPS":
+            return _dsm_response({"success": False, "error": {"code": 102}})
+        return _dsm_response({"success": True, "data": {"api": params["api"]}})
+
+    server = _server_with_session()
+
+    with patch("utils.synology_api.requests.get", side_effect=fake_get):
+        result = await server._call_tool("synology_health_summary", {"base_url": BASE_URL})
+
+    assert result.is_error is False
+    body = json.loads(_text(result))
+    assert body["status"] == "complete"
+    assert body["unavailable_checks"] == [{"check": "ups", "error": {"code": 102}}]
+    assert "failed_checks" not in body
+
+
+@pytest.mark.asyncio
+async def test_a_complete_health_summary_says_so(unrestricted):
+    server = _server_with_session()
+
+    with patch(
+        "utils.synology_api.requests.get",
+        side_effect=lambda url, params=None, **kw: _dsm_response({"success": True, "data": {}}),
+    ):
+        result = await server._call_tool("synology_health_summary", {"base_url": BASE_URL})
+
+    assert result.is_error is False
+    assert json.loads(_text(result))["status"] == "complete"
+
+
 @pytest.mark.asyncio
 async def test_a_failed_login_is_an_error_result(unrestricted):
     auth = MagicMock()
@@ -286,7 +406,11 @@ async def test_a_restricted_login_to_an_unconfigured_nas_is_an_error_result(rest
     with patch("mcp_server.SynologyAuth") as auth_class:
         result = await server._call_tool(
             "synology_login",
-            {"base_url": "https://attacker.example:5001", "username": "u", "password": "p"},
+            {
+                "base_url": "https://attacker.example:5001",
+                "username": "u",
+                "password": "a-realistic-passphrase",
+            },
         )
 
     assert result.is_error is True
@@ -334,8 +458,8 @@ async def test_a_failed_logout_is_an_error_result_but_an_expired_session_is_not(
     "arguments,expected",
     [
         ({}, "'path' is a required property"),
-        ({"path": 123}, "123 is not of type 'string'"),
-        ({"path": "/share", "nas_name": ["nas1"]}, "is not of type 'string'"),
+        ({"path": 123}, "path must be of type 'string'"),
+        ({"path": "/share", "nas_name": ["nas1"]}, "nas_name must be of type 'string'"),
     ],
 )
 @pytest.mark.asyncio
@@ -354,18 +478,267 @@ async def test_invalid_arguments_are_an_error_result_and_the_handler_never_runs(
 
 
 @pytest.mark.asyncio
-async def test_a_validation_message_is_redacted(unrestricted, live_secret):
-    """jsonschema quotes the offending value in its message; if a secret was
-    submitted as that value, it must not be echoed back."""
+async def test_a_validation_message_does_not_quote_the_submitted_value(unrestricted, caplog):
+    """jsonschema's own message quotes the rejected value. The message built
+    from the schema must not, and — unlike the redactor, which only knows
+    secrets it has been told about — it must not need to: `path` is not a
+    credential, so nothing registers this value anywhere."""
+    caplog.set_level(logging.DEBUG)
     server = _server()
     handler = _stub(server, "list_directory")
 
-    result = await server._call_tool("list_directory", {"path": [SECRET]})
+    result = await server._call_tool("list_directory", {"path": [NEW_SECRET]})
 
     assert result.is_error is True
-    assert "Invalid arguments" in _text(result)
-    assert SECRET not in _text(result)
+    assert _text(result) == "Invalid arguments for list_directory: path must be of type 'string'"
+    assert NEW_SECRET not in caplog.text
     handler.assert_not_awaited()
+
+
+@pytest.mark.parametrize("field", ["password", "device_id", "otp_code"])
+@pytest.mark.asyncio
+async def test_a_mistyped_login_credential_is_never_echoed(unrestricted, no_network, caplog, field):
+    """The P1 finding: a credential submitted with the wrong type fails
+    validation before any login, so it is in no inventory of known secrets.
+    Neither the client's result nor the DEBUG log may carry it."""
+    caplog.set_level(logging.DEBUG)
+    arguments = {"base_url": BASE_URL, "username": "admin", "password": "pw"}
+    arguments[field] = [NEW_SECRET]
+    server = _server()
+
+    result = await server._call_tool("synology_login", arguments)
+
+    assert result.is_error is True
+    assert (
+        _text(result) == f"Invalid arguments for synology_login: {field} must be of type 'string'"
+    )
+    assert NEW_SECRET not in _text(result)
+    assert NEW_SECRET not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_no_tool_quotes_a_rejected_value_for_any_property(unrestricted, no_network, caplog):
+    """Sweep: for every property of every tool, submit a wrong-typed value
+    carrying a unique sentinel (nothing is registered with the redactor) and
+    check the refusal names the field but never the sentinel."""
+    caplog.set_level(logging.DEBUG)
+    server = _server()
+    definitions = [*server._get_tool_definitions(), *server._session_tool_definitions()]
+    handlers = {tool.name: _stub(server, tool.name) for tool in definitions}
+    checked = 0
+
+    for tool in definitions:
+        schema = tool.input_schema
+        for prop, prop_schema in schema.get("properties", {}).items():
+            arguments = {
+                name: _valid_value(schema["properties"][name])
+                for name in schema.get("required", [])
+            }
+            arguments[prop] = _poison(prop_schema)
+
+            result = await server._call_tool(tool.name, arguments)
+
+            where = f"{tool.name}.{prop}"
+            assert result.is_error is True, where
+            assert _text(result).startswith(f"Invalid arguments for {tool.name}: "), where
+            assert prop in _text(result), where
+            assert SWEEP_SENTINEL not in _text(result), where
+            checked += 1
+
+    assert checked > 100  # the sweep actually covered the tool set
+    assert SWEEP_SENTINEL not in caplog.text
+    for handler in handlers.values():
+        handler.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "tool,arguments,expected",
+    [
+        (
+            "synology_set_user_permissions",
+            {"name": "u", "permissions": [{"name": [SWEEP_SENTINEL]}]},
+            "permissions[].name must be of type 'string'",
+        ),
+        (
+            "synology_set_user_permissions",
+            {"name": "u", "permissions": [{}]},
+            "permissions[]: 'name' is a required property",
+        ),
+        (
+            "ds_pause_tasks",
+            {"task_ids": ["ok", [SWEEP_SENTINEL]]},
+            "task_ids[] must be of type 'string'",
+        ),
+        ("ds_pause_tasks", {"task_ids": SWEEP_SENTINEL}, "task_ids must be of type 'array'"),
+        ("synology_container_logs", {"name": "c", "offset": -1}, "offset must be >= 0"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_a_validation_message_names_the_field_and_the_constraint(
+    unrestricted, no_network, tool, arguments, expected
+):
+    server = _server()
+    _stub(server, tool)
+
+    result = await server._call_tool(tool, arguments)
+
+    assert _text(result) == f"Invalid arguments for {tool}: {expected}"
+    assert SWEEP_SENTINEL not in _text(result)
+
+
+@pytest.mark.asyncio
+async def test_a_rejected_enum_value_is_not_quoted(unrestricted, no_network):
+    server = _server()
+    _stub(server, "synology_nfs_set_permission")
+
+    result = await server._call_tool(
+        "synology_nfs_set_permission",
+        {"share_name": "s", "client_ip": "1.2.3.4", "privilege": SWEEP_SENTINEL},
+    )
+
+    assert result.is_error is True
+    assert SWEEP_SENTINEL not in _text(result)
+    assert "privilege must be one of: 'readonly', 'readwrite'" in _text(result)
+
+
+@pytest.mark.asyncio
+async def test_a_credential_in_this_call_is_redacted_from_a_later_failure(unrestricted, caplog):
+    """A well-typed login reaches the handler, and whatever it raises may
+    quote the password. The redactor has never seen this password — it is
+    not configured and no session exists — only this call's registration."""
+    caplog.set_level(logging.DEBUG)
+    server = _server()
+    with patch("mcp_server.SynologyAuth") as auth_class:
+        auth_class.return_value.login.side_effect = RuntimeError(f"boom, sent {NEW_SECRET}")
+
+        result = await server._call_tool(
+            "synology_login", {"base_url": BASE_URL, "username": "admin", "password": NEW_SECRET}
+        )
+
+    assert result.is_error is True
+    assert "boom" in _text(result)
+    assert NEW_SECRET not in _text(result)
+    assert NEW_SECRET not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_credential_in_this_call_is_redacted_from_a_successful_result(unrestricted):
+    server = _server()
+    _stub(server, "synology_login", [types.TextContent(type="text", text=f"otp {NEW_SECRET} ok")])
+
+    result = await server._call_tool(
+        "synology_login",
+        {
+            "base_url": BASE_URL,
+            "username": "u",
+            "password": "pw-1234-abcd",
+            "device_id": NEW_SECRET,
+        },
+    )
+
+    assert result.is_error is False
+    assert NEW_SECRET not in _text(result)
+
+
+@pytest.mark.asyncio
+async def test_request_secrets_are_forgotten_when_the_call_ends(unrestricted):
+    from auth import iter_all_secrets
+
+    server = _server()
+    _stub(server, "synology_login")
+
+    await server._call_tool(
+        "synology_login", {"base_url": BASE_URL, "username": "u", "password": NEW_SECRET}
+    )
+
+    assert NEW_SECRET not in list(iter_all_secrets())
+
+
+@pytest.mark.asyncio
+async def test_concurrent_calls_do_not_share_request_secrets(unrestricted):
+    """Two overlapping calls: each masks its own credential, and only its own."""
+    import asyncio
+
+    server = _server()
+    both_running = asyncio.Event()
+    started = []
+
+    async def handler_for(mine, theirs):
+        async def handler(arguments):
+            started.append(mine)
+            if len(started) == 2:
+                both_running.set()
+            await both_running.wait()  # force the two calls to overlap
+            return [types.TextContent(type="text", text=f"mine={mine} theirs={theirs}")]
+
+        return handler
+
+    server._tool_registry["synology_login"] = await handler_for("PASSWORD-A", "PASSWORD-B")
+    server._tool_registry["synology_logout"] = await handler_for("PASSWORD-B", "PASSWORD-A")
+    # synology_logout takes no password; carry B's in a credential-named field
+    first, second = await asyncio.gather(
+        server._call_tool(
+            "synology_login", {"base_url": BASE_URL, "username": "u", "password": "PASSWORD-A"}
+        ),
+        server._call_tool("synology_logout", {"base_url": BASE_URL, "password": "PASSWORD-B"}),
+    )
+
+    assert _text(first) == f"mine={_MASK} theirs=PASSWORD-B"
+    assert _text(second) == f"mine={_MASK} theirs=PASSWORD-A"
+
+
+def test_a_very_short_credential_is_not_registered():
+    """Substring-masking a one- or two-character value would blank those
+    characters out of everything the call prints."""
+    from mcp_server import _MIN_CREDENTIAL_LENGTH, _credential_strings
+
+    assert _credential_strings({"password": "p", "device_id": "ab"}) == []
+    assert _credential_strings({"password": "x" * (_MIN_CREDENTIAL_LENGTH - 1)}) == []
+    assert _credential_strings({"password": "x" * _MIN_CREDENTIAL_LENGTH}) == [
+        "x" * _MIN_CREDENTIAL_LENGTH
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_short_password_does_not_corrupt_the_output_of_the_call(restricted):
+    """The restricted-login refusal quotes the URL; a one-character password
+    must not turn every "p" in it into a mask."""
+    restricted.nas_configs = {"nas1": {"base_url": "https://configured.example:5001"}}
+    restricted.synology_url = None
+    server = _server()
+
+    with patch("mcp_server.SynologyAuth"):
+        result = await server._call_tool(
+            "synology_login",
+            {"base_url": "https://attacker.example:5001", "username": "u", "password": "p"},
+        )
+
+    assert result.is_error is True
+    assert "https://attacker.example:5001" in _text(result)
+
+
+def test_credential_strings_are_found_at_any_depth():
+    from mcp_server import _credential_strings
+
+    found = _credential_strings(
+        {
+            "password": ["pw-aaaa", ["pw-bbbb"], {"x": "pw-cccc"}],
+            "device_id": "did-dddd",
+            "otp_code": "one-shot-codes-are-left-out",
+            "nested": {"password": "pw-eeee", "note": "not-a-credential"},
+            "path": "/share",
+            "items": [{"device_id": "did-ffff"}],
+        }
+    )
+
+    assert sorted(found) == [
+        "did-dddd",
+        "did-ffff",
+        "pw-aaaa",
+        "pw-bbbb",
+        "pw-cccc",
+        "pw-eeee",
+    ]
 
 
 @pytest.mark.asyncio

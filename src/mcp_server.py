@@ -12,12 +12,12 @@ logger = logging.getLogger(__name__)
 
 import mcp.server.stdio
 import mcp.types as types
-from jsonschema.exceptions import best_match
+from jsonschema.exceptions import ValidationError, best_match
 from jsonschema.validators import validator_for
 from mcp.server import NotificationOptions, Server, ServerRequestContext
 from mcp.shared.exceptions import MCPError
 
-from auth import SynologyAuth, iter_all_secrets
+from auth import SynologyAuth, iter_all_secrets, request_secrets
 from config import config
 from container import SynologyContainer
 from downloadstation import SynologyDownloadStation
@@ -174,6 +174,88 @@ if not config.verify_ssl:
         "not being validated, which makes it vulnerable to MITM attacks. "
         "Remove VERIFY_SSL=false unless you have a specific reason to keep it."
     )
+
+
+# Argument names whose values are registered as secrets for the duration of the
+# call that carries them (at any depth) — see SynologyMCPServer._call_tool.
+# `otp_code` is deliberately absent, as it is from
+# `config.iter_configured_secrets`: a 6-digit code masked as a substring
+# corrupts unrelated output, and it is one-shot. Its echo vector here, a
+# validation message, is closed at the source instead — such a message never
+# quotes a submitted value (`_describe_validation_error`).
+_CREDENTIAL_ARGUMENTS = frozenset({"password", "device_id"})
+
+# A value shorter than this is not registered. Masking is by substring, so a
+# one- or two-character "password" would blank out those characters wherever
+# they appear in the call's output and logs — the same corruption that keeps
+# `otp_code` out. The trade-off is accepted: there is little secrecy in a value
+# that short, and a validation message never quotes a value whatever its
+# length — but other text (a NAS's own error message, say) could still quote a
+# short credential, and nothing will mask it.
+_MIN_CREDENTIAL_LENGTH = 4
+
+
+def _credential_strings(value: Any, *, under_credential_key: bool = False) -> list[str]:
+    """Every string of at least `_MIN_CREDENTIAL_LENGTH` characters supplied
+    under a `_CREDENTIAL_ARGUMENTS` key, however deeply nested (a malformed
+    call may put a list or object there).
+
+    Collected *before* the arguments are validated, because a wrong-typed
+    credential is exactly what fails validation, and its value must already
+    be known to the redactor by then.
+    """
+    if isinstance(value, str):
+        return [value] if under_credential_key and len(value) >= _MIN_CREDENTIAL_LENGTH else []
+    found: list[str] = []
+    if isinstance(value, dict):
+        for key, item in value.items():
+            found += _credential_strings(
+                item, under_credential_key=under_credential_key or key in _CREDENTIAL_ARGUMENTS
+            )
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            found += _credential_strings(item, under_credential_key=under_credential_key)
+    return found
+
+
+def _describe_validation_error(error: ValidationError) -> str:
+    """A description of a schema violation that never contains a submitted value.
+
+    jsonschema's own `error.message` quotes the offending value
+    (`['hunter2'] is not of type 'string'`), which for a mistyped password,
+    device token or OTP code would echo the credential back to the client and
+    into the logs. This builds the text from the schema alone: the field is
+    named from the schema path (`properties` keys, which the server defines),
+    and the constraint from `error.validator_value` (also the server's). The
+    submitted value is never read. (A missing required property is the one
+    case where jsonschema's own message is kept: it names a property from
+    the schema's `required` list, which the caller did not supply.)
+    """
+    field = ""
+    path = list(error.absolute_schema_path)[:-1]  # the last element is the keyword itself
+    position = 0
+    while position < len(path):
+        if path[position] == "properties" and position + 1 < len(path):
+            field += ("." if field else "") + str(path[position + 1])
+            position += 2
+        elif path[position] == "items":
+            field += "[]"
+            position += 1
+        else:
+            position += 1
+    if error.validator == "required":
+        return f"{field}: {error.message}" if field else error.message
+    subject = field or "arguments"
+    constraint = error.validator_value
+    if error.validator == "type":
+        types_ = constraint if isinstance(constraint, list) else [constraint]
+        return f"{subject} must be of type {' or '.join(repr(t) for t in types_)}"
+    if error.validator == "enum":
+        return f"{subject} must be one of: {', '.join(repr(v) for v in constraint)}"
+    if error.validator in ("minimum", "maximum"):
+        bound = ">=" if error.validator == "minimum" else "<="
+        return f"{subject} must be {bound} {constraint}"
+    return f"{subject} does not satisfy the {error.validator!r} constraint"
 
 
 class ToolExecutionError(Exception):
@@ -647,7 +729,7 @@ class SynologyMCPServer:
         """The message describing why `arguments` don't match tool `name`'s
         input schema, or None if they do."""
         error = best_match(self._input_validators[name].iter_errors(arguments))
-        return None if error is None else error.message
+        return None if error is None else _describe_validation_error(error)
 
     def _redact_text(self, text: str) -> str:
         """`text` with every known/likely secret masked (see utils.redact)."""
@@ -695,12 +777,27 @@ class SynologyMCPServer:
         before any NAS request is made. Restricted mode is deny-by-default: a
         direct call by exact name is covered the same way as discovery
         (`_list_tools`), since both consult `_is_tool_allowed` against the
-        same classification. Every message that leaves here is redacted.
+        same classification. Every message that leaves here is redacted —
+        including any `password` or `device_id`
+        submitted in this very call, which is registered with the redactor
+        before anything else runs, and the validation messages themselves
+        never quote a submitted value (see `_describe_validation_error`).
         """
         handler = self._tool_registry.get(name)
         if handler is None:
             raise MCPError(types.INVALID_PARAMS, self._redact_text(f"Unknown tool: {name}"))
 
+        # Credentials in this request count as secrets for all of it — the
+        # refusal and validation messages included, which run before any login
+        # could have taught the redactor a newly submitted password.
+        with request_secrets(_credential_strings(arguments)):
+            return await self._run_tool(name, handler, arguments)
+
+    async def _run_tool(
+        self, name: str, handler: Callable, arguments: dict
+    ) -> types.CallToolResult:
+        """The part of `_call_tool` that runs once the tool is known to exist:
+        restricted-mode check, argument validation, then the handler."""
         if config.restricted_mode and not self._is_tool_allowed(name):
             return self._error_result(
                 f"Tool '{name}' is not available: the server is running in "
@@ -2551,7 +2648,19 @@ class SynologyMCPServer:
             ),
             types.Tool(
                 name="synology_health_summary",
-                description="Get a combined health overview: system info, CPU/memory utilization, disk health, volume status, storage pools, network, and UPS — all in one call",
+                description=(
+                    "Get a combined health overview: system info, CPU/memory utilization, "
+                    "disk health, volume status, storage pools, network, and UPS — all in "
+                    "one call.\n\n"
+                    "Check `status` in the result. `complete` means every check ran. "
+                    "`partial` means some checks could not be completed (listed in "
+                    "`failed_checks`) and `data` holds only the rest — a partial result is "
+                    "NOT confirmation that the NAS is healthy, so report the failed checks "
+                    "rather than treating the missing sections as fine. A check the NAS "
+                    "does not offer at all (a UPS that is not attached) is listed in "
+                    "`unavailable_checks` and does not make the result partial. If every "
+                    "check fails the tool returns an error."
+                ),
                 inputSchema={
                     "type": "object",
                     "properties": {
