@@ -865,3 +865,119 @@ class TestMcpCannotReachIt:
     async def test_disconnecting_is_the_only_session_action_a_model_has(self, broker):
         names = {t.name for t in await broker.runtime.list_tools("alice")}
         assert {n for n in names if "logout" in n or "session" in n} == {"synology_logout"}
+
+
+class TestChallengeRoutesAreThrottled:
+    """/auth/begin and /enroll/begin need no sign-in and each makes a challenge,
+    so every call counts, not just a failure."""
+
+    @pytest.mark.asyncio
+    async def test_thirty_calls_a_minute_per_address_are_enough_and_the_next_is_refused(
+        self, broker
+    ):
+        app = create_private_app(
+            broker.runtime,
+            LoginService(broker.runtime, runner=Runner(OK), clock=broker.clock),
+            FakeOwner(),
+            allowed_origins=[ORIGIN],
+            allowed_hosts=["private.test"],
+            begin_limiter=RateLimiter(30, 60, clock=broker.clock),
+        )
+        async with httpx2.AsyncClient(
+            transport=httpx2.ASGITransport(app=app), base_url=ORIGIN
+        ) as http:
+            codes = [
+                (await http.post("/auth/begin", headers=JSON_HEADERS, json={})).status_code
+                for _ in range(31)
+            ]
+            broker.clock.advance(61)
+            later = await http.post("/auth/begin", headers=JSON_HEADERS, json={})
+
+        assert codes[:30] == [200] * 30 and codes[30] == 429
+        assert later.status_code == 200  # the limit lifts after the window
+
+    @pytest.mark.asyncio
+    async def test_the_default_limit_is_thirty_a_minute(self, private):
+        async with private.client() as http:
+            codes = [
+                (await http.post("/auth/begin", headers=JSON_HEADERS, json={})).status_code
+                for _ in range(31)
+            ]
+        assert codes[:30] == [200] * 30 and codes[30] == 429
+
+    @pytest.mark.asyncio
+    async def test_the_two_routes_are_counted_separately(self, broker):
+        limiter = RateLimiter(2, 60, clock=broker.clock)
+        private = Private(broker, Runner(OK), FakeOwner())
+        app = create_private_app(
+            broker.runtime,
+            private.login,
+            private.owner,
+            allowed_origins=[ORIGIN],
+            allowed_hosts=["private.test"],
+            begin_limiter=limiter,
+        )
+        async with httpx2.AsyncClient(
+            transport=httpx2.ASGITransport(app=app), base_url=ORIGIN
+        ) as http:
+            assert (
+                await http.post("/auth/begin", headers=JSON_HEADERS, json={})
+            ).status_code == 200
+            assert (
+                await http.post("/auth/begin", headers=JSON_HEADERS, json={})
+            ).status_code == 200
+            assert (
+                await http.post("/auth/begin", headers=JSON_HEADERS, json={})
+            ).status_code == 429
+            # Enrolment is a different count: still open.
+            enrol = await http.post("/enroll/begin", headers=JSON_HEADERS, json={"code": "x"})
+            assert enrol.status_code == 403
+
+    @pytest.mark.asyncio
+    async def test_enrolment_begin_is_throttled_on_its_own_count(self, broker):
+        app = create_private_app(
+            broker.runtime,
+            LoginService(broker.runtime, runner=Runner(OK), clock=broker.clock),
+            FakeOwner(),
+            allowed_origins=[ORIGIN],
+            allowed_hosts=["private.test"],
+            begin_limiter=RateLimiter(2, 60, clock=broker.clock),
+        )
+        async with httpx2.AsyncClient(
+            transport=httpx2.ASGITransport(app=app), base_url=ORIGIN
+        ) as http:
+            codes = [
+                (
+                    await http.post("/enroll/begin", headers=JSON_HEADERS, json={"code": "x"})
+                ).status_code
+                for _ in range(3)
+            ]
+            # The sign-in route still has its own, untouched allowance.
+            auth = await http.post("/auth/begin", headers=JSON_HEADERS, json={})
+
+        assert codes == [403, 403, 429]
+        assert auth.status_code == 200
+
+    @pytest.mark.asyncio
+    async def test_a_refused_call_makes_no_challenge(self, broker):
+        calls = []
+
+        class CountingOwner(FakeOwner):
+            def begin_authentication(self):
+                calls.append(1)
+                return super().begin_authentication()
+
+        app = create_private_app(
+            broker.runtime,
+            LoginService(broker.runtime, runner=Runner(OK), clock=broker.clock),
+            CountingOwner(),
+            allowed_origins=[ORIGIN],
+            allowed_hosts=["private.test"],
+            begin_limiter=RateLimiter(1, 60, clock=broker.clock),
+        )
+        async with httpx2.AsyncClient(
+            transport=httpx2.ASGITransport(app=app), base_url=ORIGIN
+        ) as http:
+            for _ in range(5):
+                await http.post("/auth/begin", headers=JSON_HEADERS, json={})
+        assert len(calls) == 1

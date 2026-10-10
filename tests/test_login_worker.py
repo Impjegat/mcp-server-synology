@@ -371,3 +371,44 @@ class TestRunWorkerDiscipline:
         before = copy.deepcopy(payload)
         await run_worker(payload)
         assert payload == before
+
+
+class TestWorkerEnvironment:
+    def test_certificate_trust_settings_are_kept_for_a_private_ca(self, monkeypatch):
+        from private_auth.login import _minimal_environment
+
+        for name in ("REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "SSL_CERT_FILE", "SSL_CERT_DIR"):
+            monkeypatch.setenv(name, f"/etc/ssl/{name.lower()}.pem")
+
+        env = _minimal_environment()
+
+        for name in ("REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "SSL_CERT_FILE", "SSL_CERT_DIR"):
+            assert env[name] == f"/etc/ssl/{name.lower()}.pem"
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "ALL_PROXY",
+            "http_proxy",
+            "https_proxy",
+            "NO_PROXY",
+            "SYNOLOGY_PASSWORD",
+            "SYNOLOGY_URL",
+            "AUTO_LOGIN",
+            "PYTHONPATH",
+            "PYTHONSTARTUP",
+        ],
+    )
+    def test_proxies_credentials_and_python_settings_are_not_inherited(self, monkeypatch, name):
+        from private_auth.login import _minimal_environment
+
+        monkeypatch.setenv(name, "leak-me")
+        assert name not in _minimal_environment()
+        assert _minimal_environment()["SYNOLOGY_AUTH_MODE"] == "broker"
+
+    def test_the_choice_to_drop_proxies_is_written_down(self):
+        from private_auth.login import _minimal_environment
+
+        assert "proxy" in _minimal_environment.__doc__.lower()

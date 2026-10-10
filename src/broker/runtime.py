@@ -137,6 +137,14 @@ class BrokerRuntime:
     def bridge_for(self, client_id: str) -> SessionBridge:
         return _ClientBridge(self, self.policy.clients[client_id])
 
+    def nas_config(self, nas: str) -> Mapping[str, Any]:
+        """The configuration of the NAS called `nas`: where it is and the account to
+        sign in as, never a credential. Refuses an unknown name clearly."""
+        try:
+            return self._nas_configs[nas]
+        except KeyError:
+            raise ValueError(f"No NAS named {nas!r} is configured") from None
+
     # -- sessions ----------------------------------------------------------
 
     def install_login(
@@ -148,7 +156,7 @@ class BrokerRuntime:
         if nas not in client.nas:
             raise KeyError(nas)
         record, replaced = self.sessions.install(
-            client_id, nas, self._nas_configs[nas]["base_url"], session_id, syno_token
+            client_id, nas, self.nas_config(nas)["base_url"], session_id, syno_token
         )
         if replaced is not None:
             self._logout_in_background(replaced)

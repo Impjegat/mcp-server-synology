@@ -279,3 +279,26 @@ class TestAttemptLimit:
         for _ in range(3):
             await service.attempt(pending, password="x")
         assert 0 < service.locked_for(pending) <= 601
+
+
+class TestNasConfigAccessor:
+    def test_the_runtime_gives_a_nas_its_configuration(self, broker):
+        config = broker.runtime.nas_config("nas1")
+        assert config["base_url"] == "https://nas1.example.test:5001"
+        assert config["username"] == "reader"
+
+    def test_an_unknown_nas_is_refused_by_name(self, broker):
+        with pytest.raises(ValueError, match="No NAS named 'nas9'"):
+            broker.runtime.nas_config("nas9")
+
+    def test_the_login_service_reports_an_unknown_nas_clearly_too(self, broker):
+        service, _ = _service(broker, OK)
+        with pytest.raises(ValueError, match="nas9"):
+            service.account_for("nas9")
+
+    def test_the_login_service_no_longer_reaches_into_a_private_attribute(self):
+        import inspect
+
+        import private_auth.login as login
+
+        assert "_nas_configs" not in inspect.getsource(login)

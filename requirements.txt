@@ -15,6 +15,10 @@ python-dotenv
 # private_auth package imports it, so the single-process server runs without it.
 webauthn>=3.0.1,<4
 
+# Python 3.10 has no BaseExceptionGroup; the adapter inspects the groups anyio raises.
+# (anyio already installs it there; named here because the adapter imports it.)
+exceptiongroup>=1.0.2; python_version < "3.11"
+
 # Testing dependencies
 pytest>=9.1.1
 pytest-asyncio>=1.4.0

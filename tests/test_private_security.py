@@ -179,3 +179,51 @@ class TestHeaders:
             "form-action 'self'",
         ):
             assert directive in CONTENT_SECURITY_POLICY
+
+
+class TestNothingIsKeptForEver:
+    def test_asking_about_a_key_creates_no_entry(self):
+        limiter = RateLimiter(3, 60, clock=FakeClock())
+        for index in range(1000):
+            assert limiter.allow(f"address-{index}")
+            assert limiter.retry_after(f"address-{index}") == 0
+        assert limiter._events == {}
+
+    def test_an_entry_is_dropped_once_its_events_have_aged_out(self):
+        clock = FakeClock()
+        limiter = RateLimiter(3, 60, clock=clock)
+        limiter.record("k")
+        assert "k" in limiter._events
+        clock.advance(61)
+        assert limiter.allow("k")
+        assert "k" not in limiter._events
+
+    def test_a_locked_key_is_kept_until_the_lock_ends(self):
+        clock = FakeClock()
+        limiter = RateLimiter(1, 60, lockout_seconds=300, clock=clock)
+        limiter.record("k")
+        clock.advance(61)
+        assert not limiter.allow("k")  # the window has passed, the lockout has not
+        clock.advance(300)
+        assert limiter.allow("k")
+
+    def test_a_flood_of_distinct_keys_is_swept(self, monkeypatch):
+        import private_auth.security as security
+
+        monkeypatch.setattr(security, "_SWEEP_ABOVE", 50)
+        clock = FakeClock()
+        limiter = RateLimiter(5, 60, clock=clock)
+        for index in range(200):
+            limiter.record(f"address-{index}")
+        clock.advance(61)
+        limiter.record("one-more")
+        assert len(limiter._events) == 1
+
+    def test_expired_owner_sessions_go_when_a_new_one_is_made(self):
+        clock = FakeClock()
+        sessions = OwnerSessions(idle_seconds=100, absolute_seconds=1000, clock=clock)
+        for _ in range(5):
+            sessions.create()
+        clock.advance(101)
+        sessions.create()
+        assert len(sessions._sessions) == 1

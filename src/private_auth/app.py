@@ -192,6 +192,7 @@ class PrivateLoginApp:
         sessions: Optional[OwnerSessions] = None,
         auth_limiter: Optional[RateLimiter] = None,
         enroll_limiter: Optional[RateLimiter] = None,
+        begin_limiter: Optional[RateLimiter] = None,
     ):
         if not allowed_origins or not allowed_hosts:
             raise ValueError("allowed_origins and allowed_hosts are required")
@@ -210,6 +211,10 @@ class PrivateLoginApp:
         # courtesy, not the control.
         self.auth_limiter = auth_limiter or RateLimiter(10, 300, lockout_seconds=300)
         self.enroll_limiter = enroll_limiter or RateLimiter(5, 600, lockout_seconds=600)
+        # /auth/begin and /enroll/begin need no sign-in and each makes a challenge
+        # and reads the store, so every call counts, not only a failure. Thirty a
+        # minute per address is far more than a person needs.
+        self.begin_limiter = begin_limiter or RateLimiter(30, 60)
 
     @property
     def cookie_name(self) -> str:
@@ -484,6 +489,10 @@ class PrivateLoginApp:
     async def auth_begin(self, request: Request) -> Response:
         if not self._origin_ok(request):
             return JSONResponse({"ok": False}, status_code=403)
+        throttle = f"auth:{self._client_address(request)}"
+        if not self.begin_limiter.allow(throttle):
+            return JSONResponse({"ok": False}, status_code=429)
+        self.begin_limiter.record(throttle)
         begun = self.owner.begin_authentication()
         if begun is None:
             return JSONResponse({"ok": False, "error": "not_enrolled"}, status_code=409)
@@ -528,6 +537,10 @@ class PrivateLoginApp:
         address = self._client_address(request)
         if not self.enroll_limiter.allow(address):
             return JSONResponse({"ok": False}, status_code=429)
+        throttle = f"enroll:{address}"
+        if not self.begin_limiter.allow(throttle):
+            return JSONResponse({"ok": False}, status_code=429)
+        self.begin_limiter.record(throttle)
         data = await self._json(request)
         code = (data or {}).get("code")
         begun = self.owner.begin_enrollment(code) if isinstance(code, str) and code else None
