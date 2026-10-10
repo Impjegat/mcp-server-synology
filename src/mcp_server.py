@@ -18,6 +18,7 @@ from mcp.server import NotificationOptions, Server, ServerRequestContext
 from mcp.shared.exceptions import MCPError
 
 from auth import SynologyAuth, iter_all_secrets, request_secrets
+from broker.errors import AuthenticationRequired, AuthorizationDenied
 from config import config
 from container import SynologyContainer
 from downloadstation import SynologyDownloadStation
@@ -291,6 +292,10 @@ class SynologyMCPServer:
         self.nfs_instances: Dict[str, SynologyNFS] = {}
         self.usermgr_instances: Dict[str, SynologyUserManager] = {}
         self.nas_name_map: Dict[str, str] = {}  # nas_name -> base_url
+        if config.auth_mode == "broker":
+            # NAS names resolve before anyone has signed in: they come from
+            # configuration, not from a login.
+            self.nas_name_map = {name: cfg["base_url"] for name, cfg in config.nas_configs.items()}
         # Single source of truth for tool dispatch — see _build_tool_registry.
         self._tool_registry: Dict[str, Callable] = self._build_tool_registry()
         # One compiled JSON-Schema validator per tool, built from the same
@@ -362,6 +367,11 @@ class SynologyMCPServer:
             registry[f"synology_container_{suffix}"] = (
                 lambda arguments, _suffix=suffix: self._handle_container_call(arguments, _suffix)
             )
+        if config.auth_mode == "broker":
+            # No tool may take a NAS password or one-time code: it would put
+            # them in the model's context. Not registered means not listed
+            # and not callable (an unknown name is a protocol error).
+            del registry["synology_login"]
         return registry
 
     def _is_tool_allowed(self, name: str) -> bool:
@@ -391,10 +401,35 @@ class SynologyMCPServer:
         )
         return tool
 
+    def _require_session(self, base_url: str) -> None:
+        """Raise unless there is an active session for `base_url`. In broker
+        (manual authentication) mode that is `AuthenticationRequired`, which
+        tells the caller to have the user sign in privately; there is no
+        login tool to point at."""
+        if base_url in self.sessions:
+            return
+        if config.auth_mode == "broker":
+            raise AuthenticationRequired()
+        raise Exception(f"No active session for {base_url}. Please login first.")
+
+    def install_session(
+        self, base_url: str, session_id: str, syno_token: Optional[str] = None
+    ) -> None:
+        """Adopt a DSM session that was established elsewhere (by the private
+        login path) for `base_url`, and drop cached service instances so they
+        rebuild with it. This is how a session reaches the server in broker
+        mode, where no tool accepts credentials."""
+        self.sessions[base_url] = session_id
+        if syno_token:
+            self.syno_tokens[base_url] = syno_token
+        else:
+            self.syno_tokens.pop(base_url, None)
+        for inst_dict in self._service_instance_dicts():
+            inst_dict.pop(base_url, None)
+
     def _get_filestation(self, base_url: str) -> SynologyFileStation:
         """Get or create FileStation instance for a base URL."""
-        if base_url not in self.sessions:
-            raise Exception(f"No active session for {base_url}. Please login first.")
+        self._require_session(base_url)
 
         if base_url not in self.filestation_instances:
             session_id = self.sessions[base_url]
@@ -410,8 +445,7 @@ class SynologyMCPServer:
 
     def _get_downloadstation(self, base_url: str) -> SynologyDownloadStation:
         """Get or create DownloadStation instance for a base URL."""
-        if base_url not in self.sessions:
-            raise Exception(f"No active session for {base_url}. Please login first.")
+        self._require_session(base_url)
 
         if base_url not in self.downloadstation_instances:
             session_id = self.sessions[base_url]
@@ -426,8 +460,7 @@ class SynologyMCPServer:
 
     def _get_health(self, base_url: str) -> SynologyHealth:
         """Get or create Health instance for a base URL."""
-        if base_url not in self.sessions:
-            raise Exception(f"No active session for {base_url}. Please login first.")
+        self._require_session(base_url)
 
         if base_url not in self.health_instances:
             session_id = self.sessions[base_url]
@@ -442,8 +475,7 @@ class SynologyMCPServer:
 
     def _get_container(self, base_url: str) -> SynologyContainer:
         """Get or create Container Manager instance for a base URL."""
-        if base_url not in self.sessions:
-            raise Exception(f"No active session for {base_url}. Please login first.")
+        self._require_session(base_url)
 
         if base_url not in self.container_instances:
             session_id = self.sessions[base_url]
@@ -458,8 +490,7 @@ class SynologyMCPServer:
 
     def _get_nfs(self, base_url: str) -> SynologyNFS:
         """Get or create NFS instance for a base URL."""
-        if base_url not in self.sessions:
-            raise Exception(f"No active session for {base_url}. Please login first.")
+        self._require_session(base_url)
 
         if base_url not in self.nfs_instances:
             session_id = self.sessions[base_url]
@@ -474,8 +505,7 @@ class SynologyMCPServer:
 
     def _get_usermgr(self, base_url: str) -> SynologyUserManager:
         """Get or create UserManager instance for a base URL."""
-        if base_url not in self.sessions:
-            raise Exception(f"No active session for {base_url}. Please login first.")
+        self._require_session(base_url)
 
         if base_url not in self.usermgr_instances:
             session_id = self.sessions[base_url]
@@ -491,6 +521,12 @@ class SynologyMCPServer:
     async def _auto_login_if_configured(self):
         """Automatically login to all configured NAS units."""
         logger.debug(f"Config: {config}")
+
+        if config.auth_mode == "broker":
+            # Manual authentication: nothing here ever signs in. The server
+            # starts disconnected, and a person signs in privately.
+            logger.info("Manual authentication mode: starting disconnected")
+            return
 
         if not config.auto_login:
             logger.info("Auto-login disabled")
@@ -631,7 +667,16 @@ class SynologyMCPServer:
         apart from `_get_tool_definitions()` because discovery only lists them
         when auto-login isn't in use, but they are always registered — so
         argument validation (`_compile_input_validators`) needs their schemas
-        whether or not they are listed."""
+        whether or not they are listed.
+
+        In broker mode only logout remains: no tool may take a password.
+        """
+        tools = self._all_session_tool_definitions()
+        if config.auth_mode == "broker":
+            tools = [t for t in tools if t.name != "synology_login"]
+        return tools
+
+    def _all_session_tool_definitions(self) -> list[types.Tool]:
         return [
             self._annotate_tool(t)
             for t in [
@@ -818,6 +863,14 @@ class SynologyMCPServer:
             logger.debug(f"Executing tool: {name}")
             result = await handler(arguments)
             return types.CallToolResult(content=self._redact_tool_result(result), is_error=False)
+        except AuthenticationRequired as e:
+            # Expected whenever nobody has signed in (or the session ended):
+            # a stable, value-free message, not a stack trace.
+            logger.info(f"Tool {name} needs authentication")
+            return self._error_result(str(e))
+        except AuthorizationDenied as e:
+            logger.warning(f"Tool {name} denied by policy")
+            return self._error_result(str(e))
         except ToolExecutionError as e:
             message = self._redact_text(str(e))
             logger.warning(f"Tool {name} failed: {message}")
@@ -904,6 +957,13 @@ class SynologyMCPServer:
         # Try explicit base_url
         base_url = arguments.get("base_url")
         if base_url:
+            if config.auth_mode == "broker":
+                configured = {cfg["base_url"] for cfg in config.nas_configs.values()}
+                if base_url not in configured:
+                    raise AuthorizationDenied(
+                        "AUTHORIZATION_DENIED: only a configured NAS may be targeted. "
+                        "Use nas_name with one of the names from synology_list_nas."
+                    )
             return base_url
 
         # Fall back to first connected session
@@ -944,14 +1004,7 @@ class SynologyMCPServer:
         """
         if not session_id:
             return
-        self.sessions[base_url] = session_id
-        if syno_token:
-            self.syno_tokens[base_url] = syno_token
-        else:
-            self.syno_tokens.pop(base_url, None)
-        # Drop cached service instances so they rebuild with the refreshed session.
-        for inst_dict in self._service_instance_dicts():
-            inst_dict.pop(base_url, None)
+        self.install_session(base_url, session_id, syno_token)
 
     def _restricted_login_error(self, base_url: str) -> Optional[str]:
         """In restricted mode, only allow login to a NAS already configured
@@ -1057,7 +1110,20 @@ class SynologyMCPServer:
             raise ToolExecutionError(f"No active session found for {base_url}")
 
         session_id = self.sessions[base_url]
-        auth = self.auth_instances[base_url]
+        auth = self.auth_instances.get(base_url)
+        if auth is None:
+            # A session installed from outside (broker mode) has no SynologyAuth
+            # here to log it out remotely; ending it locally is what this can do.
+            del self.sessions[base_url]
+            self.syno_tokens.pop(base_url, None)
+            for inst_dict in self._service_instance_dicts():
+                inst_dict.pop(base_url, None)
+            return [
+                types.TextContent(
+                    type="text",
+                    text=f"Disconnected from {base_url}; local session data has been cleared.",
+                )
+            ]
 
         # Use the improved logout method
         result = auth.logout(session_id)
@@ -1118,6 +1184,8 @@ class SynologyMCPServer:
         else:
             status_info.append("⚠ No Synology credentials configured")
         status_info.append(f"✓ Auto-login: {'enabled' if config.auto_login else 'disabled'}")
+        if config.auth_mode == "broker":
+            status_info.append("✓ Authentication: manual (sign in privately; no password is held)")
 
         # Show active sessions with NAS names
         if self.sessions:
@@ -1135,6 +1203,11 @@ class SynologyMCPServer:
                 status_info.append(
                     f"DownloadStation instances: {len(self.downloadstation_instances)}"
                 )
+        elif config.auth_mode == "broker":
+            status_info.append(
+                "\nNo active Synology sessions: AUTHENTICATION_REQUIRED. Ask the user to "
+                "sign in through the private login page."
+            )
         else:
             status_info.append("\nNo active Synology sessions")
 

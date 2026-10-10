@@ -22,6 +22,39 @@ class InsecureURLError(ValueError):
     """Raised at startup when a configured NAS URL does not use HTTPS."""
 
 
+class ManualAuthConfigError(ValueError):
+    """Raised at startup when broker (manual authentication) mode is combined
+    with a stored credential or automatic login. The message names the
+    offending settings and never their values."""
+
+
+# Authentication modes. `legacy` is the long-standing behaviour: credentials
+# come from settings.json or .env and the server logs in by itself. `broker`
+# is manual authentication: the process holds no NAS password, no OTP and no
+# trusted-device token, never logs in on its own and never renews a session
+# from a stored secret — a person signs in privately and only the resulting
+# session is handed to it (plans/2026-10-06-manual-authentication/PLAN.md).
+AUTH_MODE_LEGACY = "legacy"
+AUTH_MODE_BROKER = "broker"
+_AUTH_MODES = (AUTH_MODE_LEGACY, AUTH_MODE_BROKER)
+
+
+def parse_auth_mode(value: Optional[str]) -> str:
+    """Parse SYNOLOGY_AUTH_MODE. Unset or empty means `legacy`; anything that
+    isn't a known mode is an error rather than a silent fallback, so a typo
+    can never quietly turn a manual-authentication deployment into a
+    password-holding one."""
+    if value is None or not value.strip():
+        return AUTH_MODE_LEGACY
+    lowered = value.strip().lower()
+    if lowered not in _AUTH_MODES:
+        raise ManualAuthConfigError(
+            f"SYNOLOGY_AUTH_MODE must be one of {', '.join(_AUTH_MODES)}; "
+            "the value given is not recognised."
+        )
+    return lowered
+
+
 # Before CA-bundle-path support, VERIFY_SSL's parsing was
 # `.lower() == "true"`, so any other value — including these common
 # boolean aliases — silently meant "disabled". Recognizing them here keeps
@@ -115,21 +148,59 @@ class SynologyConfig:
 
     def __init__(self, env_file: Optional[str] = None):
         """Initialize configuration from settings.json."""
-        # Legacy .env support (deprecated - use settings.json instead)
-        if env_file:
-            load_dotenv(env_file)
-        elif os.path.exists(".env"):
-            load_dotenv(".env")
+        # The mode is read from the real process environment only — never from
+        # a .env file, which broker mode must not load at all.
+        self.auth_mode = parse_auth_mode(os.environ.get("SYNOLOGY_AUTH_MODE"))
+        # Names (never values) of stored-credential settings found in broker
+        # mode; reported together once everything has been read.
+        self._broker_violations: List[str] = []
+
+        # Legacy .env support (deprecated - use settings.json instead). Broker
+        # mode never reads it: no silent fallback to a file that may hold a
+        # password.
+        if self.auth_mode == AUTH_MODE_LEGACY:
+            if env_file:
+                load_dotenv(env_file)
+            elif os.path.exists(".env"):
+                load_dotenv(".env")
 
         self._load_env_settings()
         self._load_settings()
+        if self.auth_mode == AUTH_MODE_BROKER:
+            self._finish_broker_mode()
+
+    def _finish_broker_mode(self) -> None:
+        """Reject stored credentials, and turn a bare SYNOLOGY_URL into the
+        single endpoint "default" so NAS discovery works without a password."""
+        if self._broker_violations:
+            raise ManualAuthConfigError(
+                "SYNOLOGY_AUTH_MODE=broker does not accept stored credentials, one-time "
+                "codes, trusted-device tokens or automatic login. Remove these settings: "
+                + ", ".join(sorted(set(self._broker_violations)))
+                + "."
+            )
+        if not self.nas_configs and self.synology_url:
+            self.nas_configs["default"] = {
+                "base_url": self.synology_url,
+                "username": self.synology_username or "",
+                "verify_ssl": self.verify_ssl,
+                "note": "",
+            }
 
     def _load_env_settings(self):
         """Load non-sensitive settings from environment / .env."""
         self.server_name = os.getenv("MCP_SERVER_NAME", "synology-mcp-server")
         self.server_version = os.getenv("MCP_SERVER_VERSION", "1.0.0")
         self.default_session_timeout = int(os.getenv("SESSION_TIMEOUT", "3600"))
-        self.auto_login = os.getenv("AUTO_LOGIN", "true").lower() == "true"
+        if self.auth_mode == AUTH_MODE_BROKER:
+            # Broker mode never logs in by itself; an explicit request to is a
+            # configuration error, not something to ignore silently.
+            auto_login_env = os.getenv("AUTO_LOGIN")
+            if auto_login_env is not None and auto_login_env.strip().lower() in _VERIFY_SSL_TRUTHY:
+                self._broker_violations.append("AUTO_LOGIN")
+            self.auto_login = False
+        else:
+            self.auto_login = os.getenv("AUTO_LOGIN", "true").lower() == "true"
         self.verify_ssl = _parse_verify_ssl(os.getenv("VERIFY_SSL", "true"))
         # Restricted mode: the server exposes only browsing and monitoring
         # tools by default (plans/shipped/2026-09-27-remediation-roadmap/
@@ -162,6 +233,14 @@ class SynologyConfig:
         # don't need this. Read-only here; auto-login consumes it but does
         # not clear it (auto-login only runs once per process start today).
         self.synology_otp_code = os.getenv("SYNOLOGY_OTP_CODE")
+        if self.auth_mode == AUTH_MODE_BROKER:
+            # Reject, and then drop the value so nothing downstream can use it.
+            if self.synology_password:
+                self._broker_violations.append("SYNOLOGY_PASSWORD")
+            if self.synology_otp_code:
+                self._broker_violations.append("SYNOLOGY_OTP_CODE")
+            self.synology_password = None
+            self.synology_otp_code = None
 
     def _check_file_permissions(self, path: Path) -> bool:
         """Check if secrets file has safe permissions (0600 or stricter).
@@ -320,7 +399,15 @@ class SynologyConfig:
         back to logging or printing `device_id` when this returns False —
         that would defeat the point of storing it out of logs in the first
         place; instead, the next login simply falls back to OTP again.
+
+        Broker mode never persists a device token: a trusted-device grant is
+        a reusable credential, and manual authentication asks for a fresh
+        code at every new sign-in.
         """
+        if self.auth_mode == AUTH_MODE_BROKER:
+            logger.warning("Not saving a trusted-device token: broker mode never persists one.")
+            return False
+
         if not SETTINGS_FILE.exists():
             logger.warning(
                 f"Cannot save device token for '{nas_name}': {SETTINGS_FILE} does not exist "
@@ -379,7 +466,15 @@ class SynologyConfig:
                     # would fail outright given the HTTPS-only base_url below.
                     port = nas_info.get("port", 5001)
                     username = nas_info.get("username", "")
-                    password = nas_info.get("password", "")
+                    broker_mode = self.auth_mode == AUTH_MODE_BROKER
+                    if broker_mode:
+                        # Endpoint metadata only. A credential here is a
+                        # configuration error; record which field, never its
+                        # value, and keep it out of everything below.
+                        for secret_key in ("password", "otp_code", "device_id"):
+                            if nas_info.get(secret_key):
+                                self._broker_violations.append(f"synology.{nas_name}.{secret_key}")
+                    password = "" if broker_mode else nas_info.get("password", "")
                     # Optional 2FA/OTP support (DSM Login Web API Guide):
                     #   - `otp_code`: one-shot code from authenticator. Needed
                     #     only on the FIRST login after enabling 2FA on the
@@ -389,18 +484,18 @@ class SynologyConfig:
                     #   - `device_id`: long-lived trusted-device token. When
                     #     present, DSM skips OTP for this login and for the
                     #     silent re-auth path (DSM error 119 recovery).
-                    otp_code = nas_info.get("otp_code") or None
-                    device_id = nas_info.get("device_id") or None
+                    otp_code = None if broker_mode else (nas_info.get("otp_code") or None)
+                    device_id = None if broker_mode else (nas_info.get("device_id") or None)
 
                     if not host:
                         logger.warning(f"Missing 'host' for NAS '{nas_name}' in {SETTINGS_FILE}")
                         continue
-                    if not username:
+                    if not username and not broker_mode:
                         logger.warning(
                             f"Missing 'username' for NAS '{nas_name}' in {SETTINGS_FILE}"
                         )
                         continue
-                    if not password:
+                    if not password and not broker_mode:
                         logger.warning(
                             f"Missing 'password' for NAS '{nas_name}' in {SETTINGS_FILE}"
                         )
@@ -411,6 +506,17 @@ class SynologyConfig:
                     # connection will simply fail rather than transmit in the
                     # clear.
                     base_url = f"https://{host}:{port}"
+
+                    if broker_mode:
+                        # A NAS is configured by where it is, not by a secret:
+                        # discovery and status work before anyone has signed in.
+                        self.nas_configs[nas_name] = {
+                            "base_url": base_url,
+                            "username": username,
+                            "verify_ssl": self.verify_ssl,
+                            "note": nas_info.get("note", ""),
+                        }
+                        continue
 
                     self.nas_configs[nas_name] = {
                         "base_url": base_url,
@@ -426,7 +532,11 @@ class SynologyConfig:
                 server_section = data.get("server", {})
                 if server_section:
                     if "auto_login" in server_section:
-                        self.auto_login = server_section["auto_login"]
+                        if self.auth_mode == AUTH_MODE_BROKER:
+                            if server_section["auto_login"]:
+                                self._broker_violations.append("server.auto_login")
+                        else:
+                            self.auto_login = server_section["auto_login"]
                     if "verify_ssl" in server_section:
                         value = server_section["verify_ssl"]
                         self.verify_ssl = (
@@ -472,10 +582,17 @@ class SynologyConfig:
         return list(self.nas_configs.keys())
 
     def has_synology_credentials(self) -> bool:
-        """Check if at least one NAS has credentials."""
+        """Check if at least one NAS has credentials. Never true in broker
+        mode, which holds none."""
+        if self.auth_mode == AUTH_MODE_BROKER:
+            return False
         return bool(self.nas_configs) or bool(
             self.synology_url and self.synology_username and self.synology_password
         )
+
+    def has_nas_endpoints(self) -> bool:
+        """Check if at least one NAS is configured, with or without credentials."""
+        return bool(self.nas_configs) or bool(self.synology_url)
 
     def iter_configured_secrets(self):
         """Yield every configured (not necessarily yet-live) secret value
@@ -547,7 +664,10 @@ class SynologyConfig:
     def validate_config(self) -> list[str]:
         """Validate configuration and return list of errors."""
         errors = []
-        if not self.has_synology_credentials():
+        if self.auth_mode == AUTH_MODE_BROKER:
+            if not self.has_nas_endpoints():
+                errors.append("No NAS endpoint configured in settings.json or SYNOLOGY_URL")
+        elif not self.has_synology_credentials():
             errors.append("No Synology credentials found in settings.json or .env")
         if self.default_session_timeout < 60:
             errors.append("SESSION_TIMEOUT must be at least 60 seconds")
@@ -556,8 +676,8 @@ class SynologyConfig:
     def __str__(self) -> str:
         nas_names = ", ".join(self.nas_configs.keys()) if self.nas_configs else "none"
         return (
-            f"SynologyConfig(nas=[{nas_names}], auto_login={self.auto_login}, "
-            f"restricted_mode={self.restricted_mode})"
+            f"SynologyConfig(nas=[{nas_names}], auth_mode={self.auth_mode}, "
+            f"auto_login={self.auto_login}, restricted_mode={self.restricted_mode})"
         )
 
 

@@ -21,8 +21,12 @@ import sys
 
 from dotenv import load_dotenv
 
-# Legacy .env support (deprecated - use settings.json instead)
-load_dotenv()
+# Legacy .env support (deprecated - use settings.json instead). Broker
+# (manual authentication) mode never reads a .env file: it may hold a password,
+# and there must be no silent fallback to it. The mode comes from the real
+# process environment only.
+if os.environ.get("SYNOLOGY_AUTH_MODE", "").strip().lower() != "broker":
+    load_dotenv()
 
 # Add src directory to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))

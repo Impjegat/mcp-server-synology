@@ -3,6 +3,15 @@
 ## [Unreleased]
 
 ### Added
+- **Manual authentication mode** (`SYNOLOGY_AUTH_MODE=broker`), the first step of `plans/2026-10-06-manual-authentication/`. The mode is read from the real process environment only, and the default (`legacy`) behaves exactly as before. In `broker` mode the process:
+  - holds no NAS password, one-time code or trusted-device token. A stored credential (`password`, `otp_code`, `device_id` in settings.json; `SYNOLOGY_PASSWORD`, `SYNOLOGY_OTP_CODE`, `AUTO_LOGIN=true`, `server.auto_login`) is rejected at startup, and the message names the setting, never its value;
+  - never reads a `.env` file, in `main.py` or in `config.py`;
+  - starts disconnected, and knows its NAS endpoints without a password, so `synology_status` and `synology_list_nas` work before anyone has signed in;
+  - never signs in on its own and never renews a lost session from a stored secret;
+  - does not register or list `synology_login`, so no tool can take a password;
+  - only accepts a configured NAS as `base_url`; any other target is `AUTHORIZATION_DENIED`.
+- `AuthenticationRequired` (stable code `AUTHENTICATION_REQUIRED`) and `AuthorizationDenied`, in `src/broker/errors.py`. A lost DSM session (106, 107 or 119) now raises `AuthenticationRequired` from the shared API client, File Station and Download Station, and the tool result is an `isError: true` with a fixed message that tells the caller to have the user sign in privately. A health summary stops at the first lost session instead of reporting eleven failed checks as "partial".
+- `SynologyMCPServer.install_session()`, the one place a session established elsewhere enters the server.
 - **Continuous integration** (`.github/workflows/tests.yml`): the unit tests run on Linux and Windows, the Docker image is built and the stdio protocol tests are run against it through the same command the README gives MCP clients, and lint/format are checked. End-to-end tests (`tests/test_stdio_protocol.py`) start the real server and speak MCP to it over stdio. Dependabot is told to leave major `mcp` upgrades to a deliberate migration.
 
 ### Security
@@ -39,6 +48,8 @@
 - Starting a container from the Docker quick start did not pass `.env` to it, although the README said to create one.
 - Windows: loading `settings.json` crashed with an `AttributeError` (`os.getuid()` does not exist there); the permission check is now skipped with a warning on platforms without it.
 - `synology_health_summary` no longer reports `success: true` with empty data when the NAS cannot be reached. It used to drop every failed check and always succeed, so an unavailable NAS looked like a healthy, empty summary.
+- File Station and Download Station now recover from an expired session (DSM 119) in legacy mode, as the shared API client always has: the session is renewed once from the cached login and a read is repeated. A write is never repeated.
+- Download Station's `get_info`, `get_config` and `get_statistics` no longer answer a lost session with made-up default values in broker mode.
 - `get_file_info` no longer reports a nonexistent path as an empty file. DSM answers `getinfo` for a missing path with `success: true` and an error `code` (408) inside the file entry; that is now raised as "File not found" (any other per-entry code as an error), so the tool returns `isError: true`.
 
 ### Removed
