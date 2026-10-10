@@ -107,7 +107,14 @@ def _parse_restricted_mode(value: Any) -> bool:
 
 
 # XDG Base Directory Specification: ~/.config/synology-mcp/
-XDG_CONFIG_HOME: Path = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+# Looked up lazily: `os.environ.get(name, Path.home() / ...)` evaluates Path.home() even when
+# the variable is set, which raises in a process started with a minimal environment (no
+# HOME/USERPROFILE), such as the private login worker.
+XDG_CONFIG_HOME: Path = (
+    Path(os.environ["XDG_CONFIG_HOME"])
+    if os.environ.get("XDG_CONFIG_HOME")
+    else Path.home() / ".config"
+)
 CONFIG_DIR = XDG_CONFIG_HOME / "synology-mcp"
 SETTINGS_FILE = CONFIG_DIR / "settings.json"
 

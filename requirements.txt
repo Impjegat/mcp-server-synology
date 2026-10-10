@@ -11,6 +11,10 @@ mcp>=2.2.0,<3
 jsonschema>=4.20.0
 python-dotenv
 
+# Passkey (WebAuthn) sign-in for the broker's private login page. Only the broker's
+# private_auth package imports it, so the single-process server runs without it.
+webauthn>=3.0.1,<4
+
 # Testing dependencies
 pytest>=9.1.1
 pytest-asyncio>=1.4.0

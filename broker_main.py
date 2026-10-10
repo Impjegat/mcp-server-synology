@@ -12,7 +12,9 @@ login that a person completes.
 Usage:
     python broker_main.py serve --policy PATH [--host HOST] [--port PORT]
         [--allowed-host NAME[:PORT]]... [--tls-cert FILE --tls-key FILE]
+        [--private-origin URL [--private-port PORT] [--owner-store PATH]]
     python broker_main.py new-token
+    python broker_main.py enroll {new-code|list|revoke ID} [--owner-store PATH]
 
 Run it on the host that holds the policy file and the TLS key, under an
 account the AI applications cannot read or administer. See
@@ -48,6 +50,40 @@ def _is_loopback(host: str) -> bool:
         return False
 
 
+DEFAULT_OWNER_STORE = os.path.join("~", ".config", "synology-mcp", "owner.json")
+
+
+def enroll(args: argparse.Namespace) -> int:
+    """Owner passkey administration. Run on the broker host: it needs the owner
+    store, which is exactly why an AI application on another machine cannot do it."""
+    from private_auth.owner import OwnerStore
+
+    store = OwnerStore(os.path.expanduser(args.owner_store))
+    if args.enroll_command == "new-code":
+        try:
+            code = store.new_enrollment_code(minutes=args.minutes, allow_additional=args.add_device)
+        except PermissionError as error:
+            print(str(error), file=sys.stderr)
+            return 2
+        print(f"One-time enrollment code (valid {args.minutes} minutes, works once):")
+        print(f"  {code}")
+        print("Open the private interface's /enroll page on your trusted device and type it there.")
+        return 0
+    if args.enroll_command == "list":
+        credentials = store.credentials()
+        if not credentials:
+            print("No passkey is enrolled.")
+        for credential in credentials:
+            import base64
+
+            ident = base64.urlsafe_b64encode(credential.credential_id).rstrip(b"=").decode()
+            print(f"{ident}  {credential.label}  created {credential.created}")
+        return 0
+    removed = store.remove_credential(args.credential_id)
+    print("Removed." if removed else "No such passkey.")
+    return 0 if removed else 1
+
+
 def new_token() -> int:
     from broker.policy import generate_token
 
@@ -57,6 +93,102 @@ def new_token() -> int:
     print('Put only this digest in the policy file, under the client\'s "token_sha256":')
     print(f"  {digest}")
     return 0
+
+
+def _private_settings(args: argparse.Namespace):
+    """The private login's settings, None if it is not configured, or an exit code
+    if they are unsafe. It has its own address, port and TLS: it is never served
+    from the MCP listener."""
+    if not args.private_origin:
+        return None
+    from urllib.parse import urlparse
+
+    origin = urlparse(args.private_origin)
+    host = args.private_host or args.host
+    port = args.private_port
+    cert = args.private_tls_cert or args.tls_cert
+    key = args.private_tls_key or args.tls_key
+    plain_ok = _is_loopback(host) and args.allow_plain_http_loopback
+    if bool(cert) != bool(key):
+        print("Give both --private-tls-cert and --private-tls-key, or neither.", file=sys.stderr)
+        return 2
+    if not (cert and key) and not plain_ok:
+        print(
+            "Refusing to start the private login without TLS: give --private-tls-cert and "
+            "--private-tls-key (or --tls-cert and --tls-key). Plain HTTP is for loopback testing only.",
+            file=sys.stderr,
+        )
+        return 2
+    if origin.scheme not in ("https", "http") or not origin.hostname:
+        print("--private-origin must be a URL such as https://broker.example:8444", file=sys.stderr)
+        return 2
+    if origin.scheme == "http" and not plain_ok:
+        print("--private-origin must be https unless this is loopback testing.", file=sys.stderr)
+        return 2
+    allowed_hosts = list(args.private_allowed_host) or (
+        ["127.0.0.1", "localhost"] if _is_loopback(host) else []
+    )
+    if not allowed_hosts:
+        print(
+            "A private login that is not on loopback needs --private-allowed-host.", file=sys.stderr
+        )
+        return 2
+    return {
+        "host": host,
+        "port": port,
+        "cert": cert,
+        "key": key,
+        "origin": args.private_origin.rstrip("/"),
+        "rp_id": args.rp_id or origin.hostname,
+        "allowed_hosts": allowed_hosts,
+        "store": os.path.expanduser(args.owner_store),
+        "secure_cookies": origin.scheme == "https",
+    }
+
+
+def _start_private_login(runtime, private, logger):
+    """Run the private login on its own port, in a background thread, and return
+    `(server, thread)`. Its sessions, passkeys and attempt limits live only in
+    this process; it shares nothing with the MCP listener but the broker's own
+    session manager."""
+    import threading
+
+    import uvicorn
+
+    from private_auth.app import create_private_app
+    from private_auth.login import LoginService
+    from private_auth.owner import OwnerStore, PasskeyOwnerAuth
+
+    owner = PasskeyOwnerAuth(
+        OwnerStore(private["store"]), rp_id=private["rp_id"], origin=private["origin"]
+    )
+    app = create_private_app(
+        runtime,
+        LoginService(runtime),
+        owner,
+        allowed_origins=[private["origin"]],
+        allowed_hosts=private["allowed_hosts"],
+        secure_cookies=private["secure_cookies"],
+    )
+    server = uvicorn.Server(
+        uvicorn.Config(
+            app,
+            host=private["host"],
+            port=private["port"],
+            ssl_certfile=private["cert"],
+            ssl_keyfile=private["key"],
+            log_config=None,
+        )
+    )
+    thread = threading.Thread(target=server.run, name="private-login", daemon=True)
+    thread.start()
+    logger.info(
+        "The private login is on %s:%s (origin %s)",
+        private["host"],
+        private["port"],
+        private["origin"],
+    )
+    return server, thread
 
 
 def serve(args: argparse.Namespace) -> int:
@@ -89,6 +221,10 @@ def serve(args: argparse.Namespace) -> int:
         )
         return 2
 
+    private = _private_settings(args)
+    if isinstance(private, int):
+        return private
+
     import main as entry
 
     entry.setup_logging(config.log_level)
@@ -114,6 +250,12 @@ def serve(args: argparse.Namespace) -> int:
     sessions = SessionManager(policy.session)
     runtime = BrokerRuntime(policy, sessions, config.nas_configs, verify_ssl=config.verify_ssl)
     app = create_broker_app(runtime, policy, allowed_hosts=allowed_hosts)
+    private_server = _start_private_login(runtime, private, logger) if private else None
+    if private is None:
+        logger.warning(
+            "No private login is configured (no --private-origin): sessions cannot be signed in "
+            "to, so every NAS call will ask for authentication."
+        )
 
     logger.info(
         "Starting the broker on %s:%s for %d client(s); sessions end after %ds idle or %ds in all",
@@ -134,6 +276,9 @@ def serve(args: argparse.Namespace) -> int:
             log_config=None,
         )
     finally:
+        if private_server is not None:
+            private_server[0].should_exit = True
+            private_server[1].join(10)
         runtime.shutdown()
     return 0
 
@@ -144,6 +289,18 @@ def main(argv=None) -> int:
     commands = parser.add_subparsers(dest="command", required=True)
 
     commands.add_parser("new-token", help="make a client token and print its digest")
+
+    enroll_parser = commands.add_parser(
+        "enroll", help="manage the owner's passkey (run on the host)"
+    )
+    enroll_parser.add_argument("--owner-store", default=DEFAULT_OWNER_STORE)
+    enroll_commands = enroll_parser.add_subparsers(dest="enroll_command", required=True)
+    new_code = enroll_commands.add_parser("new-code", help="print a one-time enrollment code")
+    new_code.add_argument("--minutes", type=int, default=10)
+    new_code.add_argument("--add-device", action="store_true", help="allow adding another passkey")
+    enroll_commands.add_parser("list", help="list enrolled passkeys")
+    revoke = enroll_commands.add_parser("revoke", help="remove an enrolled passkey")
+    revoke.add_argument("credential_id")
 
     serve_parser = commands.add_parser("serve", help="run the broker")
     serve_parser.add_argument("--policy", default=DEFAULT_POLICY, help="path of the policy file")
@@ -158,13 +315,37 @@ def main(argv=None) -> int:
     serve_parser.add_argument("--tls-cert")
     serve_parser.add_argument("--tls-key")
     serve_parser.add_argument(
+        "--private-origin",
+        help="enable the private login, reached at this origin (e.g. https://broker.example:8444)",
+    )
+    serve_parser.add_argument(
+        "--private-host", help="bind address for the private login (default: --host)"
+    )
+    serve_parser.add_argument("--private-port", type=int, default=8444)
+    serve_parser.add_argument(
+        "--private-allowed-host",
+        action="append",
+        default=[],
+        help="a Host header the private login accepts",
+    )
+    serve_parser.add_argument("--private-tls-cert")
+    serve_parser.add_argument("--private-tls-key")
+    serve_parser.add_argument(
+        "--rp-id", help="WebAuthn relying-party id (default: the origin's host)"
+    )
+    serve_parser.add_argument("--owner-store", default=DEFAULT_OWNER_STORE)
+    serve_parser.add_argument(
         "--allow-plain-http-loopback",
         action="store_true",
         help="allow plain HTTP, on a loopback address only, for local testing",
     )
 
     args = parser.parse_args(argv)
-    return new_token() if args.command == "new-token" else serve(args)
+    if args.command == "new-token":
+        return new_token()
+    if args.command == "enroll":
+        return enroll(args)
+    return serve(args)
 
 
 if __name__ == "__main__":

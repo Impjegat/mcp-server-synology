@@ -58,6 +58,12 @@ class _ClientBridge:
         self._runtime.reap_expired()
         record = self._runtime.sessions.get(self._client.name, alias, touch=touch)
         if record is None:
+            if touch:
+                # A call needed a session and there is none: leave a sign-in
+                # request where the owner will see it on the private page. One
+                # per client and NAS however often it is asked, and it carries
+                # nothing back to the model: the reply stays AUTHENTICATION_REQUIRED.
+                self._runtime.sessions.begin_pending(self._client.name, alias)
             return None
         return SessionView(record.session_id, record.syno_token, record.generation)
 
