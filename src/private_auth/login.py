@@ -65,9 +65,28 @@ class LoginOutcome:
 
 def _minimal_environment() -> Dict[str, str]:
     """What the worker may inherit: where to find things and how to verify TLS,
-    and nothing else. In particular no SYNOLOGY_*, no proxy settings and no
-    credentials, whatever this process was started with."""
-    keep = ("PATH", "SYSTEMROOT", "TEMP", "TMP", "TMPDIR", "LANG", "LC_ALL", "SSL_CERT_FILE")
+    and nothing else.
+
+    The certificate-trust settings are kept because a NAS behind a private CA
+    depends on them, exactly as the rest of this project does (they name files,
+    not secrets). Dropped on purpose: every SYNOLOGY_* setting and any credential,
+    whatever this process was started with, and proxy settings, because the worker
+    talks straight to the NAS and a proxy would see the password's TLS endpoint
+    and could be pointed anywhere by the environment. A NAS reachable only through
+    a proxy needs the proxy to be transparent."""
+    keep = (
+        "PATH",
+        "SYSTEMROOT",
+        "TEMP",
+        "TMP",
+        "TMPDIR",
+        "LANG",
+        "LC_ALL",
+        "SSL_CERT_FILE",
+        "SSL_CERT_DIR",
+        "REQUESTS_CA_BUNDLE",
+        "CURL_CA_BUNDLE",
+    )
     env = {name: os.environ[name] for name in keep if name in os.environ}
     env["SYNOLOGY_AUTH_MODE"] = "broker"
     env["PYTHONDONTWRITEBYTECODE"] = "1"
@@ -154,7 +173,7 @@ class LoginService:
     def account_for(self, nas: str) -> str:
         """The account the NAS is signed in as, from the broker's configuration.
         Empty means it is not configured and the owner types it."""
-        return str(self._runtime._nas_configs[nas].get("username") or "")
+        return str(self._runtime.nas_config(nas).get("username") or "")
 
     def locked_for(self, pending: PendingLogin) -> int:
         """Seconds the owner must wait before trying again; 0 if not locked."""
@@ -188,7 +207,7 @@ class LoginService:
         if not account:
             return LoginOutcome(False, "username_required", _MESSAGES["username_required"])
 
-        cfg = self._runtime._nas_configs[pending.nas]
+        cfg = self._runtime.nas_config(pending.nas)
         payload = {
             "base_url": cfg["base_url"],
             "verify_ssl": cfg.get("verify_ssl", True),

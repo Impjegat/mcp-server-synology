@@ -276,3 +276,123 @@ class TestAuthenticating:
             is False
         )
         assert store.credentials()[0].sign_count == 0
+
+
+class TestEnrollmentIsAtomic:
+    """Checking the code, adding the passkey and using the code up happen as one
+    step. The write is slowed down so that, if they were separate steps, the
+    threads below would all get past the check before any of them used the code."""
+
+    @staticmethod
+    def _slow_writes(store, monkeypatch):
+        import time
+
+        real_write = store._write
+
+        def slow(data):
+            time.sleep(0.05)
+            real_write(data)
+
+        monkeypatch.setattr(store, "_write", slow)
+
+    def test_the_store_lets_exactly_one_of_many_simultaneous_enrollments_through(
+        self, store, monkeypatch
+    ):
+        import threading
+
+        store.new_enrollment_code()
+        self._slow_writes(store, monkeypatch)
+        results, barrier = [], threading.Barrier(8)
+
+        def attempt(index):
+            barrier.wait()
+            results.append(
+                store.add_credential_consuming_code(bytes([index]), b"key", 0, f"device {index}")
+            )
+
+        threads = [threading.Thread(target=attempt, args=(i,)) for i in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        assert results.count(True) == 1
+        assert len(store.credentials()) == 1
+        assert store.enrollment_open() is False
+
+    def test_two_enrollments_begun_with_one_code_cannot_both_finish_at_once(
+        self, owner, store, monkeypatch
+    ):
+        import threading
+        import time
+
+        code = store.new_enrollment_code()
+        devices = [SoftwareAuthenticator(RP_ID, ORIGIN) for _ in range(2)]
+        begun = [owner.begin_enrollment(code) for _ in devices]
+        self._slow_writes(store, monkeypatch)
+        # If finishing still asked "is the code open?" as a separate step, this
+        # makes both threads hear "yes" before either has added anything.
+        real_open = store.enrollment_open
+
+        def open_then_dawdle(*args, **kwargs):
+            answer = real_open(*args, **kwargs)
+            time.sleep(0.1)
+            return answer
+
+        monkeypatch.setattr(store, "enrollment_open", open_then_dawdle)
+        results, barrier = [], threading.Barrier(2)
+
+        def finish(device, state, options):
+            barrier.wait()
+            results.append(owner.finish_enrollment(state, device.create(options)))
+
+        threads = [
+            threading.Thread(target=finish, args=(device, state, options))
+            for device, (state, options) in zip(devices, begun)
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        assert sorted(results) == [False, True]
+        assert len(store.credentials()) == 1
+
+    def test_without_an_open_code_nothing_is_added(self, store):
+        assert store.add_credential_consuming_code(b"id", b"key", 0, "x") is False
+        assert store.credentials() == []
+
+    def test_an_expired_code_adds_nothing(self, store):
+        store.new_enrollment_code(minutes=0)
+        assert store.add_credential_consuming_code(b"id", b"key", 0, "x") is False
+        assert store.credentials() == []
+
+    def test_a_valid_code_adds_one_passkey_and_is_used_up(self, store):
+        store.new_enrollment_code()
+        assert store.add_credential_consuming_code(b"id", b"key", 0, "x") is True
+        assert store.add_credential_consuming_code(b"id2", b"key2", 0, "y") is False
+        assert [c.label for c in store.credentials()] == ["x"]
+
+
+class TestOutstandingChallenges:
+    def test_the_table_cannot_grow_past_its_cap_and_the_newest_stays_valid(
+        self, owner, store, device
+    ):
+        from private_auth.owner import MAX_OUTSTANDING_CHALLENGES
+
+        _enroll(owner, store, device)
+        for _ in range(MAX_OUTSTANDING_CHALLENGES * 3):
+            owner.begin_authentication()
+        assert len(owner._challenges) <= MAX_OUTSTANDING_CHALLENGES
+
+        state, options = owner.begin_authentication()
+        assert owner.finish_authentication(state, device.get(options)) is True
+
+    def test_the_oldest_challenge_is_the_one_that_goes(self, owner, store, device):
+        from private_auth.owner import MAX_OUTSTANDING_CHALLENGES
+
+        _enroll(owner, store, device)
+        oldest_state, oldest_options = owner.begin_authentication()
+        for _ in range(MAX_OUTSTANDING_CHALLENGES):
+            owner.begin_authentication()
+        assert owner.finish_authentication(oldest_state, device.get(oldest_options)) is False

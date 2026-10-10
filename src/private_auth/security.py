@@ -22,6 +22,9 @@ CONTENT_SECURITY_POLICY = (
     "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; "
     "connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"
 )
+# Above this many tracked keys, a rate limiter sweeps out the expired ones.
+_SWEEP_ABOVE = 4096
+
 SECURITY_HEADERS: Dict[str, str] = {
     "Content-Security-Policy": CONTENT_SECURITY_POLICY,
     "Cache-Control": "no-store",
@@ -78,10 +81,24 @@ class RateLimiter:
         self._lock = threading.Lock()
 
     def _trim(self, key: str, now: float) -> Deque[float]:
-        events = self._events.setdefault(key, deque())
+        """The key's recent events. Asking about a key never creates an entry for
+        it, and an entry whose events have all aged out is dropped, so a stream of
+        distinct addresses cannot grow the table without end."""
+        events = self._events.get(key)
+        if events is None:
+            return deque()
         while events and now - events[0] >= self._window:
             events.popleft()
+        if not events and key not in self._locked_until:
+            del self._events[key]
+            return deque()
         return events
+
+    def _sweep(self, now: float) -> None:
+        for key in list(self._events):
+            self._trim(key, now)
+        for key in [k for k, until in self._locked_until.items() if until <= now]:
+            del self._locked_until[key]
 
     def retry_after(self, key: str) -> int:
         """Seconds until `key` may try again; 0 if it may now."""
@@ -106,7 +123,11 @@ class RateLimiter:
     def record(self, key: str) -> None:
         with self._lock:
             now = self._clock()
+            if len(self._events) > _SWEEP_ABOVE:
+                self._sweep(now)
             events = self._trim(key, now)
+            if key not in self._events:
+                self._events[key] = events
             events.append(now)
             if len(events) >= self._max and self._lockout:
                 self._locked_until[key] = now + self._lockout
@@ -155,6 +176,14 @@ class OwnerSessions:
         now = self._clock()
         session = OwnerSession(secrets.token_urlsafe(24), now, now)
         with self._lock:
+            # Expired sessions are removed whenever one is made, not only when
+            # their own cookie happens to be presented again.
+            for key in [
+                k
+                for k, s in self._sessions.items()
+                if now - s.created_at >= self._absolute or now - s.last_seen >= self._idle
+            ]:
+                del self._sessions[key]
             self._sessions[self._key(token)] = session
         return token, session
 

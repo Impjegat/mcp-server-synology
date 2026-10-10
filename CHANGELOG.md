@@ -65,6 +65,11 @@
 - In broker mode a session the NAS has dropped is now forgotten, so `synology_status` stops showing it as connected and the next call asks for a new sign-in instead of failing the same way again (review of #19).
 - A configured NAS is now recognised however its URL is spelled (trailing slash, host case), and `AuthenticationRequired`/`AuthorizationDenied` messages are the fixed ones (review of #19).
 - `SynologyAuth.logout()` in manual mode clears the local session even if the remote call raises, not only when it answers with an error (review of #19).
+- Enrolling a passkey now checks the one-time code, adds the passkey and uses the code up as one step under one lock. They were three separate steps, so two enrollments begun with the same code could both finish; the new tests widen that window on purpose so the race is caught every time (review of #21).
+- `/auth/begin` and `/enroll/begin`, which need no sign-in and each make a challenge, are rate limited per address (thirty a minute, every call counted), and the table of outstanding challenges is capped at 256, oldest first (review of #21).
+- The sign-in worker keeps the certificate-trust settings a private CA needs (`REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE`, `SSL_CERT_FILE`, `SSL_CERT_DIR`) and still drops proxy settings and credentials; the docstring says why (review of #21).
+- `BrokerRuntime.nas_config(name)` replaces the login service reaching into a private attribute, and refuses an unknown NAS by name (review of #21).
+- The rate limiter no longer creates an entry for a key it is only asked about, drops entries whose events have aged out and sweeps itself under a flood of distinct addresses; expired owner sessions are removed whenever a new one is made (review of #21).
 - A failed lookup of a folder root's real location is no longer remembered for five minutes, so one transient NAS error cannot block a root; and `BrokerRuntime.shutdown` now logs sessions out together and waits a bounded time in total, instead of up to ten seconds per session (review of #20).
 - `config.py` no longer raises in a process started with a minimal environment: `Path.home()` was evaluated even when `XDG_CONFIG_HOME` was set.
 - Disconnecting says whether the NAS confirmed the session closed, instead of implying it did (review of #19).

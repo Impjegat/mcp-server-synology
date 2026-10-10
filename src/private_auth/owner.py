@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 STATE_TTL_SECONDS = 120
+MAX_OUTSTANDING_CHALLENGES = 256
 DEFAULT_CODE_MINUTES = 10
 
 
@@ -180,6 +181,39 @@ class OwnerStore:
             and (now if now is not None else time.time()) < enrollment["expires_at"]
         )
 
+    def add_credential_consuming_code(
+        self,
+        credential_id: bytes,
+        public_key: bytes,
+        sign_count: int,
+        label: str,
+        *,
+        now: Optional[float] = None,
+    ) -> bool:
+        """Add a passkey and use up the enrollment code in one step, only if the
+        code is still open. Checking, adding and consuming under separate lock
+        acquisitions would let two enrollments that both began with the same code
+        each pass the check and each add a passkey. False means the code was
+        already used or has expired, and nothing was added."""
+        with self._lock:
+            data = self._read()
+            enrollment = data["enrollment"]
+            current = now if now is not None else time.time()
+            if not enrollment or current >= enrollment["expires_at"]:
+                return False
+            data["credentials"].append(
+                {
+                    "id": _b64(credential_id),
+                    "public_key": _b64(public_key),
+                    "sign_count": sign_count,
+                    "label": label,
+                    "created": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                }
+            )
+            data["enrollment"] = None
+            self._write(data)
+            return True
+
     def consume_enrollment_code(self) -> None:
         with self._lock:
             data = self._read()
@@ -223,6 +257,10 @@ class PasskeyOwnerAuth:
         now = self._clock()
         with self._lock:
             self._challenges = {k: v for k, v in self._challenges.items() if v[1] > now}
+            # A hard cap: the oldest goes first, so a flood of requests can slow
+            # nothing down by filling the table (the callers are also rate limited).
+            while len(self._challenges) >= MAX_OUTSTANDING_CHALLENGES:
+                del self._challenges[next(iter(self._challenges))]
             self._challenges[state] = (challenge, now + STATE_TTL_SECONDS)
         return state
 
@@ -314,9 +352,7 @@ class PasskeyOwnerAuth:
         from webauthn import verify_registration_response
 
         challenge = self._take(state)
-        # The code is single-use: if another enrollment finished first, or the
-        # code has expired since this one began, this one does not count.
-        if challenge is None or not self._store.enrollment_open():
+        if challenge is None:
             return False
         try:
             verified = verify_registration_response(
@@ -328,8 +364,9 @@ class PasskeyOwnerAuth:
             )
         except Exception:
             return False
-        self._store.add_credential(
+        # The code is single-use. Whether it is still open is decided together
+        # with adding the passkey, so that two enrollments begun with the same
+        # code cannot both finish, and one that outlived the code does not count.
+        return self._store.add_credential_consuming_code(
             verified.credential_id, verified.credential_public_key, verified.sign_count, label[:64]
         )
-        self._store.consume_enrollment_code()
-        return True
