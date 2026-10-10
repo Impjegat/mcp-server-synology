@@ -9,11 +9,12 @@ import tempfile
 import threading
 import time
 import unicodedata
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
-from broker.errors import AuthenticationRequired
+from broker.errors import AuthenticationRequired, AuthorizationDenied
+from broker.file_policy import FolderGuard
 from utils.redact import redact
 from utils.synology_api import raise_if_authentication_required, recover_session
 
@@ -115,6 +116,7 @@ class SynologyFileStation:
         verify_ssl: bool = True,
         syno_token: Optional[str] = None,
         max_file_content_size: int = 1_000_000,
+        folder_guard: Optional[FolderGuard] = None,
     ):
         self.base_url = base_url.rstrip("/")
         self.session_id = session_id
@@ -124,6 +126,9 @@ class SynologyFileStation:
         # get_file_content refuses to download a file larger than this,
         # checked via file metadata before any download request is made.
         self.max_file_content_size = max_file_content_size
+        # Broker mode: only the folders the client's policy lists may be
+        # reached. See `_check_critical_path` and `_verify_location`.
+        self.folder_guard = folder_guard
 
     def _csrf_headers(self, *, post: bool) -> Dict[str, str]:
         """Build request headers, including X-SYNO-TOKEN for DSM 7.3.2+ CSRF.
@@ -382,6 +387,9 @@ class SynologyFileStation:
         """List all available shares."""
         data = self._make_request("SYNO.FileStation.List", "2", "list_share")
         shares = data.get("shares", [])
+        if self.folder_guard is not None:
+            # Only shares that are, hold or sit inside an allowed folder.
+            shares = [s for s in shares if self.folder_guard.share_visible(s.get("path") or "")]
 
         return [
             {
@@ -397,6 +405,7 @@ class SynologyFileStation:
         """List contents of a directory."""
         formatted_path = self._format_path(path)
         self._check_critical_path(formatted_path)
+        self._verify_location(formatted_path)
 
         params: Dict[str, Any] = {"folder_path": formatted_path}
 
@@ -461,6 +470,7 @@ class SynologyFileStation:
         looking the path up counts against its time limit."""
         formatted_path = self._format_path(path)
         self._check_critical_path(formatted_path)
+        self._verify_location(formatted_path)
 
         data = self._make_request(
             "SYNO.FileStation.List",
@@ -540,6 +550,7 @@ class SynologyFileStation:
         """
         formatted_path = self._format_path(path)
         self._check_critical_path(formatted_path)
+        self._verify_location(formatted_path)
 
         # A wall-clock deadline, not a tally of time spent sleeping: each
         # request can itself take time a sleep counter never sees.
@@ -573,13 +584,18 @@ class SynologyFileStation:
 
             # Get results — a fresh allowance, so a search that finishes just
             # inside its limit is not thrown away for want of time to read it.
+            list_params: Dict[str, Any] = {"taskid": task_id}
+            if self.folder_guard is not None:
+                # Ask where each hit really lives, so a link out of the
+                # searched folder can be filtered out below.
+                list_params["additional"] = json.dumps(["real_path"])
             try:
                 result_data = self._make_request(
                     "SYNO.FileStation.Search",
                     "2",
                     "list",
                     deadline=time.monotonic() + _RESULTS_TIMEOUT,
-                    taskid=task_id,
+                    **list_params,
                 )
             except _DeadlineError:
                 raise Exception(
@@ -587,7 +603,7 @@ class SynologyFileStation:
                     f"{_RESULTS_TIMEOUT} seconds"
                 ) from None
 
-            files = result_data.get("files", [])
+            files = [f for f in result_data.get("files", []) if self._entry_allowed(f)]
             return [
                 {
                     "name": file_info.get("name"),
@@ -616,6 +632,7 @@ class SynologyFileStation:
 
         # Check for critical paths
         self._check_critical_path(formatted_path)
+        self._verify_location(formatted_path)
 
         # Validate new name
         if not new_name or new_name.strip() == "":
@@ -676,6 +693,7 @@ class SynologyFileStation:
             raise Exception("Invalid file path")
 
         self._check_critical_path(formatted_path)
+        self._verify_location(formatted_path)
 
         # Get directory and filename
         directory = os.path.dirname(formatted_path)
@@ -767,6 +785,7 @@ class SynologyFileStation:
             raise Exception("Invalid folder path")
 
         self._check_critical_path(formatted_folder_path)
+        self._verify_location(formatted_folder_path)
 
         # Validate name
         if not name or name.strip() == "":
@@ -826,6 +845,7 @@ class SynologyFileStation:
             raise Exception("Invalid path - cannot delete root")
 
         self._check_critical_path(formatted_path)
+        self._verify_location(formatted_path)
 
         deadline = time.monotonic() + _DELETE_LIMIT  # wall-clock, as in search_files
         timed_out = f"Delete operation timed out after {_DELETE_LIMIT} seconds"
@@ -930,6 +950,72 @@ class SynologyFileStation:
         for cp in _CRITICAL_PATHS_PREFIX:
             if path == cp or path.startswith(cp + "/"):
                 raise Exception(f"Cannot access critical system path: {path}")
+        # Broker mode: beyond never touching a system path, only the folders
+        # the client's policy lists may be reached. Every path-taking method
+        # calls this, so this is where the folder allowlist is enforced.
+        if self.folder_guard is not None:
+            self.folder_guard.check(path)
+
+    def _lookup_real_path(self, formatted_path: str) -> Tuple[bool, Optional[str]]:
+        """Ask DSM about `formatted_path`: whether it exists, and, if it does,
+        where it really lives (its `real_path`, which is None if DSM does not
+        say). The two are kept apart on purpose: a path that is missing may be
+        judged by its parent, but one that exists and cannot be located may not."""
+        data = self._make_request(
+            "SYNO.FileStation.List",
+            "2",
+            "getinfo",
+            path=formatted_path,
+            additional=json.dumps(["real_path"]),
+        )
+        files = data.get("files", [])
+        if not files or "code" in files[0]:
+            return False, None
+        return True, (files[0].get("additional") or {}).get("real_path")
+
+    def _resolve_real_path(self, formatted_path: str) -> Optional[str]:
+        """Where DSM says `formatted_path` really lives, or None when it doesn't
+        exist or DSM doesn't say."""
+        return self._lookup_real_path(formatted_path)[1]
+
+    def _verify_location(self, formatted_path: str) -> None:
+        """Broker mode: refuse unless `formatted_path` really lies inside an
+        allowed root once symbolic links are resolved. For a path that does not
+        exist yet (something about to be created) the nearest existing parent
+        is judged instead. A no-op without a folder policy."""
+        guard = self.folder_guard
+        if guard is None:
+            return
+        probe = formatted_path
+        real: Optional[str] = None
+        for _ in range(16):
+            found, real = self._lookup_real_path(probe)
+            parent = posixpath.dirname(probe)
+            # Only a path that does not exist is judged by its parent. One that
+            # exists but whose location DSM does not report is refused below.
+            if found or parent in (probe, "/"):
+                break
+            probe = parent
+        guard.verify_real(guard.check(probe), real, self._resolve_real_path)
+
+    def _entry_allowed(self, entry: Dict[str, Any]) -> bool:
+        """Whether a result entry (from a search) may be shown: inside an
+        allowed root both by name and by where DSM says it really is."""
+        guard = self.folder_guard
+        if guard is None:
+            return True
+        path = entry.get("path")
+        if not path or not guard.allows(path):
+            return False
+        try:
+            guard.verify_real(
+                guard.check(path),
+                (entry.get("additional") or {}).get("real_path"),
+                self._resolve_real_path,
+            )
+        except AuthorizationDenied:
+            return False
+        return True
 
     def get_file_content(self, path: str) -> str:
         """Get the content of a file."""
@@ -1041,7 +1127,9 @@ class SynologyFileStation:
 
         # Check for critical paths
         self._check_critical_path(formatted_source)
+        self._verify_location(formatted_source)
         self._check_critical_path(formatted_dest)
+        self._verify_location(formatted_dest)
 
         # Validate paths
         if not formatted_source or formatted_source == "/":

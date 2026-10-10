@@ -4,7 +4,8 @@ import asyncio
 import json
 import logging
 import traceback
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, Iterable, Optional
+from urllib.parse import urlparse
 
 import urllib3
 
@@ -18,7 +19,9 @@ from mcp.server import NotificationOptions, Server, ServerRequestContext
 from mcp.shared.exceptions import MCPError
 
 from auth import SynologyAuth, iter_all_secrets, request_secrets
-from broker.errors import AuthenticationRequired, AuthorizationDenied
+from broker.bridge import SessionBridge
+from broker.errors import AUTHORIZATION_DENIED, AuthenticationRequired, AuthorizationDenied
+from broker.file_policy import FolderGuard, FolderPolicy
 from config import config
 from container import SynologyContainer
 from downloadstation import SynologyDownloadStation
@@ -275,7 +278,21 @@ class ToolExecutionError(Exception):
 class SynologyMCPServer:
     """MCP Server for Synology NAS operations."""
 
-    def __init__(self):
+    def __init__(
+        self,
+        allowed_nas: Optional[Iterable[str]] = None,
+        allowed_tools: Optional[Iterable[str]] = None,
+        folder_policy: Optional[FolderPolicy] = None,
+        session_bridge: Optional[SessionBridge] = None,
+    ):
+        # Broker mode runs one executor per client. These limit it to that
+        # client's NAS aliases, tools and folders, and tie its sessions to
+        # the broker's session manager. All None: the single-process server.
+        self._allowed_nas = None if allowed_nas is None else frozenset(allowed_nas)
+        self._allowed_tools = None if allowed_tools is None else frozenset(allowed_tools)
+        self.folder_policy = folder_policy
+        self.session_bridge = session_bridge
+        self._generations: Dict[str, int] = {}  # base_url -> generation installed
         self.server = Server(
             config.server_name,
             version=config.server_version,
@@ -295,7 +312,11 @@ class SynologyMCPServer:
         if config.auth_mode == "broker":
             # NAS names resolve before anyone has signed in: they come from
             # configuration, not from a login.
-            self.nas_name_map = {name: cfg["base_url"] for name, cfg in config.nas_configs.items()}
+            self.nas_name_map = {
+                name: cfg["base_url"]
+                for name, cfg in config.nas_configs.items()
+                if self._nas_allowed(name)
+            }
         # Single source of truth for tool dispatch — see _build_tool_registry.
         self._tool_registry: Dict[str, Callable] = self._build_tool_registry()
         # One compiled JSON-Schema validator per tool, built from the same
@@ -401,11 +422,76 @@ class SynologyMCPServer:
         )
         return tool
 
+    def _nas_allowed(self, name: str) -> bool:
+        return self._allowed_nas is None or name in self._allowed_nas
+
+    def _drop_session(self, base_url: str) -> None:
+        """Forget the session for `base_url` and everything built on it."""
+        self.sessions.pop(base_url, None)
+        self.syno_tokens.pop(base_url, None)
+        self._generations.pop(base_url, None)
+        for inst_dict in self._service_instance_dicts():
+            inst_dict.pop(base_url, None)
+
+    def _folder_guard(self, base_url: str) -> Optional[FolderGuard]:
+        """The folder guard for the NAS at `base_url`, or None when there is no
+        folder policy. With a policy, a NAS that has no alias is refused."""
+        if self.folder_policy is None:
+            return None
+        alias = next((n for n, u in self.nas_name_map.items() if u == base_url), None)
+        if alias is None:
+            raise AuthorizationDenied()
+        return self.folder_policy.guard(alias)
+
+    def _refresh_sessions(self) -> None:
+        """With a bridge, make this executor's view of its sessions match the
+        broker's, so status never reports an expired session as connected and
+        shows one that was just signed in. Does not count as use."""
+        if self.session_bridge is None:
+            return
+        for base_url in set(self.nas_name_map.values()) | set(self.sessions):
+            view = self.session_bridge.current(base_url, touch=False)
+            if view is None:
+                self._drop_session(base_url)
+            elif self._generations.get(base_url) != view.generation:
+                self.install_session(
+                    base_url, view.session_id, view.syno_token, generation=view.generation
+                )
+
+    def _session_lost(self, arguments: dict) -> None:
+        """The NAS said the session behind this call is gone. Forget it here,
+        so status stops showing it and the next call asks for a new sign-in
+        instead of failing the same way again, and tell the broker."""
+        try:
+            base_url = self._get_base_url(arguments)
+        except Exception:
+            return
+        if base_url not in self.sessions:
+            return
+        generation = self._generations.get(base_url)
+        self._drop_session(base_url)
+        if self.session_bridge is not None:
+            self.session_bridge.lost(base_url, generation)
+
     def _require_session(self, base_url: str) -> None:
         """Raise unless there is an active session for `base_url`. In broker
         (manual authentication) mode that is `AuthenticationRequired`, which
         tells the caller to have the user sign in privately; there is no
         login tool to point at."""
+        if self.session_bridge is not None:
+            # The broker is the authority: ask it, and follow what it says.
+            view = self.session_bridge.current(base_url)
+            if view is None:
+                self._drop_session(base_url)
+                raise AuthenticationRequired()
+            if (
+                self._generations.get(base_url) != view.generation
+                or self.sessions.get(base_url) != view.session_id
+            ):
+                self.install_session(
+                    base_url, view.session_id, view.syno_token, generation=view.generation
+                )
+            return
         if base_url in self.sessions:
             return
         if config.auth_mode == "broker":
@@ -413,7 +499,12 @@ class SynologyMCPServer:
         raise Exception(f"No active session for {base_url}. Please login first.")
 
     def install_session(
-        self, base_url: str, session_id: str, syno_token: Optional[str] = None
+        self,
+        base_url: str,
+        session_id: str,
+        syno_token: Optional[str] = None,
+        *,
+        generation: Optional[int] = None,
     ) -> None:
         """Adopt a DSM session that was established elsewhere (by the private
         login path) for `base_url`, and drop cached service instances so they
@@ -424,6 +515,10 @@ class SynologyMCPServer:
             self.syno_tokens[base_url] = syno_token
         else:
             self.syno_tokens.pop(base_url, None)
+        if generation is None:
+            self._generations.pop(base_url, None)
+        else:
+            self._generations[base_url] = generation
         for inst_dict in self._service_instance_dicts():
             inst_dict.pop(base_url, None)
 
@@ -439,6 +534,7 @@ class SynologyMCPServer:
                 verify_ssl=config.verify_ssl,
                 syno_token=self.syno_tokens.get(base_url),
                 max_file_content_size=config.max_file_content_size,
+                folder_guard=self._folder_guard(base_url),
             )
 
         return self.filestation_instances[base_url]
@@ -454,6 +550,7 @@ class SynologyMCPServer:
                 session_id,
                 verify_ssl=config.verify_ssl,
                 syno_token=self.syno_tokens.get(base_url),
+                folder_guard=self._folder_guard(base_url),
             )
 
         return self.downloadstation_instances[base_url]
@@ -660,6 +757,9 @@ class SynologyMCPServer:
         if not config.auto_login or not config.has_synology_credentials():
             tools.extend(self._session_tool_definitions())
 
+        if self._allowed_tools is not None:
+            tools = [t for t in tools if t.name in self._allowed_tools]
+
         return tools
 
     def _session_tool_definitions(self) -> list[types.Tool]:
@@ -842,7 +942,12 @@ class SynologyMCPServer:
         self, name: str, handler: Callable, arguments: dict
     ) -> types.CallToolResult:
         """The part of `_call_tool` that runs once the tool is known to exist:
-        restricted-mode check, argument validation, then the handler."""
+        client tool allowlist, restricted-mode check, argument validation, then
+        the handler."""
+        if self._allowed_tools is not None and name not in self._allowed_tools:
+            return self._error_result(
+                f"{AUTHORIZATION_DENIED}: tool '{name}' is not permitted for this client."
+            )
         if config.restricted_mode and not self._is_tool_allowed(name):
             return self._error_result(
                 f"Tool '{name}' is not available: the server is running in "
@@ -865,8 +970,11 @@ class SynologyMCPServer:
             return types.CallToolResult(content=self._redact_tool_result(result), is_error=False)
         except AuthenticationRequired as e:
             # Expected whenever nobody has signed in (or the session ended):
-            # a stable, value-free message, not a stack trace.
+            # a stable, value-free message, not a stack trace. A session the
+            # NAS no longer knows is forgotten, so the next call asks for a
+            # new sign-in instead of failing the same way again.
             logger.info(f"Tool {name} needs authentication")
+            self._session_lost(arguments)
             return self._error_result(str(e))
         except AuthorizationDenied as e:
             logger.warning(f"Tool {name} denied by policy")
@@ -958,12 +1066,17 @@ class SynologyMCPServer:
         base_url = arguments.get("base_url")
         if base_url:
             if config.auth_mode == "broker":
-                configured = {cfg["base_url"] for cfg in config.nas_configs.values()}
-                if base_url not in configured:
-                    raise AuthorizationDenied(
-                        "AUTHORIZATION_DENIED: only a configured NAS may be targeted. "
-                        "Use nas_name with one of the names from synology_list_nas."
-                    )
+                # Match as URLs, so a trailing slash or a differently cased
+                # host still names the same NAS, and use the configured
+                # spelling from here on (sessions are keyed by it).
+                wanted = self._normalise_url(base_url)
+                for name, cfg in config.nas_configs.items():
+                    if self._nas_allowed(name) and self._normalise_url(cfg["base_url"]) == wanted:
+                        return cfg["base_url"]
+                raise AuthorizationDenied(
+                    f"{AUTHORIZATION_DENIED}: only a configured NAS may be targeted. "
+                    "Use nas_name with one of the names from synology_list_nas."
+                )
             return base_url
 
         # Fall back to first connected session
@@ -971,6 +1084,11 @@ class SynologyMCPServer:
             return next(iter(self.sessions))
 
         raise Exception("No nas_name or base_url provided and no active sessions.")
+
+    @staticmethod
+    def _normalise_url(url: str) -> str:
+        parsed = urlparse(url)
+        return f"{parsed.scheme.lower()}://{parsed.netloc.lower()}{parsed.path.rstrip('/')}"
 
     def _validate_url(self, url: str) -> bool:
         """Validate URL format and scheme.
@@ -1105,6 +1223,9 @@ class SynologyMCPServer:
     async def _handle_logout(self, arguments: dict) -> list[types.TextContent]:
         """Handle Synology logout."""
         base_url = self._get_base_url(arguments)
+        # With a broker, a session it holds may not have been used through this
+        # executor yet, so it is not in `self.sessions` until it is looked up.
+        self._refresh_sessions()
 
         if base_url not in self.sessions:
             raise ToolExecutionError(f"No active session found for {base_url}")
@@ -1113,17 +1234,28 @@ class SynologyMCPServer:
         auth = self.auth_instances.get(base_url)
         if auth is None:
             # A session installed from outside (broker mode) has no SynologyAuth
-            # here to log it out remotely; ending it locally is what this can do.
-            del self.sessions[base_url]
-            self.syno_tokens.pop(base_url, None)
-            for inst_dict in self._service_instance_dicts():
-                inst_dict.pop(base_url, None)
-            return [
-                types.TextContent(
-                    type="text",
-                    text=f"Disconnected from {base_url}; local session data has been cleared.",
+            # here. If a broker owns it, it ends the session on the NAS too;
+            # without one, ending it locally is all this can do, and the reply
+            # says which it was.
+            closed: Optional[bool] = None
+            if self.session_bridge is not None:
+                closed = self.session_bridge.close(
+                    base_url, session_id, self.syno_tokens.get(base_url)
                 )
-            ]
+            self._drop_session(base_url)
+            if closed is True:
+                text = f"Disconnected from {base_url}; the NAS session was closed."
+            elif closed is False:
+                text = (
+                    f"Disconnected from {base_url}. The NAS did not confirm the session "
+                    "was closed; it ends there when it times out."
+                )
+            else:
+                text = (
+                    f"Disconnected from {base_url}; local session data has been cleared. "
+                    "This server did not close the session on the NAS."
+                )
+            return [types.TextContent(type="text", text=text)]
 
         # Use the improved logout method
         result = auth.logout(session_id)
@@ -1131,10 +1263,7 @@ class SynologyMCPServer:
         # Handle the result and provide detailed feedback
         if result.get("success"):
             # Remove session and all cached service instances on successful logout
-            del self.sessions[base_url]
-            self.syno_tokens.pop(base_url, None)
-            for inst_dict in self._service_instance_dicts():
-                inst_dict.pop(base_url, None)
+            self._drop_session(base_url)
 
             return [
                 types.TextContent(
@@ -1151,10 +1280,7 @@ class SynologyMCPServer:
             # Handle expected session expiration gracefully
             if str(error_code) in {"105", "106", "no_session"}:
                 # Still clean up local session data
-                del self.sessions[base_url]
-                self.syno_tokens.pop(base_url, None)
-                for inst_dict in self._service_instance_dicts():
-                    inst_dict.pop(base_url, None)
+                self._drop_session(base_url)
 
                 return [
                     types.TextContent(
@@ -1174,9 +1300,10 @@ class SynologyMCPServer:
     async def _handle_status(self, arguments: dict) -> list[types.TextContent]:
         """Handle status check."""
         status_info = []
+        self._refresh_sessions()
 
         # Show configuration status
-        nas_names = config.get_nas_names()
+        nas_names = [n for n in config.get_nas_names() if self._nas_allowed(n)]
         if nas_names:
             status_info.append(f"✓ Configured NAS units: {', '.join(nas_names)}")
         elif config.has_synology_credentials():
@@ -1216,9 +1343,10 @@ class SynologyMCPServer:
     async def _handle_list_nas(self, arguments: dict) -> list[types.TextContent]:
         """Handle listing configured NAS units from settings.json."""
         nas_list = []
+        self._refresh_sessions()
 
         # Get NAS names from config
-        nas_names = config.get_nas_names()
+        nas_names = [n for n in config.get_nas_names() if self._nas_allowed(n)]
 
         if not nas_names:
             # Fall back to .env if no settings.json
@@ -3249,10 +3377,7 @@ class SynologyMCPServer:
                             cleanup_results.append(f"{base_url}: Logout failed - {error_code}")
 
                 # Always clear local data
-                del self.sessions[base_url]
-                self.syno_tokens.pop(base_url, None)
-                for inst_dict in self._service_instance_dicts():
-                    inst_dict.pop(base_url, None)
+                self._drop_session(base_url)
 
             except Exception as e:
                 logger.error(f"Exception during cleanup for {base_url}: {e}")

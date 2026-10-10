@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Optional
 import requests
 
 from broker.errors import AuthenticationRequired
+from broker.file_policy import FolderGuard
 from utils.redact import redact
 from utils.synology_api import raise_if_authentication_required, recover_session
 
@@ -22,11 +23,15 @@ class SynologyDownloadStation:
         session_id: str,
         verify_ssl: bool = True,
         syno_token: Optional[str] = None,
+        folder_guard: Optional[FolderGuard] = None,
     ):
         self.base_url = base_url.rstrip("/")
         self.session_id = session_id
         self.verify_ssl = verify_ssl
         self.syno_token = syno_token
+        # Broker mode: downloads may only be placed in, and listed from, the
+        # folders the client's policy allows.
+        self.folder_guard = folder_guard
 
         # DSM 7.0+ modern API endpoints (the only ones that work)
         self.api_url = f"{self.base_url}/webapi/entry.cgi"
@@ -39,6 +44,11 @@ class SynologyDownloadStation:
 
         # Default destination preference
         self.preferred_default_destination = "downloads"
+
+    def _check_destination(self, destination: str) -> None:
+        """Broker mode: refuse a destination folder outside the allowed roots."""
+        if self.folder_guard is not None:
+            self.folder_guard.check("/" + destination.lstrip("/"))
 
     def _validate_uri(self, uri: str) -> bool:
         """Validate URI for SSRF protection.
@@ -324,6 +334,7 @@ class SynologyDownloadStation:
         # Get valid destination if not provided
         if not destination:
             destination = self.get_default_destination()
+        self._check_destination(destination)
 
         # ✅ VALIDATE DESTINATION EXISTS BEFORE CREATING TASK
         logger.info(f"Validating destination folder exists: {destination}")
@@ -449,6 +460,10 @@ class SynologyDownloadStation:
 
     def _check_destination_exists(self, destination: str) -> bool:
         """Check if destination folder exists using FileStation API."""
+        if self.folder_guard is not None and not self.folder_guard.allows(
+            "/" + destination.lstrip("/")
+        ):
+            return False
         try:
             # Use FileStation API to check if folder exists
             request_params = {
@@ -564,6 +579,7 @@ class SynologyDownloadStation:
     def list_downloaded_files(self, destination: Optional[str] = None) -> Dict[str, Any]:
         if not destination:
             destination = self.get_default_destination()
+        self._check_destination(destination)
 
         logger.info(f"Listing downloaded files in: {destination}")
 
