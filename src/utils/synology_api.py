@@ -5,9 +5,37 @@ from typing import Any, Dict, Optional, Tuple
 
 import requests
 
+from broker.errors import AuthenticationRequired, is_session_lost
+from config import config
 from utils.redact import redact
 
 logger = logging.getLogger(__name__)
+
+
+def raise_if_authentication_required(code: Any) -> None:
+    """In manual (broker) mode, a DSM code that says the session is gone means
+    a new private login is needed: raise the typed error instead of letting a
+    bare numeric code surface. A no-op in legacy mode and for any other code."""
+    if config.auth_mode == "broker" and is_session_lost(code):
+        raise AuthenticationRequired()
+
+
+def recover_session(
+    base_url: str, stale_session_id: Optional[str], code: Any
+) -> Optional[Tuple[str, Optional[str]]]:
+    """Session-loss handling for service modules that make their own HTTP calls.
+
+    Manual mode raises `AuthenticationRequired`. Legacy mode renews the
+    session once, from the credentials cached at login, but only for DSM's
+    "SID not found" (119) — the one code the shared client has always
+    recovered from. Returns `(session_id, syno_token)` when the session was
+    renewed, otherwise None and the caller reports the original error.
+    """
+    raise_if_authentication_required(code)
+    if str(code) != "119":
+        return None
+    new_sid, new_token = _try_relogin(base_url, stale_session_id)
+    return (new_sid, new_token) if new_sid else None
 
 
 def _try_relogin(
@@ -90,6 +118,10 @@ class SynologyAPIClient:
         # Try a single transparent re-auth via the SynologyAuth registered for
         # this base_url. If it succeeds, refresh local SID/token and retry once.
         # If no auth is registered, return the original 119 to the caller.
+        if not result.get("success"):
+            # Manual mode: a lost session is reported as AuthenticationRequired
+            # (raised here) and never renewed from a stored password.
+            raise_if_authentication_required(result.get("error", {}).get("code"))
         if not result.get("success") and result.get("error", {}).get("code") == 119:
             new_sid, new_token = _try_relogin(self.base_url, self.session_id)
             if new_sid:

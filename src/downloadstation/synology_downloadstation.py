@@ -6,7 +6,9 @@ from typing import Any, Dict, List, Optional
 
 import requests
 
+from broker.errors import AuthenticationRequired
 from utils.redact import redact
+from utils.synology_api import raise_if_authentication_required, recover_session
 
 logger = logging.getLogger(__name__)
 
@@ -70,8 +72,16 @@ class SynologyDownloadStation:
         except Exception:
             return False
 
-    def _make_request(self, api: str, version: str, method: str, **params) -> Dict[str, Any]:
-        """Make a request to Synology Download Station API."""
+    def _make_request(
+        self, api: str, version: str, method: str, *, _retry: bool = True, **params
+    ) -> Dict[str, Any]:
+        """Make a request to Synology Download Station API.
+
+        A lost session (DSM 106/107/119) is handled by `utils.synology_api`:
+        manual mode raises `AuthenticationRequired`; legacy mode renews the
+        session from its cached login once and repeats a read (`_retry` stops it
+        looping). The one write (`create`) is never repeated.
+        """
         request_params = {
             "api": api,
             "version": version,
@@ -118,6 +128,12 @@ class SynologyDownloadStation:
 
             if not data.get("success"):
                 error_code = data.get("error", {}).get("code", "unknown")
+                raise_if_authentication_required(error_code)
+                if _retry and method != "create":
+                    recovered = recover_session(self.base_url, self.session_id, error_code)
+                    if recovered:
+                        self.session_id, self.syno_token = recovered
+                        return self._make_request(api, version, method, _retry=False, **params)
                 error_msg = self._get_error_message(error_code)
                 raise Exception(f"Download Station API error {error_code}: {error_msg}")
 
@@ -170,6 +186,8 @@ class SynologyDownloadStation:
                 "is_manager": data.get("is_manager", False),
                 "hostname": data.get("hostname", "Synology NAS"),
             }
+        except AuthenticationRequired:
+            raise
         except Exception as e:
             # Fallback response if API fails
             return {
@@ -201,6 +219,8 @@ class SynologyDownloadStation:
 
         try:
             data = self._make_request(self.task_api, self.task_version, "list", **params)
+        except AuthenticationRequired:
+            raise
         except Exception as e:
             # If version 2 fails, try version 1
             if "doesn't exist" in str(e) or "102" in str(e) or "104" in str(e):
@@ -270,6 +290,8 @@ class SynologyDownloadStation:
         try:
             data = self._make_request(self.info_api, "1", "getconfig")
             return data
+        except AuthenticationRequired:
+            raise
         except Exception:
             return {
                 "default_destination": "",
@@ -350,6 +372,8 @@ class SynologyDownloadStation:
 
             return data
 
+        except AuthenticationRequired:
+            raise
         except Exception as e:
             logger.warning(self._redact(f"Create task failed: {e}"))
 
@@ -402,6 +426,8 @@ class SynologyDownloadStation:
                 "emule_speed_download": data.get("emule_speed_download", 0),
                 "emule_speed_upload": data.get("emule_speed_upload", 0),
             }
+        except AuthenticationRequired:
+            raise
         except Exception:
             # Fallback: calculate from task list
             try:
@@ -444,6 +470,9 @@ class SynologyDownloadStation:
             response.raise_for_status()
             data = response.json()
 
+            if not data.get("success"):
+                raise_if_authentication_required(data.get("error", {}).get("code"))
+
             # Check if the request was successful and returned file info
             if data.get("success") and data.get("data", {}).get("files"):
                 files = data["data"]["files"]
@@ -452,6 +481,8 @@ class SynologyDownloadStation:
 
             return False
 
+        except AuthenticationRequired:
+            raise
         except Exception:
             # If we can't check, assume it doesn't exist
             return False
@@ -560,9 +591,12 @@ class SynologyDownloadStation:
                 return data.get("data", {})
             else:
                 error_code = data.get("error", {}).get("code", "unknown")
+                raise_if_authentication_required(error_code)
                 error_msg = self._get_error_message(error_code)
                 raise Exception(f"FileStation API error {error_code}: {error_msg}")
 
+        except AuthenticationRequired:
+            raise
         except Exception as e:
             # This request's URL carries `_sid=<session_id>` directly (it's
             # built by hand, not through `_make_request`), so a

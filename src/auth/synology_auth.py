@@ -121,9 +121,18 @@ def iter_all_secrets():
 class SynologyAuth:
     """Handles Synology NAS authentication using simple API calls."""
 
-    def __init__(self, base_url: str, verify_ssl: bool = True):
+    def __init__(self, base_url: str, verify_ssl: bool = True, manual_mode: Optional[bool] = None):
         self.base_url = base_url.rstrip("/")
         self.verify_ssl = verify_ssl
+        # Manual authentication: a person supplies the password (and any
+        # one-time code) for each new sign-in, and this object keeps neither.
+        # No credentials are cached, no trusted-device token is requested,
+        # stored or reused, and an expired session is never renewed
+        # automatically — see plans/2026-10-06-manual-authentication/PLAN.md
+        # §5.2. Defaults to the process-wide auth mode.
+        self.manual_mode: bool = (
+            config.auth_mode == "broker" if manual_mode is None else manual_mode
+        )
         self.current_session_id: Optional[str] = None
         # Mirrors what login_with_session uses by default; overwritten on every login.
         self.current_session_type: str = "webui"
@@ -189,6 +198,18 @@ class SynologyAuth:
 
         See `login()` for the meaning of `otp_code` and `device_id`.
         """
+        if self.manual_mode and device_id:
+            # A trusted-device token is a reusable credential; manual mode
+            # takes a fresh one-time code each time instead.
+            return {
+                "success": False,
+                "error": {
+                    "code": "device_token_not_allowed",
+                    "message": "Manual authentication does not accept a trusted-device "
+                    "token. Sign in with a fresh verification code instead.",
+                },
+            }
+
         login_url = f"{self.base_url}/webapi/auth.cgi"
 
         # Try common API versions (start with newer versions)
@@ -226,7 +247,8 @@ class SynologyAuth:
                 # DSM to issue a device token (`did`) for reuse. Subsequent
                 # re-logins on this process use the device_id path above.
                 payload["otp_code"] = otp_code
-                payload["enable_device_token"] = "yes"
+                if not self.manual_mode:
+                    payload["enable_device_token"] = "yes"
 
             try:
                 # POST, not GET: the payload carries the password, OTP code,
@@ -246,6 +268,11 @@ class SynologyAuth:
                     self.current_session_id = result["data"]["sid"]
                     self.current_session_type = session_type
                     self.current_syno_token = result["data"].get("synotoken")
+                    if self.manual_mode:
+                        # Nothing reusable is kept, and nothing reusable is
+                        # passed on: drop a device token even if DSM sent one.
+                        result["data"].pop("did", None)
+                        return result
                     # Cache the trusted-device token for relogin(). DSM only
                     # returns `did` when the request includes
                     # `enable_device_token=yes` (the first-time-OTP path); on
@@ -391,7 +418,9 @@ class SynologyAuth:
         (the current session is already valid) — so simultaneous 119s open a
         single new session instead of one per caller.
         """
-        if not self._credentials:
+        if self.manual_mode or not self._credentials:
+            # Manual mode never signs in again from a stored secret: the
+            # caller must ask the user to sign in privately.
             return False
         with self._relogin_lock:
             # Another thread already recovered the session under the lock.
@@ -422,6 +451,15 @@ class SynologyAuth:
                     logger.warning("on_relogin callback failed for %s: %s", self.base_url, exc)
             return success
 
+    def _clear_local_session(self) -> None:
+        """Forget the current session and everything that could renew it."""
+        self.current_session_id = None
+        self.current_session_type = "webui"
+        self.current_syno_token = None
+        self._credentials = None
+        self.current_device_id = None
+        self._cached_device_id = None
+
     def logout(
         self, session_id: Optional[str] = None, session_type: Optional[str] = None
     ) -> Dict[str, Any]:
@@ -434,7 +472,21 @@ class SynologyAuth:
 
         Returns:
             Dict with success status and any error details.
+
+        In manual mode the local session is dropped whatever the NAS answers
+        (or fails to answer): a failed or timed-out remote logout must never
+        leave a usable session behind. The remote call itself is bounded by
+        `_AUTH_TIMEOUT`.
         """
+        result = self._logout_remote(session_id, session_type)
+        if self.manual_mode and (session_id is None or session_id == self.current_session_id):
+            self._clear_local_session()
+        return result
+
+    def _logout_remote(
+        self, session_id: Optional[str] = None, session_type: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """The logout request itself; see `logout`."""
         # Use provided parameters or fall back to current session
         logout_session_id = session_id or self.current_session_id
         logout_session_type = session_type or self.current_session_type

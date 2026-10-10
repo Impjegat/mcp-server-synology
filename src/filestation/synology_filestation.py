@@ -13,7 +13,9 @@ from typing import Any, Dict, List, Optional
 
 import requests
 
+from broker.errors import AuthenticationRequired
 from utils.redact import redact
+from utils.synology_api import raise_if_authentication_required, recover_session
 
 # Paths no path-taking method below may touch, read or write. See
 # _check_critical_path.
@@ -147,9 +149,15 @@ class SynologyFileStation:
         use_post: bool = False,
         *,
         deadline: Optional[float] = None,
+        _retry: bool = True,
         **params,
     ) -> Dict[str, Any]:
         """Make a request to Synology API.
+
+        A lost session (DSM 106/107/119) is handled by `utils.synology_api`:
+        manual mode raises `AuthenticationRequired`; legacy mode renews the
+        session from its cached login once and repeats a read (`_retry` stops
+        it looping). A write is never repeated.
 
         `deadline` is a `time.monotonic()` timestamp the request must not
         outlive. Without one the request is limited only by its own timeout
@@ -216,6 +224,15 @@ class SynologyFileStation:
         if not data.get("success"):
             error_code = data.get("error", {}).get("code", "unknown")
             error_info = data.get("error", {})
+
+            raise_if_authentication_required(error_code)
+            if _retry and not use_post:
+                recovered = recover_session(self.base_url, self.session_id, error_code)
+                if recovered:
+                    self.session_id, self.syno_token = recovered
+                    return self._make_request(
+                        api, version, method, use_post, deadline=deadline, _retry=False, **params
+                    )
 
             # Include detailed error information if available
             error_message = f"Synology API error: {error_code}"
@@ -335,6 +352,7 @@ class SynologyFileStation:
 
         if not data.get("success"):
             error_code = data.get("error", {}).get("code", "unknown")
+            raise_if_authentication_required(error_code)
             raise Exception(f"Synology API error: {error_code}")
 
         return data.get("data", {})
@@ -827,6 +845,9 @@ class SynologyFileStation:
             raise Exception(
                 "Delete operation timed out while looking up the path; nothing was deleted."
             ) from None
+        except AuthenticationRequired:
+            # Not a failure to classify the path: there is no session at all.
+            raise
         except Exception:
             recursive = False  # Default to file behavior if can't determine
 
@@ -985,6 +1006,7 @@ class SynologyFileStation:
                 if "application/json" in response.headers.get("Content-Type", "").lower():
                     error_code = _dsm_download_error_code(body)
                     if error_code is not None:
+                        raise_if_authentication_required(error_code)
                         raise Exception(f"Synology API error: {error_code}")
 
                 # Assuming the content is text, decode it
