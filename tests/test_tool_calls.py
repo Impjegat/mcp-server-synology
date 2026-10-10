@@ -974,3 +974,38 @@ def test_a_registered_tool_without_a_definition_fails_at_startup():
     with patch.object(SynologyMCPServer, "_get_tool_definitions", return_value=[]):
         with pytest.raises(RuntimeError, match="without an input schema"):
             SynologyMCPServer()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("secret", ['quote"value', "back\\slash", "line\nbreak", "unicode-\u00e9"])
+@pytest.mark.parametrize("success", [True, False])
+async def test_new_credentials_are_masked_after_service_json_serialization(
+    unrestricted, caplog, secret, success
+):
+    from auth import iter_all_secrets
+    from utils.redact import RedactingFilter
+
+    server = _server()
+
+    async def handler(arguments):
+        return server._dsm_result(
+            {"success": success, "error": {"message": f"Received {arguments['password']}"}}
+        )
+
+    server._tool_registry["synology_login"] = handler
+    log_filter = RedactingFilter(iter_all_secrets)
+    caplog.handler.addFilter(log_filter)
+    caplog.set_level(logging.WARNING)
+    try:
+        result = await server._call_tool(
+            "synology_login", {"base_url": BASE_URL, "username": "dummy", "password": secret}
+        )
+    finally:
+        caplog.handler.removeFilter(log_filter)
+    assert result.is_error is (not success)
+    text = _text(result)
+    payload = json.loads(text[text.index("{") :])
+    assert payload["error"]["message"] == "Received ***REDACTED***"
+    if not success:
+        assert json.dumps(secret)[1:-1] not in caplog.text
+        assert "***REDACTED***" in caplog.text

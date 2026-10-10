@@ -8,6 +8,7 @@
 # error message, this module gives one place to scrub text before it leaves
 # the process — as a tool-response wrapper and as a logging filter.
 
+import json
 import logging
 import re
 from typing import Iterable, Optional
@@ -41,7 +42,7 @@ def redact(text: Optional[str], *, live_secrets: Iterable[Optional[str]] = ()) -
             and purely numeric: see `config.iter_configured_secrets`'s
             docstring for why blanket-masking those does more harm than
             good) across all connected NAS units. Each non-empty value is
-            masked wherever it appears verbatim, even outside a `key=value`
+            masked in raw and JSON-escaped form, even outside a `key=value`
             shape (e.g. in a "Session ID: <sid>" log line). Callers are
             responsible for not passing a value that's unsafe to
             blanket-mask this way.
@@ -64,8 +65,17 @@ def redact(text: Optional[str], *, live_secrets: Iterable[Optional[str]] = ()) -
     # remainder behind. Processing longest-first means a secret's full
     # span is always masked before any of its substrings get a chance to
     # split it.
-    for secret in sorted((s for s in live_secrets if s), key=len, reverse=True):
-        result = result.replace(secret, _MASK)
+    # JSON serialization changes quotes, backslashes, control characters,
+    # and (by default) Unicode. Mask those spellings as well as the raw
+    # value; otherwise structured service errors bypass the shared filter.
+    spellings = set()
+    for secret in live_secrets:
+        if secret:
+            spellings.add(secret)
+            spellings.add(json.dumps(secret, ensure_ascii=True)[1:-1])
+            spellings.add(json.dumps(secret, ensure_ascii=False)[1:-1])
+    for spelling in sorted(spellings, key=len, reverse=True):
+        result = result.replace(spelling, _MASK)
 
     result = _mask_known_params(result)
     return result
