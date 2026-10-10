@@ -258,6 +258,40 @@ class TestEveryFailureHasAFixedSentence:
         assert transport.requests == []
 
     @pytest.mark.asyncio
+    async def test_a_token_that_is_malformed_is_told_apart_from_a_missing_one(self):
+        from adapter.config import MalformedTokenError
+
+        def provider():
+            raise MalformedTokenError()
+
+        transport = Fails(status=500)
+        client = BrokerClient(_settings(), provider, transport=transport)
+        for operation in (client.list_tools(), client.call_tool("list_shares", {})):
+            with pytest.raises(BrokerError) as error:
+                await operation
+            assert error.value.code == "BROKER_TOKEN_INVALID"
+            assert "too short" in error.value.text and TOKEN not in error.value.text
+        assert transport.requests == []  # nothing is sent with a token that is not a token
+
+    @pytest.mark.asyncio
+    async def test_the_two_token_problems_have_different_sentences(self):
+        from adapter.config import MalformedTokenError
+
+        def malformed():
+            raise MalformedTokenError()
+
+        texts = []
+        for provider in (lambda: None, malformed):
+            client = BrokerClient(_settings(), provider, transport=Fails(status=500))
+            with pytest.raises(BrokerError) as error:
+                await client.list_tools()
+            texts.append(error.value.text)
+        assert texts[0] != texts[1]
+        assert texts[0].startswith("BROKER_TOKEN_MISSING: ") and texts[1].startswith(
+            "BROKER_TOKEN_INVALID: "
+        )
+
+    @pytest.mark.asyncio
     async def test_a_redirect_is_never_followed_so_the_token_goes_nowhere_else(self):
         transport = Fails(status=307, headers={"location": "https://evil.example/steal"})
         client = BrokerClient(_settings(), lambda: TOKEN, transport=transport)

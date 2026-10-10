@@ -257,6 +257,34 @@ class TestRefusesToStart:
 
 
 @pytest.mark.slow
+@pytest.mark.skipif(os.name == "nt", reason="file modes mean something only off Windows")
+class TestTokenFileWarningAtStartup:
+    @pytest.mark.parametrize("mode,warned", [(0o644, True), (0o600, False)])
+    def test_a_token_file_other_accounts_can_read_is_warned_about_on_stderr(
+        self, tmp_path, mode, warned
+    ):
+        token = tmp_path / "broker.token"
+        token.write_text(TOKEN)
+        os.chmod(token, mode)
+        config = _config(1)
+        del config["token_env"]
+        config["token_file"] = str(token)
+        path = _write_config(tmp_path, config)
+        process = subprocess.run(
+            [sys.executable, ADAPTER, "--config", str(path)],
+            input="",  # closing standard input ends it at once
+            capture_output=True,
+            text=True,
+            timeout=60,
+            cwd=tmp_path,
+            env={"PATH": os.environ.get("PATH", "")},
+        )
+        assert process.returncode == 0
+        assert ("readable by other accounts" in process.stderr) is warned
+        assert TOKEN not in process.stderr and process.stdout == ""
+
+
+@pytest.mark.slow
 class TestStandardOutputIsProtocolOnly:
     def test_every_line_the_adapter_writes_is_a_json_rpc_message(self, tmp_path, broker):
         broker.start()

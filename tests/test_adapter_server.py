@@ -10,7 +10,15 @@ from mcp.client import Client
 from mcp.shared.exceptions import MCPError
 
 from adapter.client import BrokerError
-from adapter.server import CREDENTIAL_FIELDS, build_adapter_server, credential_fields
+from adapter.server import (
+    CREDENTIAL_WORDS,
+    MAX_DEPTH,
+    TOO_DEEP_MESSAGE,
+    build_adapter_server,
+    credential_fields,
+    inspect_arguments,
+    looks_like_credential,
+)
 
 PASSWORD = "PRIVATE-PASSWORD-MARKER-4d2e"
 TOOLS = [
@@ -187,8 +195,8 @@ class TestCredentialsNeverLeaveTheComputer:
         assert result.is_error is False
         assert broker.calls[0][1] == {"path": "/docs/password.txt", "query": "otp"}
 
-    def test_the_names_are_a_small_fixed_set(self):
-        assert {"password", "otp_code", "device_id"} <= CREDENTIAL_FIELDS
+    def test_the_words_are_a_small_fixed_set(self):
+        assert {"password", "otp", "passwd"} <= CREDENTIAL_WORDS
 
     @pytest.mark.parametrize(
         "arguments,expected",
@@ -205,10 +213,128 @@ class TestCredentialsNeverLeaveTheComputer:
     def test_credential_fields_are_found_by_name_anywhere(self, arguments, expected):
         assert credential_fields(arguments) == expected
 
-    def test_a_pathologically_deep_structure_is_cut_off_not_followed_forever(self):
-        deep = current = {}
-        for _ in range(200):
-            current["x"] = {}
-            current = current["x"]
-        current["password"] = 1
-        assert credential_fields(deep) == []  # beyond the depth bound; and it returned
+
+class TestTheGuardReadsWordsAndFailsClosed:
+    """The guard is a safety net for a model's mistake, not the boundary; but it
+    should catch the obvious variations, and it must not let an unchecked branch
+    through just because it is nested deeply."""
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "password",
+            "PASSWORD",
+            "nas_password",
+            "userPassword",
+            "admin_PASSWORD",
+            "Passphrase",
+            "otp",
+            "otp_code",
+            "OTPCode",
+            "adminOTP",
+            "otpcode",
+            "pwd",
+            "device_id",
+            "deviceId",
+            "nas_device_id",
+            "DeviceID",
+            "deviceid",
+            "NASPassword",
+            "SMBPwd",
+            "SMBDeviceId",
+            "HTTPPassphrase",
+        ],
+    )
+    def test_a_name_with_a_credential_word_in_it_is_caught(self, name):
+        assert looks_like_credential(name) is True
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "passwordless",
+            "hotpot",
+            "footprint",
+            "compass",
+            "passed",
+            "sword",
+            "path",
+            "nas_name",
+            "query",
+            "pattern",
+            "identity",
+            "provider",
+            "device",
+            "id",
+            "options",
+            "topic",
+            "NASName",
+            "SMBPath",
+        ],
+    )
+    def test_a_name_that_only_looks_similar_is_not(self, name):
+        assert looks_like_credential(name) is False
+
+    @staticmethod
+    def _nested(levels, leaf):
+        value = leaf
+        for _ in range(levels):
+            value = {"x": value}
+        return value
+
+    def test_nesting_up_to_the_limit_is_looked_through(self):
+        check = inspect_arguments(self._nested(MAX_DEPTH, {"password": 1}))
+        assert check.fields == ["password"] and check.too_deep is False
+
+    def test_nesting_beyond_the_limit_is_flagged_not_silently_passed(self):
+        check = inspect_arguments(self._nested(MAX_DEPTH + 1, {"password": 1}))
+        assert check.too_deep is True
+
+    def test_a_deep_structure_with_no_credential_is_still_flagged(self):
+        assert inspect_arguments(self._nested(MAX_DEPTH + 1, {"ok": 1})).too_deep is True
+
+    def test_a_long_flat_list_is_not_deep(self):
+        check = inspect_arguments({"items": [{"a": i} for i in range(1000)]})
+        assert check.too_deep is False and check.fields == []
+
+    def test_a_deeply_nested_scalar_is_not_a_container_and_is_fine(self):
+        assert inspect_arguments(self._nested(MAX_DEPTH, "just text")).too_deep is False
+
+    @pytest.mark.asyncio
+    async def test_arguments_too_deep_to_check_are_refused_without_contacting_the_broker(
+        self, caplog
+    ):
+        caplog.set_level(logging.DEBUG)
+        broker = FakeBroker()
+        deep = self._nested(MAX_DEPTH + 1, {"password": PASSWORD})
+        async with await _client(broker) as client:
+            result = await client.call_tool("list_shares", deep)
+
+        assert broker.calls == []
+        assert result.is_error is True and result.content[0].text == TOO_DEEP_MESSAGE
+        assert PASSWORD not in result.content[0].text and PASSWORD not in caplog.text
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("name", ["nas_password", "userPassword", "adminOTP", "nas_device_id"])
+    async def test_a_name_containing_a_credential_word_is_refused_end_to_end(self, name):
+        broker = FakeBroker()
+        async with await _client(broker) as client:
+            result = await client.call_tool("list_shares", {name: PASSWORD})
+        assert broker.calls == []
+        assert (
+            result.content[0].text.startswith("CREDENTIALS_REFUSED: ")
+            and name in result.content[0].text
+        )
+        assert PASSWORD not in result.content[0].text
+
+    @pytest.mark.asyncio
+    async def test_ordinary_arguments_with_look_alike_names_go_through(self):
+        broker = FakeBroker()
+        args = {
+            "passwordless": True,
+            "hotpot": "x",
+            "path": "/docs/password.txt",
+            "options": {"footprint": 1},
+        }
+        async with await _client(broker) as client:
+            result = await client.call_tool("list_shares", args)
+        assert result.is_error is False and broker.calls[0][1] == args

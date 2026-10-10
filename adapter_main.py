@@ -57,7 +57,9 @@ async def _serve(server) -> None:
 
     async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
         await server.run(
-            read_stream, write_stream, server.create_initialization_options(NotificationOptions())
+            read_stream,
+            write_stream,
+            server.create_initialization_options(NotificationOptions()),
         )
 
 
@@ -70,6 +72,7 @@ def main(argv=None) -> int:
         load_settings,
         make_token_provider,
         prohibited_environment,
+        token_file_warning,
     )
     from adapter.server import build_adapter_server
 
@@ -97,6 +100,9 @@ def main(argv=None) -> int:
 
     client = BrokerClient(settings, make_token_provider(settings))
     _setup_logging(client)
+    warning = token_file_warning(settings)
+    if warning:
+        logging.getLogger("synology-adapter").warning(warning)
     logging.getLogger("synology-adapter").info(
         "Starting the adapter (the broker is contacted on use)"
     )
