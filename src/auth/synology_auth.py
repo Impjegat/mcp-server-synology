@@ -4,7 +4,7 @@ import logging
 import threading
 from contextlib import contextmanager
 from contextvars import ContextVar
-from typing import Any, Callable, Dict, Iterable, Iterator, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Tuple
 
 import requests
 
@@ -46,6 +46,19 @@ def get_auth_for_url(base_url: str) -> Optional["SynologyAuth"]:
     return _AUTH_REGISTRY.get(base_url.rstrip("/"))
 
 
+# Other holders of live secrets (the broker's session manager keeps its sessions
+# apart from any SynologyAuth) register a function here that yields them, so
+# the same redaction covers them.
+_SECRET_SOURCES: List[Callable[[], Iterable[str]]] = []
+
+
+def register_secret_source(source: Callable[[], Iterable[str]]) -> None:
+    """Add a function yielding live secret values to what redaction masks.
+    Registering the same function twice has no further effect."""
+    if source not in _SECRET_SOURCES:
+        _SECRET_SOURCES.append(source)
+
+
 def iter_live_secrets():
     """Yield every currently-live secret value across all registered NAS units.
 
@@ -69,6 +82,10 @@ def iter_live_secrets():
             _, password = auth._credentials
             if password:
                 yield password
+    for source in list(_SECRET_SOURCES):
+        for value in source():
+            if value:
+                yield value
 
 
 # Credentials submitted in the tool call being handled right now. A password,
@@ -157,7 +174,10 @@ class SynologyAuth:
         # separate session (which would leak the orphaned SIDs on the NAS).
         self._relogin_lock = threading.Lock()
         # Register this instance for cross-module discovery (see _AUTH_REGISTRY).
-        _AUTH_REGISTRY[self.base_url] = self
+        # A manual-mode instance never renews a session, so there is nothing
+        # for the registry to find, and a broker makes one only to log a session out.
+        if not self.manual_mode:
+            _AUTH_REGISTRY[self.base_url] = self
 
     def login(
         self,
@@ -478,10 +498,12 @@ class SynologyAuth:
         leave a usable session behind. The remote call itself is bounded by
         `_AUTH_TIMEOUT`.
         """
-        result = self._logout_remote(session_id, session_type)
-        if self.manual_mode and (session_id is None or session_id == self.current_session_id):
-            self._clear_local_session()
-        return result
+        try:
+            return self._logout_remote(session_id, session_type)
+        finally:
+            # Even if the remote call raises, not just when it answers badly.
+            if self.manual_mode and (session_id is None or session_id == self.current_session_id):
+                self._clear_local_session()
 
     def _logout_remote(
         self, session_id: Optional[str] = None, session_type: Optional[str] = None

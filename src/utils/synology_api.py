@@ -119,15 +119,16 @@ class SynologyAPIClient:
         # this base_url. If it succeeds, refresh local SID/token and retry once.
         # If no auth is registered, return the original 119 to the caller.
         if not result.get("success"):
+            code = result.get("error", {}).get("code")
             # Manual mode: a lost session is reported as AuthenticationRequired
             # (raised here) and never renewed from a stored password.
-            raise_if_authentication_required(result.get("error", {}).get("code"))
-        if not result.get("success") and result.get("error", {}).get("code") == 119:
-            new_sid, new_token = _try_relogin(self.base_url, self.session_id)
-            if new_sid:
-                self.session_id = new_sid
-                self.syno_token = new_token
-                result = self._do_request(api, method, version, extra_params, use_post)
+            raise_if_authentication_required(code)
+            if code == 119:
+                new_sid, new_token = _try_relogin(self.base_url, self.session_id)
+                if new_sid:
+                    self.session_id = new_sid
+                    self.syno_token = new_token
+                    result = self._do_request(api, method, version, extra_params, use_post)
         return result
 
     def _do_request(

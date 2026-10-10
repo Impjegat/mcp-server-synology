@@ -661,3 +661,118 @@ class TestBrokerModeServer:
         assert result.is_error is True
         for marker in ("SID-LIVE-1", "TOK-LIVE-1"):
             assert marker not in _text(result)
+
+
+# ----------------------------------------------------------------------------
+# Follow-ups from the review of the first pull request
+# ----------------------------------------------------------------------------
+
+
+class TestReviewFollowUps:
+    @pytest.mark.asyncio
+    async def test_a_session_the_nas_dropped_is_forgotten_not_reported_as_connected(
+        self, broker_mode
+    ):
+        """After AuthenticationRequired the dead session must not linger: status
+        said "connected", the fallback target was the dead session, and every
+        later call went to the NAS and failed the same way."""
+        from filestation import SynologyFileStation
+
+        server = _server()
+        server.install_session(BASE_URL, "SID1", "TOK1")
+        with patch("filestation.synology_filestation.requests.get", return_value=_lost(107)):
+            first = await server._call_tool("list_shares", {"nas_name": "nas1"})
+
+        assert first.is_error is True
+        assert server.sessions == {} and server.syno_tokens == {}
+        assert server.filestation_instances == {}
+        status = _text(await server._call_tool("synology_status", {}))
+        assert "AUTHENTICATION_REQUIRED" in status and "connected" not in status
+
+        # The next call asks for a sign-in without touching the NAS again.
+        with patch("filestation.synology_filestation.requests.get") as get:
+            second = await server._call_tool("list_shares", {"nas_name": "nas1"})
+        assert _text(second).startswith("AUTHENTICATION_REQUIRED")
+        get.assert_not_called()
+        assert SynologyFileStation  # imported so the patch target above is loaded
+
+    @pytest.mark.asyncio
+    async def test_losing_one_nas_session_leaves_another_alone(self, broker_mode, monkeypatch):
+        import mcp_server
+
+        other = "https://nas2.example.test:5001"
+        monkeypatch.setattr(
+            mcp_server.config,
+            "nas_configs",
+            {
+                "nas1": {
+                    "base_url": BASE_URL,
+                    "username": "reader",
+                    "verify_ssl": True,
+                    "note": "",
+                },
+                "nas2": {"base_url": other, "username": "reader", "verify_ssl": True, "note": ""},
+            },
+        )
+        server = _server()
+        server.install_session(BASE_URL, "SID1")
+        server.install_session(other, "SID2")
+        with patch("filestation.synology_filestation.requests.get", return_value=_lost(119)):
+            await server._call_tool("list_shares", {"nas_name": "nas1"})
+
+        assert list(server.sessions) == [other]
+
+    @pytest.mark.parametrize(
+        "spelling",
+        [
+            BASE_URL,
+            BASE_URL + "/",
+            BASE_URL.upper(),
+            "HTTPS://NAS.EXAMPLE.TEST:5001/",
+            BASE_URL + "///",
+        ],
+    )
+    def test_a_configured_nas_is_recognised_however_its_url_is_spelled(self, broker_mode, spelling):
+        server = _server()
+        # The configured spelling comes back, because sessions are keyed by it.
+        assert server._get_base_url({"base_url": spelling}) == BASE_URL
+
+    @pytest.mark.parametrize(
+        "spelling",
+        [
+            "https://nas.example.test:5002",  # another port
+            "http://nas.example.test:5001",  # another scheme
+            "https://nas.example.test.evil.test:5001",
+            "https://evil.test:5001@nas.example.test:5001",
+            BASE_URL + "/other-path",
+        ],
+    )
+    def test_a_different_address_is_still_refused(self, broker_mode, spelling):
+        from broker.errors import AuthorizationDenied
+
+        with pytest.raises(AuthorizationDenied):
+            _server()._get_base_url({"base_url": spelling})
+
+    @pytest.mark.asyncio
+    async def test_disconnect_says_the_nas_session_was_not_closed_when_nothing_closed_it(
+        self, broker_mode
+    ):
+        server = _server()
+        server.install_session(BASE_URL, "SID1")
+
+        result = await server._call_tool("synology_logout", {"base_url": BASE_URL})
+
+        assert result.is_error is False
+        assert "did not close the session on the NAS" in _text(result)
+
+    def test_logout_clears_the_local_session_even_if_the_remote_call_raises(self):
+        auth = _manual_auth("https://auth-raises.example.test:5001")
+        auth.current_session_id = "SID1"
+        auth.current_syno_token = "TOK1"
+
+        with patch.object(auth, "_logout_remote", side_effect=RuntimeError("boom")):
+            with pytest.raises(RuntimeError):
+                auth.logout()
+
+        assert auth.current_session_id is None
+        assert auth.current_syno_token is None
