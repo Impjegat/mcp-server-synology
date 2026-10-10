@@ -454,6 +454,42 @@ class TestRuntime:
         assert sorted(sid for _, sid in broker.logouts) == ["SID-A", "SID-C"]
         assert broker.sessions.get("alice", "nas1") is None
 
+    def test_shutdown_waits_for_all_logouts_together_not_one_after_another(self, monkeypatch):
+        """Ten sessions on an unreachable NAS must cost one wait, not ten."""
+        import threading
+        import time
+
+        broker = Broker(monkeypatch, CLIENTS, session=SESSION)
+        release = threading.Event()
+        started = []
+
+        def stuck(base_url, session_id, syno_token):
+            started.append(session_id)
+            release.wait(10)
+            return False
+
+        broker.runtime._remote_logout = stuck
+        for index in range(6):
+            broker.runtime.sessions.install(
+                f"client{index}", "nas1", BASE_URLS["nas1"], f"SID-{index}"
+            )
+
+        begun = time.monotonic()
+        try:
+            broker.runtime.shutdown(timeout=0.5)
+            elapsed = time.monotonic() - begun
+        finally:
+            release.set()
+
+        assert elapsed < 2.0  # six serial waits of 0.5 s would be 3 s
+        assert broker.sessions.revoke_all() == []  # the local sessions went first
+        assert len(started) == 6  # and every logout was attempted
+
+    def test_shutdown_returns_at_once_when_nothing_is_stuck(self, broker):
+        broker.sign_in("alice", "nas1", "SID-A")
+        broker.runtime.shutdown(timeout=5)
+        assert broker.logouts == [(BASE_URLS["nas1"], "SID-A")]
+
     def test_a_logout_that_raises_is_not_fatal_and_leaks_nothing(self, monkeypatch, caplog):
         broker = Broker(monkeypatch, CLIENTS, session=SESSION)
 

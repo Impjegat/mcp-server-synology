@@ -8,6 +8,7 @@
 
 import logging
 import threading
+import time
 from typing import Any, Callable, Dict, List, Mapping, Optional
 
 import mcp.types as types
@@ -159,10 +160,21 @@ class BrokerRuntime:
             self._logout_in_background(record)
         return len(removed)
 
-    def shutdown(self) -> None:
-        """End every session, waiting briefly for the NAS to confirm each."""
-        for record in self.sessions.revoke_all():
-            self.logout_and_wait(record)
+    def shutdown(self, timeout: float = _LOGOUT_WAIT_SECONDS) -> None:
+        """End every session on the NAS, all at once, waiting at most `timeout`
+        seconds in total for the NAS to answer. Serial waits would add up (ten
+        sessions on an unreachable NAS is a hundred seconds) and could outlast a
+        container or service stop timeout, ending in a kill before the rest were
+        logged out. The local sessions are gone before any wait begins."""
+        threads = [
+            threading.Thread(target=self._logout, args=(record,), daemon=True)
+            for record in self.sessions.revoke_all()
+        ]
+        for thread in threads:
+            thread.start()
+        deadline = time.monotonic() + timeout
+        for thread in threads:
+            thread.join(max(0.0, deadline - time.monotonic()))
 
     # -- remote logout -----------------------------------------------------
 
