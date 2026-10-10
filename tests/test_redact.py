@@ -2,6 +2,7 @@
 used at the tool-response boundary (mcp_server.py) and in log filtering
 (main.py)."""
 
+import json
 import logging
 import sys
 from pathlib import Path
@@ -400,3 +401,15 @@ def test_redacting_filter_suppresses_message_rather_than_leave_it_unredacted_on_
         assert filt.filter(record) is True
 
     assert "LIVE_SID" not in record.msg
+
+
+@pytest.mark.parametrize("secret", ['quote"value', "back\\slash", "line\nbreak", "unicode-\u00e9"])
+@pytest.mark.parametrize("ensure_ascii", [True, False])
+def test_json_escaped_known_secrets_are_masked_in_output_and_logs(secret, ensure_ascii):
+    text = json.dumps({"diagnostic": f"Received {secret}"}, ensure_ascii=ensure_ascii)
+    result = redact(text, live_secrets=[secret])
+    assert json.loads(result)["diagnostic"] == "Received ***REDACTED***"
+    record = logging.LogRecord("test", logging.WARNING, "", 0, "Service failed: %s", (text,), None)
+    assert RedactingFilter(lambda: [secret]).filter(record)
+    diagnostic = json.loads(record.getMessage().split(": ", 1)[1])["diagnostic"]
+    assert diagnostic == "Received ***REDACTED***"
