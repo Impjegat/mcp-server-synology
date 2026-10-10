@@ -8,6 +8,7 @@
 
 import logging
 import threading
+import time
 from typing import Any, Callable, Dict, List, Mapping, Optional
 
 import mcp.types as types
@@ -57,6 +58,12 @@ class _ClientBridge:
         self._runtime.reap_expired()
         record = self._runtime.sessions.get(self._client.name, alias, touch=touch)
         if record is None:
+            if touch:
+                # A call needed a session and there is none: leave a sign-in
+                # request where the owner will see it on the private page. One
+                # per client and NAS however often it is asked, and it carries
+                # nothing back to the model: the reply stays AUTHENTICATION_REQUIRED.
+                self._runtime.sessions.begin_pending(self._client.name, alias)
             return None
         return SessionView(record.session_id, record.syno_token, record.generation)
 
@@ -159,10 +166,21 @@ class BrokerRuntime:
             self._logout_in_background(record)
         return len(removed)
 
-    def shutdown(self) -> None:
-        """End every session, waiting briefly for the NAS to confirm each."""
-        for record in self.sessions.revoke_all():
-            self.logout_and_wait(record)
+    def shutdown(self, timeout: float = _LOGOUT_WAIT_SECONDS) -> None:
+        """End every session on the NAS, all at once, waiting at most `timeout`
+        seconds in total for the NAS to answer. Serial waits would add up (ten
+        sessions on an unreachable NAS is a hundred seconds) and could outlast a
+        container or service stop timeout, ending in a kill before the rest were
+        logged out. The local sessions are gone before any wait begins."""
+        threads = [
+            threading.Thread(target=self._logout, args=(record,), daemon=True)
+            for record in self.sessions.revoke_all()
+        ]
+        for thread in threads:
+            thread.start()
+        deadline = time.monotonic() + timeout
+        for thread in threads:
+            thread.join(max(0.0, deadline - time.monotonic()))
 
     # -- remote logout -----------------------------------------------------
 

@@ -218,6 +218,26 @@ class TestRealPaths:
         guard.verify_real("/docs/a.txt", "/volume1/docs/a.txt", resolve)
         assert asked == ["/docs", "/docs"]
 
+    def test_a_failed_lookup_is_never_remembered(self):
+        """One transient error from the NAS must not block a root for the whole
+        lifetime of the cache."""
+        policy = _policy(real_root_ttl=300)
+        answers = iter([None, None, "/volume1/docs"])
+        asked = []
+
+        def resolve(root):
+            asked.append(root)
+            return next(answers)
+
+        guard = policy.guard("nas1")
+        for _ in range(2):
+            with pytest.raises(AuthorizationDenied):
+                guard.verify_real("/docs/a.txt", "/volume1/docs/a.txt", resolve)
+        guard.verify_real("/docs/a.txt", "/volume1/docs/a.txt", resolve)  # recovers at once
+        guard.verify_real("/docs/a.txt", "/volume1/docs/a.txt", resolve)  # and now it is remembered
+
+        assert asked == ["/docs", "/docs", "/docs"]
+
 
 # ----------------------------------------------------------------------------
 # File Station

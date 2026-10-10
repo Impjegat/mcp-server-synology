@@ -15,6 +15,7 @@
 
 import posixpath
 import re
+import threading
 import time
 import unicodedata
 from typing import Callable, Dict, Mapping, Optional, Sequence, Tuple
@@ -97,7 +98,8 @@ class FolderPolicy:
         self._deny = tuple(canonicalize(value).casefold() for value in deny)
         self._clock = clock
         self._real_root_ttl = real_root_ttl
-        self._real_roots: Dict[Tuple[str, str], Tuple[float, Optional[str]]] = {}
+        self._real_roots: Dict[Tuple[str, str], Tuple[float, str]] = {}
+        self._real_lock = threading.Lock()
 
     def aliases(self) -> Tuple[str, ...]:
         return tuple(self._roots)
@@ -156,14 +158,21 @@ class FolderPolicy:
     ) -> Optional[str]:
         """Where DSM says `root` really lives, asked through `resolve` and
         remembered briefly: roots rarely move, and asking on every request
-        would double the traffic."""
+        would double the traffic.
+
+        Only an answer is remembered, never a failure: one transient error from
+        the NAS must not block a root for the whole lifetime of the cache. The
+        cache is touched from request threads, so it is guarded by a lock; the
+        lookup itself runs outside it, so a slow NAS never holds the lock."""
         key = (alias, root)
-        now = self._clock()
-        cached = self._real_roots.get(key)
-        if cached is not None and now - cached[0] < self._real_root_ttl:
-            return cached[1]
+        with self._real_lock:
+            cached = self._real_roots.get(key)
+            if cached is not None and self._clock() - cached[0] < self._real_root_ttl:
+                return cached[1]
         real = resolve(root)
-        self._real_roots[key] = (now, real)
+        if real is not None:
+            with self._real_lock:
+                self._real_roots[key] = (self._clock(), real)
         return real
 
     def guard(self, alias: str) -> "FolderGuard":
