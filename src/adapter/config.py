@@ -54,12 +54,19 @@ class AdapterConfigError(ValueError):
     never a value."""
 
 
+class MalformedTokenError(ValueError):
+    """A token is present but is not shaped like one. Carries no value."""
+
+
 @dataclass(frozen=True)
 class AdapterSettings:
     broker_url: str
     ca_file: Optional[str] = None
     token_file: Optional[str] = None
     token_env: Optional[str] = None
+    # How long to wait to establish the TCP and TLS connection, so a host that is
+    # down is reported in seconds. The two limits below are overall: they bound a
+    # whole operation, connecting and the MCP handshake included.
     connect_timeout: float = 5.0
     list_timeout: float = 30.0
     # Searches on the NAS can run for two minutes; the broker bounds them too.
@@ -208,8 +215,9 @@ def make_token_provider(
     settings: AdapterSettings, environ: Mapping[str, str] = os.environ
 ) -> Callable[[], Optional[str]]:
     """A function returning this client's broker token, or None if there is none to
-    be had. A file is read each time, so a token can be replaced without
-    restarting the AI application."""
+    be had (no file, no variable, or nothing in it). A token that is there but
+    malformed raises `MalformedTokenError`, so the two can be told apart. A file is read
+    each time, so a token can be replaced without restarting the AI application."""
 
     def provider() -> Optional[str]:
         if settings.token_env is not None:
@@ -220,6 +228,33 @@ def make_token_provider(
             except OSError:
                 return None
         token = (raw or "").strip()
-        return token if _TOKEN_SHAPE.match(token) else None
+        if not token:
+            return None
+        if not _TOKEN_SHAPE.match(token):
+            raise MalformedTokenError()
+        return token
 
     return provider
+
+
+def token_file_warning(settings: AdapterSettings) -> Optional[str]:
+    """A warning if the token file can be read by other accounts, or None. The
+    token is this client's own grant, not a NAS secret, but it should still be
+    private to the account that runs the application. Only where file modes mean
+    something (not Windows, whose permissions are ACLs); never reads the file."""
+    if settings.token_file is None or os.name == "nt":
+        return None
+    try:
+        mode = Path(settings.token_file).expanduser().stat().st_mode & 0o777
+    except OSError:
+        return None
+    return _mode_warning(settings.token_file, mode)
+
+
+def _mode_warning(token_file: str, mode: int) -> Optional[str]:
+    if mode & 0o077:
+        return (
+            f"The token file {token_file} is readable by other accounts "
+            f"(mode {mode:04o}); restrict it to its owner, for example chmod 600."
+        )
+    return None

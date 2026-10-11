@@ -1,9 +1,23 @@
 # src/adapter/client.py - Talking to the broker for the adapter.
 #
-# One short-lived connection per operation, authenticated with this client's
-# broker token. The broker is stateless at the MCP layer, so there is no session
-# to keep warm, and a token that is replaced on disk is picked up by the next
-# call. The token must not travel anywhere the configuration did not name: the SDK
+# Each operation gets its own HTTP client and its own MCP session: the broker is
+# stateless at the MCP layer, so there is no session to keep warm, and a token
+# replaced on disk is used by the very next call. An operation is three requests
+# (initialize, the call, the initialized notification) and they share one
+# connection. Sharing a client between operations was tried and measured against
+# a real broker: it did not reduce the number of connections (five operations
+# used six), because the SDK discards its connection when an operation ends, so a
+# pool would have added state and no saving. What a call costs is one connection
+# and its TLS handshake, a few milliseconds to a broker on a LAN and negligible
+# beside the NAS call itself. If that ever matters, the place to look is the SDK's
+# handling of the connection at the end of a session, not a cache here.
+#
+# The time limits are overall: `list_timeout` and `call_timeout` bound an
+# operation from the first byte of connecting to the last of the reply, handshake
+# included. `connect_timeout` bounds only establishing the TCP and TLS connection,
+# so a host that is down is reported in seconds instead of after the whole limit.
+#
+# The token must not travel anywhere the configuration did not name: the SDK
 # follows only same-origin redirects and ignores the client's own setting, so a
 # redirect to another origin is not followed (a test asserts that only the
 # configured URL ever receives a request). `follow_redirects=False` below is a
@@ -28,7 +42,7 @@ from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 from mcp.shared.exceptions import MCPError
 
-from adapter.config import AdapterSettings
+from adapter.config import AdapterSettings, MalformedTokenError
 
 if sys.version_info < (3, 11):  # the builtin arrived in 3.11; anyio installs this backport
     from exceptiongroup import BaseExceptionGroup
@@ -38,7 +52,8 @@ _MESSAGES: Dict[str, str] = {
     "BROKER_TIMEOUT": "The Synology broker did not answer in time.",
     "BROKER_CERTIFICATE_ERROR": "The broker's certificate could not be verified, so nothing was sent.",
     "BROKER_UNAUTHORIZED": "The broker did not accept this client's token. Ask the user to check the client's token.",
-    "BROKER_TOKEN_MISSING": "This client has no usable broker token. Ask the user to check the adapter configuration.",
+    "BROKER_TOKEN_MISSING": "This client has no broker token. Ask the user to check the adapter configuration.",
+    "BROKER_TOKEN_INVALID": "This client's broker token is not a valid token (too short, too long, or containing spaces or line breaks). Ask the user to check it.",
     "BROKER_REFUSED": "The broker refused the request. Ask the user to check the broker address and its allowed hosts.",
     "BROKER_BUSY": "The broker is receiving too many requests. Try again shortly.",
     "BROKER_ERROR": "The broker reported an error.",
@@ -132,7 +147,10 @@ class BrokerClient:
 
     @contextlib.asynccontextmanager
     async def _session(self, timeout: float):
-        token = self._token_provider()
+        try:
+            token = self._token_provider()
+        except MalformedTokenError:
+            raise BrokerError("BROKER_TOKEN_INVALID") from None
         if not token:
             raise BrokerError("BROKER_TOKEN_MISSING")
         self._last_token = token

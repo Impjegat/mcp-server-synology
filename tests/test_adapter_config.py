@@ -2,17 +2,21 @@
 the broker token only ever referenced, never written into the file."""
 
 import json
+import os
 
 import pytest
 
 from adapter.config import (
     PROHIBITED_ENVIRONMENT,
     AdapterConfigError,
+    MalformedTokenError,
+    _mode_warning,
     default_config_path,
     load_settings,
     make_token_provider,
     parse_settings,
     prohibited_environment,
+    token_file_warning,
 )
 
 URL = "https://broker.example:8443/mcp"
@@ -213,24 +217,118 @@ class TestTokenProvider:
         path.write_text(TOKEN + "-rotated\n")
         assert provider() == TOKEN + "-rotated"
 
-    @pytest.mark.parametrize(
-        "raw",
-        [
-            "",
-            "   ",
-            "short",
-            "has a space-inside-it-0123456789",
-            "line\nbreak-0123456789",
-            "x" * 5000,
-            None,
-        ],
-    )
-    def test_anything_that_is_not_a_plain_token_is_no_token(self, raw):
+    @pytest.mark.parametrize("raw", ["", "   ", "\n", None])
+    def test_an_empty_or_absent_token_is_no_token(self, raw):
         environ = {} if raw is None else {"BROKER_TOKEN": raw}
         assert make_token_provider(parse_settings(_config()), environ)() is None
+
+    @pytest.mark.parametrize(
+        "raw",
+        ["short", "has a space-inside-it-0123456789", "line\nbreak-0123456789", "x" * 5000],
+        ids=["too-short", "inner-space", "inner-newline", "too-long"],
+    )
+    def test_a_token_that_is_there_but_not_shaped_like_one_is_reported_as_malformed(self, raw):
+        """Told apart from a missing one, so the message can say which."""
+        provider = make_token_provider(parse_settings(_config()), {"BROKER_TOKEN": raw})
+        with pytest.raises(MalformedTokenError) as error:
+            provider()
+        assert raw not in str(error.value)
+
+    def test_a_malformed_token_file_is_reported_the_same_way(self, tmp_path):
+        path = tmp_path / "token"
+        path.write_text("too short")
+        provider = make_token_provider(parse_settings({"broker_url": URL, "token_file": str(path)}))
+        with pytest.raises(MalformedTokenError):
+            provider()
 
     def test_a_missing_token_file_is_no_token(self, tmp_path):
         provider = make_token_provider(
             parse_settings({"broker_url": URL, "token_file": str(tmp_path / "absent")})
         )
         assert provider() is None
+
+
+class TestTokenFileWarning:
+    @staticmethod
+    def _settings(path):
+        return parse_settings({"broker_url": URL, "token_file": str(path)})
+
+    @pytest.mark.skipif(os.name == "nt", reason="file modes mean something only off Windows")
+    @pytest.mark.parametrize("mode", [0o644, 0o640, 0o604, 0o666, 0o755])
+    def test_a_token_other_accounts_can_read_is_warned_about(self, tmp_path, mode):
+        path = tmp_path / "token"
+        path.write_text(TOKEN)
+        os.chmod(path, mode)
+        warning = token_file_warning(self._settings(path))
+        assert warning is not None and str(path) in warning and f"{mode:04o}" in warning
+        assert TOKEN not in warning
+
+    @pytest.mark.skipif(os.name == "nt", reason="file modes mean something only off Windows")
+    @pytest.mark.parametrize("mode", [0o600, 0o400, 0o700])
+    def test_a_private_token_file_is_not(self, tmp_path, mode):
+        path = tmp_path / "token"
+        path.write_text(TOKEN)
+        os.chmod(path, mode)
+        assert token_file_warning(self._settings(path)) is None
+
+    def test_a_missing_file_and_a_token_from_the_environment_are_not_warned_about(self, tmp_path):
+        assert token_file_warning(self._settings(tmp_path / "absent")) is None
+        assert token_file_warning(parse_settings(_config())) is None
+
+    def test_the_warning_never_reads_the_file(self, tmp_path, monkeypatch):
+        from pathlib import Path
+
+        path = tmp_path / "token"
+        path.write_text(TOKEN)
+
+        def refuse(*args, **kwargs):
+            raise AssertionError("the token file was read")
+
+        monkeypatch.setattr(Path, "read_text", refuse)
+        monkeypatch.setattr(Path, "read_bytes", refuse)
+        token_file_warning(self._settings(path))
+
+    @pytest.mark.parametrize(
+        "mode,text",
+        [
+            (0o644, "0644"),
+            (0o640, "0640"),
+            (0o604, "0604"),
+            (0o660, "0660"),
+            (0o666, "0666"),
+            (0o755, "0755"),
+        ],
+    )
+    def test_any_group_or_other_access_is_warned_about(self, mode, text):
+        """The mode logic itself, run on every platform (no filesystem involved)."""
+        warning = _mode_warning("/etc/broker.token", mode)
+        assert warning is not None and text in warning and "/etc/broker.token" in warning
+
+    @pytest.mark.parametrize("mode", [0o600, 0o400, 0o700, 0o500, 0o000])
+    def test_a_mode_private_to_the_owner_is_not(self, mode):
+        assert _mode_warning("/etc/broker.token", mode) is None
+
+    def test_the_file_is_looked_at_and_the_result_reported(self, tmp_path, monkeypatch):
+        """The wiring, on every platform: the platform check is told this is not
+        Windows (in this module only), and a freshly written file is never private
+        by default (0666 on Windows, 0644 under the usual umask)."""
+        from types import SimpleNamespace
+
+        path = tmp_path / "token"
+        path.write_text(TOKEN)
+        monkeypatch.setattr("adapter.config.os", SimpleNamespace(name="posix"))
+        warning = token_file_warning(self._settings(path))
+        assert (
+            warning is not None and str(path) in warning and "readable by other accounts" in warning
+        )
+        assert TOKEN not in warning
+
+    def test_on_windows_there_is_nothing_to_say_because_modes_are_not_permissions(
+        self, tmp_path, monkeypatch
+    ):
+        from types import SimpleNamespace
+
+        path = tmp_path / "token"
+        path.write_text(TOKEN)
+        monkeypatch.setattr("adapter.config.os", SimpleNamespace(name="nt"))
+        assert token_file_warning(self._settings(path)) is None
