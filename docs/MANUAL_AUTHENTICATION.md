@@ -329,4 +329,4 @@ The single-process server that logs in with a stored password still works, for a
 | `deploy/broker/` | Container template for the broker |
 | `Dockerfile` | `--target adapter`, `--target broker`, and `legacy` |
 | [`TOOL_CATALOG.md`](TOOL_CATALOG.md) | Every tool, in plain language |
-| `plans/2026-10-06-manual-authentication/PLAN.md` | The design and its reasoning |
+| `plans/shipped/2026-10-06-manual-authentication/PLAN.md` | The design and its reasoning |

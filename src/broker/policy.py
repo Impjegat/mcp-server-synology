@@ -4,7 +4,7 @@
 # client and lists, for that client, the NAS aliases it may use, the tools it
 # may call and the folder roots it may reach, plus the session deadlines. It is
 # read once at startup and never changed by a request, and nothing a client
-# sends can enlarge it (plans/2026-10-06-manual-authentication/PLAN.md §3.2,
+# sends can enlarge it (plans/shipped/2026-10-06-manual-authentication/PLAN.md §3.2,
 # §6.2).
 #
 # The file holds only a SHA-256 digest of each client's bearer token, never the

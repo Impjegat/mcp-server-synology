@@ -11,7 +11,7 @@
 # file that holds it, or the name of an environment variable. Nothing in this
 # module imports the server, the NAS modules or the project's `config`, so the
 # adapter cannot fall back to signing in by itself
-# (plans/2026-10-06-manual-authentication/PLAN.md §3, §6.1).
+# (plans/shipped/2026-10-06-manual-authentication/PLAN.md §3, §6.1).
 
 import ipaddress
 import json

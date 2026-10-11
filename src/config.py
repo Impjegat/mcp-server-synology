@@ -33,7 +33,7 @@ class ManualAuthConfigError(ValueError):
 # is manual authentication: the process holds no NAS password, no OTP and no
 # trusted-device token, never logs in on its own and never renews a session
 # from a stored secret — a person signs in privately and only the resulting
-# session is handed to it (plans/2026-10-06-manual-authentication/PLAN.md).
+# session is handed to it (plans/shipped/2026-10-06-manual-authentication/PLAN.md).
 AUTH_MODE_LEGACY = "legacy"
 AUTH_MODE_BROKER = "broker"
 _AUTH_MODES = (AUTH_MODE_LEGACY, AUTH_MODE_BROKER)

@@ -18,7 +18,7 @@ Usage:
 
 Run it on the host that holds the policy file and the TLS key, under an
 account the AI applications cannot read or administer. See
-plans/2026-10-06-manual-authentication/PLAN.md §3.1.
+plans/shipped/2026-10-06-manual-authentication/PLAN.md §3.1.
 """
 
 import argparse

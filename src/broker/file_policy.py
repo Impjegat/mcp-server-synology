@@ -10,7 +10,7 @@
 #
 # This governs the NAS's own contents. It cannot limit what another, separately
 # authorised tool on the same computer can read, and it is not a substitute for
-# keeping the broker's own files out of reach (plans/2026-10-06-manual-
+# keeping the broker's own files out of reach (plans/shipped/2026-10-06-manual-
 # authentication/PLAN.md §3.1, §6.3).
 
 import posixpath

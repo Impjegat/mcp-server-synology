@@ -10,7 +10,7 @@
 #
 # Isolation is the control here, not erasure: Python strings cannot be wiped, so
 # what protects the password is that the process lives for seconds, holds one
-# copy of it, writes nothing to disk and then ends (plans/2026-10-06-manual-
+# copy of it, writes nothing to disk and then ends (plans/shipped/2026-10-06-manual-
 # authentication/PLAN.md §5.2). A host administrator can still read its memory.
 
 import json

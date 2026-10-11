@@ -3,7 +3,7 @@
 # One record per (owner, NAS): the client that may use it and the NAS alias it
 # is for. A record holds the DSM session id and SynoToken, lives only in this
 # process's memory, and is never written anywhere, put in a status reply or
-# shown by `repr` (plans/2026-10-06-manual-authentication/PLAN.md §4.2, §5.3).
+# shown by `repr` (plans/shipped/2026-10-06-manual-authentication/PLAN.md §4.2, §5.3).
 #
 # - A session ends at its idle deadline or its absolute deadline, whichever
 #   comes first. Using a session for a permitted call moves the idle deadline;

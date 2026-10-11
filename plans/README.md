@@ -35,3 +35,15 @@ Everything in `shipped/` is implemented and pushed. In date order:
 **Follow-up review (2026-09-30)**
 
 - [`followup-review-fixes`](shipped/2026-09-30-followup-review-fixes/PLAN.md) — validation errors no longer echo credentials, honest health summary, request-level time budgets
+
+**Manual authentication (2026-10-06 to 2026-10-11)** — the NAS password and one-time code never pass through an AI client. [`2026-10-06-manual-authentication`](shipped/2026-10-06-manual-authentication/PLAN.md) is the design; [`2026-10-10-manual-auth-roadmap`](shipped/2026-10-10-manual-auth-roadmap/PLAN.md) splits it into six PRs, and tracks the fixes that followed an independent review of them ([`IMPLEMENTATION_REVIEW_2026-10-11.md`](shipped/2026-10-10-manual-auth-roadmap/IMPLEMENTATION_REVIEW_2026-10-11.md)):
+
+- [`manual-auth-core`](shipped/2026-10-10-manual-auth-core/PLAN.md) — config modes, no stored secrets, typed session loss
+- [`broker-sessions-and-policy`](shipped/2026-10-10-broker-sessions-and-policy/PLAN.md) — in-memory sessions, policy, folder allowlist, the HTTP front
+- [`private-login`](shipped/2026-10-10-private-login/PLAN.md) — owner passkey, login page, short-lived worker
+- [`credential-free-adapter`](shipped/2026-10-10-credential-free-adapter/PLAN.md) — the stdio adapter that forwards to the broker
+- [`tool-catalog-and-titles`](shipped/2026-10-11-tool-catalog-and-titles/PLAN.md) — tool catalog and plain-language titles
+- [`packaging-deploy-docs`](shipped/2026-10-11-packaging-deploy-docs/PLAN.md) — Docker targets, deploy template, config examples, documentation, CI
+- the review fixes: [`fix-nas-transport`](shipped/2026-10-11-fix-nas-transport/PLAN.md) (redirects, verified certificate, final TLS setting), [`fix-private-login`](shipped/2026-10-11-fix-private-login/PLAN.md) (enrollment, cancelled logins), [`fix-folder-policy`](shipped/2026-10-11-fix-folder-policy/PLAN.md) (denied folders, listings, NFS discovery) and [`fix-grants-and-service-errors`](shipped/2026-10-11-fix-grants-and-service-errors/PLAN.md) (grant expiry, download creation, lost sessions, replay)
+
+What is not done is the user's: choosing and proving the broker's host, the cutover and the live acceptance checks, listed in the guide's "Moving from the old setup". The plans are shipped because their code is, not because those are.

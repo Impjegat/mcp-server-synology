@@ -1,7 +1,7 @@
 # Manual authentication and credential isolation implementation plan
 
 **Written:** 6 October 2026  
-**Status:** Plan only; implementation and deployment have not started.  
+**Status:** Implemented in the roadmap's PRs ([`../2026-10-10-manual-auth-roadmap/PLAN.md`](../2026-10-10-manual-auth-roadmap/PLAN.md)) and in the four fixes that followed the independent review. Deployment, the cutover and the live acceptance checks are the user's and are not done; the guide's "Moving from the old setup" lists them. (Originally: plan only, not started.)  
 **Repository baseline:** `63ec02bafc6e2e11fbc2c67f15fb83a8e362165b`, together with the existing local redaction changes in `src/utils/redact.py`, `tests/test_redact.py`, and `tests/test_tool_calls.py`.
 
 ## 1. Outcome and agreed scope
@@ -280,7 +280,7 @@ Verify actual existing function names during implementation; responsibilities in
 | Outer `REVIEW_FOLLOWUP_2026-09-29.md` | After verification, update the same existing document to reflect evidence, remaining limitations, and the new authentication boundary. |
 | Outer `REVIEW_REPORT.md` | Preserve the original report unchanged. |
 
-Do not move this plan into `plans/shipped/` or mark requirements complete until the corresponding work is implemented and verified under the repository's planning convention.
+This plan was held out of `plans/shipped/` until the work was implemented under the repository's planning convention, which is code complete, tested, committed and pushed; it now sits there with the PR folders that implemented it. It does not mean the requirements that need a live NAS (the host, the cutover, the password change) have been accepted.
 
 ## 8. OTP enrollment and recovery plan
 

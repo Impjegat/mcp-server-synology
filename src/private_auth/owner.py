@@ -9,7 +9,7 @@
 # enroll new-code` prints a one-time code, the owner opens the enrollment page on
 # the trusted device, types it, and registers the passkey. Once a passkey exists,
 # no further one can be added without running that command again, on the host
-# (plans/2026-10-06-manual-authentication/PLAN.md §3.2, §5.1).
+# (plans/shipped/2026-10-06-manual-authentication/PLAN.md §3.2, §5.1).
 
 import base64
 import hashlib
