@@ -1,0 +1,8 @@
+# Everything needed to run the tests: the runtime dependencies plus the test tools.
+# (Lint tools are pinned in .github/workflows/tests.yml and installed there.)
+-r requirements.txt
+
+pytest>=9.1.1
+pytest-asyncio>=1.4.0
+# Reads the deployment templates (docker-compose.yml, deploy/broker/) in the packaging tests.
+pyyaml>=6.0

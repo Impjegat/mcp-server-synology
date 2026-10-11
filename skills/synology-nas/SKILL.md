@@ -12,7 +12,7 @@ This skill teaches you how to use the `mcp-server-synology` MCP effectively. The
 Three things shape almost every interaction:
 
 1. **Targeting** — most setups have one NAS and you can omit the target argument. Multi-NAS setups require a `nas_name` (or `base_url`) on every tool call. Don't guess; discover first.
-2. **State** — auth is session-based and usually auto-managed. You almost never need to call `synology_login` yourself. Check status first; only log in if status says you must.
+2. **State** — auth is session-based and is **never yours to supply**. Check status first. If the NAS is not signed in, the *user* signs in: with manual authentication (no `synology_login` in your tool list) on a private page you cannot open; in the older legacy mode the server usually does it itself. Never ask the user for their NAS password or one-time code.
 3. **Aggregation** — several individual tools have a *_summary equivalent. When the user wants a "checkup" or "overview," reach for the aggregate. When they want a specific number, use the targeted tool.
 
 Once those three are settled, the rest is picking the right domain.
@@ -22,19 +22,20 @@ Once those three are settled, the rest is picking the right domain.
 The server ships in **restricted mode**: only browsing and monitoring tools are offered. File reads, health, and listing/inspection of downloads, containers and NFS shares work; every tool that *changes* something (creating, deleting, moving or renaming files, Download Station tasks, container/project/image/network changes, creating shares, NFS changes) is missing from the tool list, and so are **all** the user/group tools. Calling a hidden tool by name is refused with an error that says the server is in restricted mode.
 
 - Look at the tools you actually have before planning a write. If the one you need isn't there, or a call is refused for restricted mode, **tell the user** the server is read-only and that enabling changes means setting `RESTRICTED_MODE=false` (or `"restricted_mode": false` under `"server"` in settings.json) and restarting it. Don't retry, don't look for a workaround with another tool, and don't change the setting yourself.
-- While restricted, `synology_login` only accepts a `base_url` for a NAS that is already configured.
+- While restricted, `synology_login` (legacy mode) only accepts a `base_url` for a NAS that is already configured.
+- A call refused with `AUTHORIZATION_DENIED` is the broker's policy saying no to that tool, NAS or folder for this application. Report it; do not look for a workaround.
 - Each reference below says which of its tools survive restricted mode.
 
 ## Tool results and errors
 
 - A failed call returns a result flagged as an error (`isError: true`) whose text says why — a failed login, a DSM error, a missing path or session, a restricted-mode refusal, an exception. Read the text; don't assume success because you got text back.
-- An invalid argument is refused before anything reaches the NAS, with a message like `Invalid arguments for synology_login: password must be of type 'string'`. It names the field and the expected type but never repeats the value you sent. Fix the argument; don't retry the same call.
+- An invalid argument is refused before anything reaches the NAS, with a message like `Invalid arguments for list_directory: path must be of type 'string'`. It names the field and the expected type but never repeats the value you sent. Fix the argument; don't retry the same call.
 - An unknown tool name or a malformed request is a protocol error rather than a tool result.
 - `search_files`, `delete` and `move_file` are time-limited (about 2 minutes, 2 minutes and 1 minute). If one times out, the NAS may still have done the work — see [references/files.md](references/files.md) before retrying.
 
 ## Always start here
 
-Before any operation, run discovery — it's two cheap calls and answers "which NAS?" and "am I logged in?":
+Before any operation, run discovery — it's two cheap calls and answers "which NAS?" and "is it signed in?":
 
 1. `synology_list_nas` — lists configured NAS units with names, URLs, connection status.
 2. `synology_status` — shows which sessions are active.
@@ -89,9 +90,9 @@ This is a real NAS with real data — there is no "undo" for these tools.
 
 Tools that accept `offset`/`limit` (e.g. `ds_list_tasks`, `search_files`) default to sensible values. Don't add pagination unless the user mentions a large dataset or a previous call returned suspiciously few results.
 
-### Trust auto-login
+### Sign-in is the user's job, not yours
 
-Auto-login is on by default — the server logs in to every configured NAS at startup. You should expect operational tools to "just work" without calling `synology_login` first. If a tool returns an auth error, *then* call `synology_status` to diagnose, and only call `synology_login` if no session is active. See [references/auth.md](references/auth.md) for the full state machine.
+Expect operational tools to "just work" once the user has signed in; don't call `synology_login` first (with manual authentication it doesn't exist). If a tool answers `AUTHENTICATION_REQUIRED`, the NAS has no session: tell the user once, in plain words, to sign in on their private sign-in page, wait for them to say they have, then repeat the call. Don't retry in a loop, and **never ask for, accept or repeat a NAS password or one-time code in the chat**. If they paste one, tell them not to share it. See [references/auth.md](references/auth.md).
 
 ### Multi-step workflows: minimize round-trips
 
@@ -117,6 +118,7 @@ Optional companion services: skip when README says optional and main app works; 
 ## Anti-patterns to avoid
 
 - **Calling `synology_login` reflexively.** Auto-login almost always handled it.
+- **Asking the user for their NAS password or one-time code, or telling them to put one in a file or the chat.** Signing in is theirs to do privately; your part is to say the NAS needs it.
 - **Fanning out to 4 health tools when the user asked "how's the NAS doing?"** Use `synology_health_summary`.
 - **Inventing paths like `/Documents/foo` or `~/photos`.** Real paths start with `/volume1/`. List the parent if unsure.
 - **Picking a NAS in a multi-NAS setup without confirmation.** Ask which one.
@@ -134,7 +136,7 @@ Good response:
 3. Read the result. Check its `status` first: if it is `partial`, say which checks failed (`failed_checks`) instead of treating the missing sections as fine. Then surface anything red (degraded volumes, failing disks, high temps), and tell the user.
 
 Avoid:
-1. `synology_login` (unnecessary).
+1. `synology_login` (unnecessary, and absent with manual authentication).
 2. `synology_system_info`, then `synology_utilization`, then `synology_disk_health`, then `synology_volume_status` (4 calls when 1 suffices).
 
 ## When tool descriptions disagree with this skill

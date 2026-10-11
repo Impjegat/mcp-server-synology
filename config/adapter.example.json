@@ -1,0 +1,9 @@
+{
+  "broker_url": "https://broker.example.lan:8443/mcp",
+  "token_file": "~/.config/synology-mcp/broker.token",
+  "ca_file": "/etc/synology-mcp/broker-ca.pem",
+  "connect_timeout": 5,
+  "list_timeout": 30,
+  "call_timeout": 180,
+  "server_name": "synology"
+}

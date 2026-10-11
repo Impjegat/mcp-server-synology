@@ -243,6 +243,10 @@ def pytest_configure(config):
     config.addinivalue_line("markers", "real_nas: tests that require real NAS connection")
     config.addinivalue_line("markers", "destructive: tests that modify NAS state")
     config.addinivalue_line("markers", "slow: tests that may take a long time")
+    config.addinivalue_line(
+        "markers",
+        "docker: tests that run the built adapter and broker images (SYNOLOGY_TEST_DOCKER=1)",
+    )
 
 
 # Custom test collection - only run if credentials are available
