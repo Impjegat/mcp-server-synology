@@ -251,7 +251,7 @@ class SynologyFileStation:
                     # its method, not by GET or POST: a rename and the start of a
                     # delete or a move are GETs. A change stops here, with the
                     # session already renewed for the caller's next try.
-                    raise_unless_read_only(method)
+                    raise_unless_read_only(api, method)
                     return self._make_request(
                         api, version, method, use_post, deadline=deadline, _retry=False, **params
                     )

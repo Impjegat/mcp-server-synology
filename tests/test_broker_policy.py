@@ -236,6 +236,49 @@ class TestGrantExpiry:
         policy = _graded(known_tools, _at(days=-3))
         assert policy.clients["alice"].expires_at < NOW
 
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "1969-12-30",
+            "0001-01-01",
+            "0001-01-01T00:00:00+14:00",
+            "1999-12-31T23:59:59Z",
+        ],
+    )
+    def test_an_expiry_before_the_year_2000_is_refused_without_being_echoed(
+        self, known_tools, text
+    ):
+        """A date before 1970 is a negative timestamp, which not every platform can
+        turn back into a date (Windows raises). Start-up writes a note for each
+        ended grant, so such a date used to stop the broker with a traceback
+        instead of a message. It cannot be a forgotten renewal either."""
+        with pytest.raises(PolicyError, match=r"clients\.alice\.expires: is too far in") as error:
+            _graded(known_tools, text)
+        assert text not in str(error.value)
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "0001-01-01T00:00:00+23:59",
+            "0001-01-01T00:00:00-23:59",
+            "9999-12-31T23:59:59-23:59",
+            "9999-12-31T23:59:59+23:59",
+            "9999-12-31",
+            "0001-01-01",
+        ],
+    )
+    def test_an_extreme_date_is_only_ever_a_policy_error(self, known_tools, text):
+        """Whatever the date, the answer is a message about the setting, never a
+        traceback from the date arithmetic."""
+        with pytest.raises(PolicyError, match=r"clients\.alice\.expires"):
+            _graded(known_tools, text)
+
+    def test_the_first_moment_that_is_allowed_is_the_start_of_the_year_2000(self, known_tools):
+        client = _graded(known_tools, "2000-01-01T00:00:00Z").clients["alice"]
+        assert client.expires_at == 946684800
+        notes = _graded(known_tools, "2000-01-01T00:00:00Z").grant_warnings(NOW)
+        assert len(notes) == 1 and "ended on 2000-01-01 00:00 UTC" in notes[0]
+
     def test_every_client_needs_its_own_expiry(self, known_tools):
         document = {
             "clients": {
@@ -292,6 +335,23 @@ class TestGrantExpiry:
         assert await verifier.verify_token("token-one") is None
         now[0] = NOW + 11 * DAY
         assert await verifier.verify_token("token-one") is None
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("fraction", [".5", ".999999"])
+    async def test_the_sdk_is_never_told_the_grant_ends_later_than_it_does(
+        self, known_tools, fraction
+    ):
+        """`AccessToken.expires_at` is whole seconds. A grant ending part-way through
+        a second is reported as ending at the start of it: the second check made
+        by the SDK can only ever refuse early, never accept late. (The verifier,
+        which uses the exact moment, is the one that decides.)"""
+        policy = _graded(known_tools, f"2027-06-30T12:00:00{fraction}Z")
+        exact = policy.clients["alice"].expires_at
+        assert exact != int(exact)
+        verifier = PolicyTokenVerifier(policy, clock=lambda: NOW)
+        access = await verifier.verify_token("token-one")
+        assert access.expires_at <= exact
+        assert exact - access.expires_at < 1
 
     @pytest.mark.asyncio
     async def test_r12_a_grant_that_had_ended_before_the_broker_started_is_refused(

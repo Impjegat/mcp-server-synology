@@ -16,7 +16,7 @@ nothing opens a socket.
 import pytest
 import requests
 
-from broker.errors import AuthenticationRequired, RedirectRefused
+from broker.errors import AuthenticationRequired, RedirectRefused, SessionRenewedNotRepeated
 from tests.network_support import ScriptedNas, dsm_error, dsm_ok
 
 NAS = "https://nas.example.test:5001"
@@ -488,11 +488,11 @@ class TestTheSharedClientRepeatsReadsOnly:
         nas = ScriptedNas({key: dsm_error(119)}).install(monkeypatch)
         client = self._client()
 
-        result = getattr(client, verb)("SYNO.Core.User", "set", 1, {"name": "x"})
+        with pytest.raises(SessionRenewedNotRepeated) as error:
+            getattr(client, verb)("SYNO.Core.User", "set", 1, {"name": "x"})
 
         assert nas.count(*key) == 1
-        assert result["success"] is False and result["error"]["code"] == "session_renewed"
-        assert "run it again" in result["error"]["message"]
+        assert "run it again" in str(error.value)
         assert len(renewals) == 1 and client.session_id == "NEW-SID"
 
     @pytest.mark.parametrize(
@@ -539,15 +539,101 @@ class TestTheSharedClientRepeatsReadsOnly:
     )
     def test_no_change_is_repeated(self, renewals, monkeypatch, api, method):
         nas = ScriptedNas({(api, method): dsm_error(119)}).install(monkeypatch)
-        result = self._client().post(api, method)
+        with pytest.raises(SessionRenewedNotRepeated):
+            self._client().post(api, method)
         assert nas.count(api, method) == 1
-        assert result["error"]["code"] == "session_renewed"
 
     def test_manual_mode_still_asks_for_a_person_not_a_renewal(self, manual_mode, monkeypatch):
         nas = ScriptedNas({("SYNO.Core.System", "info"): dsm_error(119)}).install(monkeypatch)
         with pytest.raises(AuthenticationRequired):
             self._client().get("SYNO.Core.System", "info")
         assert nas.count("SYNO.Core.System", "info") == 1
+
+
+class TestASearchIsARead:
+    """`start` is a change for a delete or a move and a read for a search, so the
+    method alone cannot say; the API it is sent to does."""
+
+    SEARCH = {
+        ("SYNO.FileStation.Search", "status"): dsm_ok({"finished": True}),
+        ("SYNO.FileStation.Search", "list"): dsm_ok({"files": []}),
+        ("SYNO.FileStation.Search", "stop"): dsm_ok({}),
+    }
+
+    def test_a_search_that_finds_the_session_gone_is_repeated_once(self, renewals, monkeypatch):
+        key = ("SYNO.FileStation.Search", "start")
+        script = {**self.SEARCH, key: [dsm_error(119), dsm_ok({"taskid": "t1"})]}
+        nas = ScriptedNas(script).install(monkeypatch)
+
+        assert _fs().search_files("/docs", "a*") == []
+
+        first, second = nas.requests_for(*key)
+        assert first["fields"]["_sid"] == "OLD-SID" and second["fields"]["_sid"] == "NEW-SID"
+        assert len(renewals) == 1
+
+    @pytest.mark.parametrize(
+        "api,method",
+        [
+            ("SYNO.FileStation.Delete", "start"),
+            ("SYNO.FileStation.CopyMove", "start"),
+            ("SYNO.FileStation.Search", "stop"),
+            ("SYNO.FileStation.Delete", "stop"),
+        ],
+    )
+    def test_the_same_method_on_another_api_is_still_a_change(self, api, method):
+        from utils.synology_api import is_read_only
+
+        assert is_read_only(api, method) is False
+
+    def test_only_the_search_start_is_a_read_of_its_name(self):
+        from utils.synology_api import is_read_only
+
+        assert is_read_only("SYNO.FileStation.Search", "start") is True
+        assert is_read_only("SYNO.FileStation.List", "list") is True
+        assert is_read_only("SYNO.Anything", "delete") is False
+
+
+class TestEveryServiceTellsTheClientTheSameThing:
+    """A change that found the session gone is not repeated. File Station and
+    Download Station raise `SessionRenewedNotRepeated`; the shared client behind
+    containers, health, NFS and users used to return an error result instead, so
+    the client saw different words (and a JSON dump) for the same event."""
+
+    @pytest.fixture
+    def server(self, renewals, monkeypatch):
+        import mcp_server
+
+        monkeypatch.setattr(mcp_server.config, "restricted_mode", False)
+        server = mcp_server.SynologyMCPServer()
+        server.install_session(NAS, "OLD-SID", "OLD-TOKEN")
+        return server
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "tool,arguments,key",
+        [
+            ("synology_container_start", {"name": "web"}, ("SYNO.Docker.Container", "start")),
+            (
+                "rename_file",
+                {"path": "/docs/a.txt", "new_name": "b.txt"},
+                ("SYNO.FileStation.Rename", "rename"),
+            ),
+            ("ds_delete_tasks", {"task_ids": ["t1"]}, ("SYNO.DownloadStation2.Task", "delete")),
+        ],
+        ids=["shared-client", "file-station", "download-station"],
+    )
+    async def test_the_message_is_the_same_plain_sentence(
+        self, server, monkeypatch, tool, arguments, key
+    ):
+        nas = ScriptedNas({key: dsm_error(119), GETINFO: _A_FILE}).install(monkeypatch)
+
+        result = await server._call_tool(tool, {"base_url": NAS, **arguments})
+
+        assert result.is_error is True
+        assert result.content[0].text == str(SessionRenewedNotRepeated())
+        assert nas.count(*key) == 1
+        # The session was renewed, not lost: it is kept, unlike one that needs a sign-in.
+        assert NAS in server.sessions
 
 
 class TestTheTypedError:
