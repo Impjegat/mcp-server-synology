@@ -1,0 +1,14 @@
+{
+  "synology": {
+    "nas1": {
+      "host": "nas.example.lan",
+      "port": 5001,
+      "username": "mcp-reader",
+      "note": "Primary NAS"
+    }
+  },
+  "server": {
+    "restricted_mode": true,
+    "verify_ssl": true
+  }
+}

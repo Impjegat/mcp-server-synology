@@ -1,3 +1,6 @@
+# Runtime dependencies of the server and the broker. The credential-free adapter
+# needs far less and has its own file (requirements-adapter.txt); tests need
+# requirements-dev.txt.
 pycryptodome
 requests
 # mcp 2.0 replaced the low-level Server decorators (`@server.list_tools()`,
@@ -18,7 +21,3 @@ webauthn>=3.0.1,<4
 # Python 3.10 has no BaseExceptionGroup; the adapter inspects the groups anyio raises.
 # (anyio already installs it there; named here because the adapter imports it.)
 exceptiongroup>=1.0.2; python_version < "3.11"
-
-# Testing dependencies
-pytest>=9.1.1
-pytest-asyncio>=1.4.0

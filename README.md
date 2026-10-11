@@ -6,7 +6,25 @@ A Model Context Protocol (MCP) server for Synology NAS devices. Enables AI assis
 
 > **About this fork:** this is a security-hardened fork of [atom2ueki/mcp-server-synology](https://github.com/atom2ueki/mcp-server-synology). Compared with upstream it connects over HTTPS only, starts in a read-only restricted mode by default, masks secrets in logs and responses, reports tool failures as MCP errors, and runs on the MCP Python SDK 2.x. See [Differences from upstream](#differences-from-upstream) and the [CHANGELOG](CHANGELOG.md).
 
-## 🚀 Quick Start with Docker
+## 🔐 Recommended: manual authentication
+
+**Your NAS password never has to pass through an AI application.** In this mode the application launches a small **adapter** that holds no NAS credential, the adapter talks to a protected **broker** that holds the NAS session, and you sign in yourself on a private page, with a passkey and then your NAS password (and one-time code), on a device you trust. The AI is told only whether the NAS is connected; if it is not, it asks you to sign in, and it is never given anywhere to type a password.
+
+```
+AI application ──▶ adapter (no credential) ──HTTPS + client token──▶ broker ──▶ NAS
+                                                                     ▲
+                                          you: passkey, then NAS password (+ code)
+```
+
+- **Set it up:** [`docs/MANUAL_AUTHENTICATION.md`](docs/MANUAL_AUTHENTICATION.md) walks through the broker host, the policy, the passkey, the adapter and each AI application, and says plainly which steps are yours and what the design does not protect against.
+- **What each tool does:** [`docs/TOOL_CATALOG.md`](docs/TOOL_CATALOG.md) lists every tool by category, in plain language, with what is on by default.
+- **Run the broker:** [`deploy/broker/`](deploy/broker/) has a hardened container template. Configuration examples are in [`config/`](config/): [adapter](config/adapter.example.json), [broker policy](config/broker.example.json) and [NAS endpoints](config/settings.broker.example.json). None contains a secret.
+
+The sections below it describe the original **legacy single-process mode**, which logs in with a password it is given. It still works, for a machine only you use, but the password then sits in a file whatever runs as you can read.
+
+## 🚀 Quick Start with Docker (legacy single-process mode)
+
+> **This is the legacy mode:** the server holds your NAS password. For a setup where it does not, see [Recommended: manual authentication](#-recommended-manual-authentication).
 
 **Requirements:** Docker with Compose v2.24 or later, **or** Python 3.10 or later for a local install (the MCP SDK 2.x this server uses does not support older Pythons).
 
@@ -94,6 +112,8 @@ Edit `.env` with a text editor the same way as on macOS/Linux — the file forma
 **Docker Desktop note:** the `docker-compose.yml` volume mount (`${XDG_CONFIG_HOME:-$HOME/.config}/synology-mcp:...`) is expanded by Docker Compose itself, not your shell, so it resolves the same way whether you run `docker-compose` from PowerShell, cmd, or WSL2 — as long as `HOME` or `XDG_CONFIG_HOME` is set in the environment Compose sees (WSL2 sets `HOME` automatically; from native PowerShell/cmd, set `XDG_CONFIG_HOME` explicitly first).
 
 ## 🔌 Client Setup
+
+> These entries start the **legacy** server. With [manual authentication](docs/MANUAL_AUTHENTICATION.md#8-register-the-adapter-in-each-ai-application) the application starts the adapter instead (`python adapter_main.py --config ...`), with no NAS credential in its registration.
 
 ### 🤖 Claude Desktop
 
@@ -213,8 +233,10 @@ If you prefer not to use Docker:
 ### 🔐 Authentication
 - **`synology_status`** - Check authentication status and active sessions
 - **`synology_list_nas`** - List all configured NAS units from settings.json
-- **`synology_login`** - Authenticate with Synology NAS *(conditional)*
+- **`synology_login`** - Authenticate with Synology NAS *(legacy mode only; with manual authentication it does not exist, because a password must never pass through an AI application)*
 - **`synology_logout`** - Logout from session *(conditional)*
+
+Every tool also has a plain-language title and a category: see [`docs/TOOL_CATALOG.md`](docs/TOOL_CATALOG.md), which is generated from the tool registry and says which tools are on by default, which only read, and which return text that goes to the AI provider.
 
 ### 📁 File System Operations
 - **`list_shares`** - List all available NAS shares
@@ -429,7 +451,7 @@ These need an administrator account and are all hidden in restricted mode.
 
 For Claude Code, Claude Desktop, and claude.ai users, this repo ships an Anthropic Agent Skill that teaches Claude how to use the MCP tools effectively — picking the right tool, targeting the right NAS in multi-NAS setups, preferring aggregate health checks over fan-out calls, and using correct path conventions.
 
-The skill lives at [`skills/synology-nas/`](skills/synology-nas/) and uses progressive disclosure across seven domains (auth, files, downloads, health, containers, shares/NFS, user management).
+The skill lives at [`skills/synology-nas/`](skills/synology-nas/) and uses progressive disclosure across seven domains (auth, files, downloads, health, containers, shares/NFS, user management). It knows about manual authentication: when the NAS is not connected it tells you to sign in on the private page, and it never asks for your password.
 
 **Install:**
 
@@ -562,6 +584,8 @@ The docker-compose.yml automatically mounts your `~/.config/synology-mcp` direct
 - If you prefer manual login, set `AUTO_LOGIN=false` and use the `synology_login` tool
 
 **2FA / OTP Accounts (optional):**
+
+> This section is about the **legacy mode**, where the server is handed a code or stores a trusted-device token. With [manual authentication](docs/MANUAL_AUTHENTICATION.md#turning-on-one-time-codes-otp) you type the code on the private page each time you sign in, and no device token is requested or kept.
 
 The MCP server supports DSM accounts with 2FA enabled. There are two ways to use it:
 
@@ -696,6 +720,8 @@ This fork changes some defaults and behaviours of [atom2ueki/mcp-server-synology
 - **Tool failures are `isError` results**, and unknown tools or malformed requests are JSON-RPC errors, instead of successful-looking text.
 - **MCP Python SDK 2.x and Python 3.10+.** Docker users need to rebuild the image (`docker-compose build`).
 - **Credentials are handled differently:** `.env` is passed to the container at start instead of being copied into the image, `settings.json` must have restricted permissions, and secrets are redacted from logs and responses.
+- **Manual authentication.** An optional mode in which no AI application holds the NAS password: a credential-free adapter, a protected broker and a private login (a passkey, then your password). See [`docs/MANUAL_AUTHENTICATION.md`](docs/MANUAL_AUTHENTICATION.md). Legacy mode is unchanged and is never a fallback.
+- **Plain-language tool titles** and a generated [tool catalog](docs/TOOL_CATALOG.md).
 - **Removed:** the Xiaozhi WebSocket bridge and the HTTP/SSE remote-deployment path (`docker-compose.http.yml`).
 - **Bounded operations:** `search_files`, `delete` and `move_file` have enforced [time limits](#time-limits), and `get_file_content` refuses files over `MAX_FILE_CONTENT_SIZE`.
 
@@ -704,9 +730,15 @@ This fork changes some defaults and behaviours of [atom2ueki/mcp-server-synology
 ### File Structure
 ```
 mcp-server-synology/
-├── main.py                    # 🎯 Entry point (stdio server, log redaction)
+├── main.py                    # 🎯 Entry point: the legacy single-process stdio server
+├── adapter_main.py            # 🔐 Entry point: the credential-free adapter an AI application launches
+├── broker_main.py             # 🔐 Entry point: the protected broker, and `enroll` / `new-token`
 ├── src/
 │   ├── mcp_server.py         # MCP server: tool registry, restricted mode, argument validation
+│   ├── tool_catalog.py       # Plain-language titles, categories and examples (presentation only)
+│   ├── adapter/              # The adapter: config, broker client, forwarding server
+│   ├── broker/               # The broker: policy, sessions, folder policy, HTTP server
+│   ├── private_auth/         # The private login: passkeys, login page, short-lived worker
 │   ├── config.py             # .env and settings.json loading
 │   ├── auth/                 # Login, sessions, 2FA
 │   ├── filestation/          # File operations
@@ -716,11 +748,15 @@ mcp-server-synology/
 │   ├── nfs/                  # NFS and shared folders
 │   ├── usermanagement/       # Users, groups, permissions
 │   └── utils/                # DSM API client, secret redaction
+├── docs/                     # MANUAL_AUTHENTICATION.md, TOOL_CATALOG.md (generated)
+├── config/                   # Secret-free examples: adapter, broker policy, NAS endpoints
+├── deploy/broker/            # Hardened container template for the broker
+├── scripts/                  # generate_tool_catalog.py
 ├── tests/                    # Unit and end-to-end tests (see tests/README.md)
 ├── skills/synology-nas/      # Claude Agent Skill
 ├── plans/                    # Design notes for shipped changes
-├── docker-compose.yml
-├── Dockerfile
-├── requirements.txt
-└── env.example               # Configuration template (copy to .env)
+├── docker-compose.yml        # The legacy single-process server
+├── Dockerfile                # Targets: adapter, broker, legacy
+├── requirements.txt          # Runtime (server and broker); -adapter.txt and -dev.txt beside it
+└── env.example               # Configuration template (legacy mode)
 ```

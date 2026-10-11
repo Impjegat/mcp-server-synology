@@ -38,7 +38,7 @@ DSM's user model is additive (group membership grants permissions, plus per-user
 
 ### Creating a new user
 
-`synology_create_user` requires at minimum a `name` and `password`. Optional fields:
+`synology_create_user` requires at minimum a `name` and `password` (the new account's own password, not the NAS sign-in). With manual authentication the adapter refuses any call that carries a field named like a credential, so this tool cannot be used through it; tell the user to create the account in DSM. It is also off by default. Optional fields:
 
 - `email` — for password recovery and notifications.
 - `description` — surface this when listing users.

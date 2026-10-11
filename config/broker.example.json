@@ -1,0 +1,32 @@
+{
+  "session": {
+    "idle_seconds": 900,
+    "absolute_seconds": 28800,
+    "pending_seconds": 300
+  },
+  "deny_paths": [
+    "/homes/admin"
+  ],
+  "clients": {
+    "claude-code": {
+      "token_sha256": "0000000000000000000000000000000000000000000000000000000000000001",
+      "nas": ["nas1"],
+      "folders": {
+        "nas1": ["/Shared/Documents", "/Shared/Photos"]
+      }
+    },
+    "claude-desktop": {
+      "token_sha256": "0000000000000000000000000000000000000000000000000000000000000002",
+      "nas": ["nas1"],
+      "tools": [
+        "synology_status",
+        "synology_list_nas",
+        "synology_health_summary",
+        "synology_system_info",
+        "synology_disk_health",
+        "synology_volume_status"
+      ],
+      "disconnect": true
+    }
+  }
+}

@@ -1,0 +1,79 @@
+# The broker: the protected process that holds the DSM sessions, serves the tools to
+# the AI applications' adapters over HTTPS, and hosts the private login page.
+#
+# This is a template for a host YOU administer, not for the computer the AI applications
+# run on. Read docs/MANUAL_AUTHENTICATION.md (section "Where the broker runs") first:
+# the point of the broker is that an AI application cannot read its files or memory or
+# administer its host, and a container is packaging, not proof of that.
+#
+#   cp broker.env.example broker.env      # host names and paths; no secrets in it
+#   docker compose --env-file broker.env up -d --build
+#
+# What is deliberately not here: no env_file (the broker never takes a NAS password or
+# one-time code from any environment, and this file gives it none), no privileged mode,
+# no Docker socket, no host network, no writable code, and no mount shared with an AI
+# application. Every published address is explicit; nothing is exposed by default.
+name: synology-broker
+
+services:
+  broker:
+    image: synology-mcp-broker:local
+    build:
+      context: ../..
+      target: broker
+    command:
+      - serve
+      - --policy=/config/synology-mcp/broker-policy.json
+      # The MCP endpoint, over TLS. The Host header clients use must be listed.
+      - --host=0.0.0.0
+      - --port=8443
+      - --allowed-host=${BROKER_HOST:?set BROKER_HOST in broker.env}:${BROKER_MCP_PORT:-8443}
+      - --tls-cert=/tls/cert.pem
+      - --tls-key=/tls/key.pem
+      # The private login page, on its own port and with its own bind address.
+      - --private-origin=https://${BROKER_HOST}:${BROKER_PRIVATE_PORT:-8444}
+      - --private-host=0.0.0.0
+      - --private-port=8444
+      - --private-allowed-host=${BROKER_HOST}:${BROKER_PRIVATE_PORT:-8444}
+      - --private-tls-cert=/tls/cert.pem
+      - --private-tls-key=/tls/key.pem
+      - --rp-id=${BROKER_HOST}
+      - --owner-store=/state/owner.json
+    # Run as the account that owns the config, TLS and state directories (broker.env).
+    # The broker refuses a settings file that another account owns or that others can
+    # read, so this is not decoration.
+    user: "${BROKER_UID:?set BROKER_UID in broker.env}:${BROKER_GID:?set BROKER_GID in broker.env}"
+    environment:
+      XDG_CONFIG_HOME: /config
+      # `true`, `false`, or the path of a CA bundle under /config/synology-mcp for a NAS
+      # with a private certificate. Never `false` on a network you do not control.
+      VERIFY_SSL: ${NAS_VERIFY_SSL:-true}
+      # The broker applies restricted mode as well as each client's policy. Leave it on
+      # unless a client is meant to have a tool that changes things.
+      RESTRICTED_MODE: ${BROKER_RESTRICTED_MODE:-true}
+      LOG_LEVEL: ${BROKER_LOG_LEVEL:-INFO}
+    ports:
+      - "${BROKER_BIND_ADDRESS:?set BROKER_BIND_ADDRESS in broker.env}:${BROKER_MCP_PORT:-8443}:8443"
+      - "${BROKER_PRIVATE_BIND_ADDRESS:?set BROKER_PRIVATE_BIND_ADDRESS in broker.env}:${BROKER_PRIVATE_PORT:-8444}:8444"
+    volumes:
+      # settings.json (NAS endpoints; no passwords) and broker-policy.json.
+      - ${BROKER_CONFIG_DIR:?set BROKER_CONFIG_DIR in broker.env}:/config/synology-mcp:ro
+      # cert.pem and key.pem for BROKER_HOST.
+      - ${BROKER_TLS_DIR:?set BROKER_TLS_DIR in broker.env}:/tls:ro
+      # The only writable mount: the owner's public passkey. Public keys only.
+      - ${BROKER_STATE_DIR:?set BROKER_STATE_DIR in broker.env}:/state
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 200
+    restart: unless-stopped
+    # The image's HEALTHCHECK asks /readyz. A broker nobody has signed in to is ready.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

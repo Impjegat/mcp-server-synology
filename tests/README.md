@@ -8,7 +8,7 @@ Two kinds of tests live here:
 ## Quick start (offline)
 
 ```bash
-pip install -r requirements.txt     # Python 3.10 or later; also installs pytest
+pip install -r requirements-dev.txt   # Python 3.10 or later; the runtime dependencies plus pytest and PyYAML
 
 python -m pytest -m "not real_nas"
 ```
@@ -17,7 +17,8 @@ The suite does not read your `~/.config/synology-mcp/settings.json` or a local `
 
 ## Running against a real NAS
 
-1. Copy the template and fill in your NAS details:
+1. Copy the template, uncomment its legacy-mode lines and fill in your NAS details (these tests use the
+   legacy password mode; the recommended manual-authentication setup has no password to put in a file):
    ```bash
    cp env.example .env
    ```
@@ -55,6 +56,14 @@ python -m pytest -m "real_nas and not slow"          # skip the searches
 | `test_container_manager.py` | Container Manager module |
 | `test_nfs.py` | NFS and shared-folder management (partly `real_nas`; changing settings is `destructive`) |
 | `test_network_guard.py` | The socket guard in `conftest.py` that keeps offline tests off the network |
+| `test_manual_auth.py` | Manual-authentication mode of the server: no stored credential, `AUTHENTICATION_REQUIRED`, no `synology_login` |
+| `test_broker_*.py`, `test_file_policy.py` | The broker: policy, sessions, folder allowlist, the HTTP server, the real process |
+| `test_login_*.py`, `test_private_*.py`, `test_owner_passkeys.py` | The private login: passkeys, the page, the short-lived worker, attempt limits |
+| `test_adapter_*.py` | The credential-free adapter: configuration, broker client, forwarding, the real process over stdio |
+| `test_tool_catalog.py` | Tool titles and categories, and that `docs/TOOL_CATALOG.md` is current and true |
+| `test_packaging.py` | The Dockerfile, the ignore files, the compose template, the configuration examples, the workflow and the documents: the adapter image's real file set is rebuilt from its COPY lines and run; every flag, setting, code and link a document mentions exists |
+| `test_tls_end_to_end.py` | The real broker with a real certificate (made fresh, signed by a throwaway CA) and the real adapter, with the certificate chain and host name checked, plus the container health script |
+| `test_docker_images.py` | The built adapter and broker images, run: non-root, read-only code, no NAS libraries in the adapter, a broker container that becomes healthy and answers a real adapter. Off unless `SYNOLOGY_TEST_DOCKER=1` |
 
 `conftest.py` holds the shared fixtures and the guard; `socket_guard.py` is the guard's address classification, kept separate so the guard itself can be tested.
 
@@ -70,6 +79,18 @@ MCP_STDIO_SERVER_COMMAND='["docker","compose","run","--rm","-e","AUTO_LOGIN","-e
 
 One test in it needs DEBUG logging and is skipped when the command is overridden.
 
+## The image tests
+
+`test_docker_images.py` needs Docker and images built from the `adapter` and `broker` targets of the `Dockerfile`. They are skipped unless `SYNOLOGY_TEST_DOCKER=1`; CI builds the images and sets it.
+
+```bash
+docker build --target adapter -t synology-mcp-adapter:ci .
+docker build --target broker  -t synology-mcp-broker:ci .
+SYNOLOGY_TEST_DOCKER=1 python -m pytest tests/test_docker_images.py
+```
+
+The broker container is pointed at a made-up NAS address and signed in to nothing: no password, code or token that opens anything exists anywhere in these tests.
+
 ## Markers
 
 | Marker | Meaning |
@@ -77,6 +98,7 @@ One test in it needs DEBUG logging and is skipped when the command is overridden
 | `real_nas` | Needs a real NAS and credentials (excluded by `-m "not real_nas"`) |
 | `destructive` | Modifies state on the NAS |
 | `slow` | May take several seconds, for example searches |
+| `docker` | Runs the built images; needs Docker and `SYNOLOGY_TEST_DOCKER=1` |
 
 ## Handy commands
 
@@ -87,4 +109,4 @@ python -m pytest -k "restricted"             # by name
 python -m pytest -s -v                       # live output
 ```
 
-CI also runs `ruff check src/ main.py tests/` and `black --check src main.py tests`.
+CI also runs `ruff check` and `black --check` over `src/`, the three entry points, `scripts/`, `docker/` and `tests/`, and `python scripts/generate_tool_catalog.py --check`.

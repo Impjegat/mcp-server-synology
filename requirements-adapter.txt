@@ -1,0 +1,8 @@
+# The credential-free adapter (adapter_main.py) and nothing else. It forwards to the
+# broker and holds no NAS credential, so it has no use for the NAS client libraries
+# (requests, pycryptodome), for .env loading, or for passkey support, and its image
+# leaves them out. Keep the mcp bound identical to requirements.txt (a test checks).
+mcp>=2.2.0,<3
+
+# Python 3.10 has no BaseExceptionGroup; the adapter inspects the groups anyio raises.
+exceptiongroup>=1.0.2; python_version < "3.11"

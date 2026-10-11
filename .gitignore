@@ -254,3 +254,19 @@ scratch_*.py
 *.zip
 *.rar
 *.7z 
+
+# Private configuration and authentication state for the manual-authentication
+# setup. Only the *.example.* files in config/ and deploy/ are meant to be committed.
+broker-policy.json
+owner.json
+adapter.json
+broker.token
+*.token
+settings.json
+broker.env
+deploy/**/tls/
+deploy/**/state/
+*.pem
+*.key
+*.p12
+*.pfx

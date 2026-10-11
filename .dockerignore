@@ -46,4 +46,28 @@ test_*
 # COPY becomes broader than the current targeted src/+main.py copies.
 .env
 .env.*
-settings*.json 
+settings*.json
+
+# Manual-authentication state, tokens, keys and local configuration: none of it
+# belongs in an image (the broker and adapter read theirs from mounted files).
+# (the **/ forms match at any depth; a bare pattern matches only at the top)
+**/.env
+**/.env.*
+**/settings*.json
+**/broker-policy.json
+**/owner.json
+**/adapter.json
+**/broker.env
+**/*.token
+**/*.pem
+**/*.key
+**/*.p12
+**/*.pfx
+config/
+deploy/
+docs/
+plans/
+tests/
+scripts/
+skills/
+.github/
