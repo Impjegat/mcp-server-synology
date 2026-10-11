@@ -206,3 +206,210 @@ class TestPendingSignIn:
     def test_a_pending_request_holds_no_credential(self, manager):
         pending = manager.begin_pending("alice", "nas1")
         assert set(vars(pending)) == {"request_id", "owner", "nas", "created_at", "expires_at"}
+
+
+class TestLoginAttempts:
+    """A sign-in takes time (the worker talks to the NAS). The request it answers
+    must still be valid when the result comes back, or the session is not adopted
+    (implementation review R05). Each attempt is one claim on one pending request."""
+
+    @staticmethod
+    def _begin(manager, request_id):
+        return manager.begin_attempt(request_id)
+
+    @staticmethod
+    def _adopt(manager, attempt, sid="SID-NEW", token="TOK-NEW"):
+        return manager.install_for_attempt(attempt, URL, sid, token)
+
+    def _claimed(self, manager, owner="alice", nas="nas1"):
+        pending = manager.begin_pending(owner, nas)
+        status, attempt = self._begin(manager, pending.request_id)
+        assert status == "started"
+        return pending, attempt
+
+    # -- claiming -----------------------------------------------------------
+
+    def test_a_waiting_request_can_be_claimed_once_at_a_time(self, manager):
+        pending = manager.begin_pending("alice", "nas1")
+        status, attempt = self._begin(manager, pending.request_id)
+        assert status == "started" and attempt is not None
+        assert self._begin(manager, pending.request_id) == ("in_progress", None)
+
+    def test_a_released_claim_can_be_made_again(self, manager):
+        pending, attempt = self._claimed(manager)
+        manager.release_attempt(attempt)
+        assert self._begin(manager, pending.request_id)[0] == "started"
+
+    def test_an_unknown_or_expired_request_cannot_be_claimed(self, manager, clock):
+        assert self._begin(manager, "not-a-request") == ("expired", None)
+        pending = manager.begin_pending("alice", "nas1")
+        clock.advance(50)
+        assert self._begin(manager, pending.request_id) == ("expired", None)
+
+    def test_one_claim_per_request_even_when_many_ask_at_once(self, manager):
+        import threading
+
+        pending = manager.begin_pending("alice", "nas1")
+        results, barrier = [], threading.Barrier(8)
+
+        def claim():
+            barrier.wait()
+            results.append(self._begin(manager, pending.request_id)[0])
+
+        threads = [threading.Thread(target=claim) for _ in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        assert sorted(results) == ["in_progress"] * 7 + ["started"]
+
+    def test_claims_on_different_requests_do_not_interfere(self, manager):
+        a = manager.begin_pending("alice", "nas1")
+        b = manager.begin_pending("bob", "nas1")
+        assert self._begin(manager, a.request_id)[0] == "started"
+        assert self._begin(manager, b.request_id)[0] == "started"
+
+    def test_releasing_an_old_claim_does_not_release_a_newer_one(self, manager):
+        _, old = self._claimed(manager)
+        manager.cancel_pending("alice", "nas1")
+        pending, _ = self._claimed(manager)  # a new request, claimed again
+        manager.release_attempt(old)
+        assert self._begin(manager, pending.request_id)[0] == "in_progress"
+
+    # -- adopting ------------------------------------------------------------
+
+    def test_a_valid_attempt_installs_the_session_and_settles_the_request(self, manager):
+        pending, attempt = self._claimed(manager)
+        record, replaced = self._adopt(manager, attempt)
+
+        assert (record.session_id, record.generation, replaced) == ("SID-NEW", 1, None)
+        assert manager.get("alice", "nas1", touch=False).session_id == "SID-NEW"
+        assert manager.pending("alice", "nas1") is None
+        assert self._begin(manager, pending.request_id) == ("expired", None)
+
+    def test_a_claim_does_not_outlive_the_session_it_made(self, manager):
+        """Without the caller releasing it: the manager itself leaves nothing
+        behind that would make the next request for this owner and NAS unclaimable."""
+        _, attempt = self._claimed(manager)
+        assert self._adopt(manager, attempt) is not None
+
+        fresh = manager.begin_pending("alice", "nas1")
+        assert self._begin(manager, fresh.request_id)[0] == "started"
+
+    def test_a_claim_does_not_outlive_a_session_installed_another_way(self, manager):
+        _, attempt = self._claimed(manager)
+        _install(manager, sid="SID-OTHER")
+
+        fresh = manager.begin_pending("alice", "nas1")
+        assert self._begin(manager, fresh.request_id)[0] == "started"
+        assert self._adopt(manager, attempt) is None
+
+    def test_an_attempt_adopts_only_once(self, manager):
+        _, attempt = self._claimed(manager)
+        assert self._adopt(manager, attempt) is not None
+        assert self._adopt(manager, attempt, sid="SID-AGAIN") is None
+        assert manager.get("alice", "nas1", touch=False).session_id == "SID-NEW"
+
+    def test_r05_a_cancelled_request_is_not_adopted(self, manager):
+        _, attempt = self._claimed(manager)
+        manager.cancel_pending("alice", "nas1")
+        assert self._adopt(manager, attempt) is None
+        assert manager.get("alice", "nas1", touch=False) is None
+
+    def test_r05_an_expired_request_is_not_adopted(self, manager, clock):
+        _, attempt = self._claimed(manager)
+        clock.advance(50)
+        assert self._adopt(manager, attempt) is None
+        assert manager.get("alice", "nas1", touch=False) is None
+
+    def test_r05_a_disconnect_withdraws_a_login_in_progress(self, manager):
+        _, attempt = self._claimed(manager)
+        manager.revoke("alice", "nas1")
+        assert self._adopt(manager, attempt) is None
+        assert manager.get("alice", "nas1", touch=False) is None
+
+    def test_a_disconnect_of_every_session_of_the_owner_withdraws_all_their_requests(self, manager):
+        _, a1 = self._claimed(manager, "alice", "nas1")
+        _, a2 = self._claimed(manager, "alice", "nas2")
+        _, b1 = self._claimed(manager, "bob", "nas1")
+        manager.revoke("alice")
+        assert self._adopt(manager, a1) is None and self._adopt(manager, a2) is None
+        assert self._adopt(manager, b1) is not None  # another owner's login is untouched
+
+    def test_a_disconnect_of_one_nas_leaves_the_owners_other_request_alone(self, manager):
+        _, a1 = self._claimed(manager, "alice", "nas1")
+        _, a2 = self._claimed(manager, "alice", "nas2")
+        manager.revoke("alice", "nas1")
+        assert self._adopt(manager, a1) is None
+        assert self._adopt(manager, a2) is not None
+
+    def test_shutting_down_withdraws_every_login_in_progress(self, manager):
+        _, attempt = self._claimed(manager)
+        manager.revoke_all()
+        assert self._adopt(manager, attempt) is None
+
+    def test_r05_a_replaced_request_is_not_adopted_and_the_new_one_is_left_alone(self, manager):
+        _, old = self._claimed(manager)
+        manager.cancel_pending("alice", "nas1")
+        new = manager.begin_pending("alice", "nas1")
+
+        assert self._adopt(manager, old) is None
+        assert manager.pending("alice", "nas1") == new
+        assert self._begin(manager, new.request_id)[0] == "started"  # not consumed by the stale one
+
+    def test_r05_an_older_result_cannot_replace_a_newer_session(self, manager):
+        _, older = self._claimed(manager)
+        manager.cancel_pending("alice", "nas1")
+        _, newer = self._claimed(manager)
+        assert self._adopt(manager, newer, sid="SID-NEWER") is not None
+
+        assert self._adopt(manager, older, sid="SID-OLDER") is None
+        assert manager.get("alice", "nas1", touch=False).session_id == "SID-NEWER"
+
+    def test_a_login_installed_another_way_withdraws_the_one_in_progress(self, manager):
+        _, attempt = self._claimed(manager)
+        _install(manager, sid="SID-OTHER")
+        assert self._adopt(manager, attempt) is None
+        assert manager.get("alice", "nas1", touch=False).session_id == "SID-OTHER"
+
+    def test_adopting_replaces_an_existing_session_and_reports_it(self, manager):
+        _install(manager, sid="SID-OLD")
+        _, attempt = self._claimed(manager)
+        record, replaced = self._adopt(manager, attempt)
+        assert (record.generation, replaced.session_id) == (2, "SID-OLD")
+
+    def test_a_refused_adoption_changes_nothing_else(self, manager):
+        _install(manager, sid="SID-LIVE")
+        _, attempt = self._claimed(manager)
+        manager.cancel_pending("alice", "nas1")
+        assert self._adopt(manager, attempt) is None
+        live = manager.get("alice", "nas1", touch=False)
+        assert (live.session_id, live.generation) == ("SID-LIVE", 1)
+
+    # -- withdrawing a request ----------------------------------------------
+
+    def test_cancelling_a_request_clears_its_claim(self, manager):
+        pending, _ = self._claimed(manager)
+        manager.cancel_pending("alice", "nas1")
+        again = manager.begin_pending("alice", "nas1")
+        assert again.request_id != pending.request_id
+        assert self._begin(manager, again.request_id)[0] == "started"
+
+    def test_an_expired_request_takes_its_claim_with_it(self, manager, clock):
+        _, attempt = self._claimed(manager)
+        clock.advance(50)
+        fresh = manager.begin_pending("alice", "nas1")
+        assert self._begin(manager, fresh.request_id)[0] == "started"
+        assert self._adopt(manager, attempt) is None
+
+    def test_a_revoke_with_nothing_to_revoke_still_withdraws_a_request(self, manager):
+        pending = manager.begin_pending("alice", "nas1")
+        assert manager.revoke("alice", "nas1") == []
+        assert manager.find_pending(pending.request_id) is None
+
+    def test_a_revoke_leaves_another_owners_request_alone(self, manager):
+        bob = manager.begin_pending("bob", "nas1")
+        manager.begin_pending("alice", "nas1")
+        manager.revoke("alice")
+        assert manager.find_pending(bob.request_id) == bob

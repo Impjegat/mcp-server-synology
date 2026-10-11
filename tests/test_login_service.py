@@ -3,6 +3,7 @@ the attempt limit that protects the NAS account, and what each outcome says.
 The worker is replaced by a recording fake; its real behaviour is covered in
 test_login_worker.py."""
 
+import asyncio
 import copy
 
 import pytest
@@ -288,6 +289,238 @@ class TestAttemptLimit:
         for _ in range(3):
             await service.attempt(pending, password="x")
         assert 0 < service.locked_for(pending) <= 601
+
+
+class PausedRunner:
+    """A worker that waits to be told it may answer, so a test can change the
+    world while the NAS is still thinking."""
+
+    def __init__(self, reply=None):
+        self.reply = reply or {"ok": True, "sid": "SID-FROM-WORKER", "synotoken": "TOK-FROM-WORKER"}
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+        self.requests = []
+
+    async def __call__(self, payload):
+        self.requests.append(copy.deepcopy(payload))
+        self.started.set()
+        await self.release.wait()
+        return self.reply
+
+
+NAS1_URL = "https://nas1.example.test:5001"
+
+
+async def _in_flight(broker, runner, pending=None):
+    """Start a sign-in and return once its worker is running."""
+    service = LoginService(broker.runtime, runner=runner, clock=broker.clock)
+    pending = pending or _pending(broker)
+    task = asyncio.ensure_future(service.attempt(pending, password=PASSWORD, otp=OTP))
+    await asyncio.wait_for(runner.started.wait(), 5)
+    return service, pending, task
+
+
+class TestTheRequestIsWithdrawnWhileTheWorkerRuns:
+    """The request is checked before the worker starts. It must also still be the
+    live one when the worker's session comes back (implementation review R05)."""
+
+    async def _finish_withdrawn(self, broker, runner, task):
+        runner.release.set()
+        outcome = await asyncio.wait_for(task, 5)
+        assert (outcome.ok, outcome.code) == (False, "request_withdrawn")
+        assert "cancelled or expired" in outcome.message
+        assert PASSWORD not in outcome.message and OTP not in outcome.message
+        assert broker.sessions.get("alice", "nas1", touch=False) is None
+        # The NAS did open a session for the worker; it is ended there, once.
+        assert broker.logged_out.wait(2)
+        assert broker.logouts == [(NAS1_URL, "SID-FROM-WORKER")]
+        assert "SID-FROM-WORKER" not in set(broker.sessions.iter_secrets())
+
+    @pytest.mark.asyncio
+    async def test_r05_cancelling_while_the_worker_runs_leaves_no_session(self, broker):
+        runner = PausedRunner()
+        _, _, task = await _in_flight(broker, runner)
+        broker.sessions.cancel_pending("alice", "nas1")
+        await self._finish_withdrawn(broker, runner, task)
+
+    @pytest.mark.asyncio
+    async def test_r05_an_expiry_while_the_worker_runs_leaves_no_session(self, broker):
+        runner = PausedRunner()
+        _, _, task = await _in_flight(broker, runner)
+        broker.clock.advance(51)  # the request lived 50 seconds
+        await self._finish_withdrawn(broker, runner, task)
+
+    @pytest.mark.asyncio
+    async def test_r05_a_disconnect_while_the_worker_runs_leaves_no_session(self, broker):
+        runner = PausedRunner()
+        _, _, task = await _in_flight(broker, runner)
+        broker.runtime.revoke("alice", "nas1")
+        await self._finish_withdrawn(broker, runner, task)
+
+    @pytest.mark.asyncio
+    async def test_r05_a_disconnect_of_a_session_while_it_is_being_replaced(self, broker):
+        """An old session exists and a new sign-in is running; the client's own
+        disconnect ends the old one and withdraws the new one."""
+        broker.sign_in("alice", "nas1", "SID-OLD")
+        runner = PausedRunner()
+        _, _, task = await _in_flight(broker, runner)
+        broker.runtime.revoke("alice", "nas1")
+
+        runner.release.set()
+        outcome = await asyncio.wait_for(task, 5)
+
+        assert outcome.code == "request_withdrawn"
+        assert broker.sessions.get("alice", "nas1", touch=False) is None
+
+    @pytest.mark.asyncio
+    async def test_r05_the_clients_own_logout_tool_withdraws_a_sign_in_in_progress(self, broker):
+        """The other disconnect path: the AI client calls `synology_logout` while
+        the owner is typing a password for it."""
+        broker.sign_in("alice", "nas1", "SID-OLD")
+        runner = PausedRunner()
+        _, _, task = await _in_flight(broker, runner)
+
+        result = await broker.runtime.call_tool("alice", "synology_logout", {"base_url": NAS1_URL})
+        assert result.is_error is False
+
+        runner.release.set()
+        outcome = await asyncio.wait_for(task, 5)
+        assert outcome.code == "request_withdrawn"
+        assert broker.sessions.get("alice", "nas1", touch=False) is None
+
+    @pytest.mark.asyncio
+    async def test_r05_a_newer_request_while_the_worker_runs_is_left_alone(self, broker):
+        runner = PausedRunner()
+        _, old, task = await _in_flight(broker, runner)
+        broker.sessions.cancel_pending("alice", "nas1")
+        newer = _pending(broker)
+        assert newer.request_id != old.request_id
+
+        runner.release.set()
+        outcome = await asyncio.wait_for(task, 5)
+
+        assert outcome.code == "request_withdrawn"
+        assert broker.sessions.get("alice", "nas1", touch=False) is None
+        assert broker.sessions.pending("alice", "nas1") == newer
+        assert broker.sessions.begin_attempt(newer.request_id)[0] == "started"
+
+    @pytest.mark.asyncio
+    async def test_r05_an_older_result_cannot_replace_a_newer_session(self, broker):
+        slow = PausedRunner({"ok": True, "sid": "SID-A", "synotoken": "TOK-A"})
+        _, _, older = await _in_flight(broker, slow)
+        broker.sessions.cancel_pending("alice", "nas1")
+
+        newer_service, newer_runner = _service(
+            broker, {"ok": True, "sid": "SID-B", "synotoken": "TOK-B"}
+        )
+        assert (await newer_service.attempt(_pending(broker), password=PASSWORD)).ok is True
+
+        slow.release.set()
+        outcome = await asyncio.wait_for(older, 5)
+
+        assert outcome.code == "request_withdrawn"
+        assert broker.sessions.get("alice", "nas1", touch=False).session_id == "SID-B"
+        assert broker.logged_out.wait(2)
+        assert broker.logouts == [(NAS1_URL, "SID-A")]  # only the withdrawn one was ended
+
+    @pytest.mark.asyncio
+    async def test_a_second_submission_while_one_runs_is_refused_without_a_second_worker(
+        self, broker
+    ):
+        runner = PausedRunner()
+        service, pending, first = await _in_flight(broker, runner)
+
+        # Bounded: a second worker would wait for a release that comes after this.
+        second = await asyncio.wait_for(service.attempt(pending, password="another"), 5)
+
+        assert (second.ok, second.code) == (False, "in_progress")
+        assert "already in progress" in second.message
+        assert len(runner.requests) == 1
+
+        runner.release.set()
+        assert (await asyncio.wait_for(first, 5)).ok is True
+        assert broker.sessions.get("alice", "nas1", touch=False).session_id == "SID-FROM-WORKER"
+
+    @pytest.mark.asyncio
+    async def test_a_refused_second_submission_is_not_counted_as_a_wrong_password(self, broker):
+        runner = PausedRunner({"ok": False, "code": "400"})
+        service, pending, first = await _in_flight(broker, runner)
+        for _ in range(5):
+            refused = await asyncio.wait_for(service.attempt(pending, password="x"), 5)
+            assert refused.code == "in_progress"
+        runner.release.set()
+        assert (await asyncio.wait_for(first, 5)).code == "400"
+        assert service.locked_for(pending) == 0  # one wrong password, not six
+
+    @pytest.mark.asyncio
+    async def test_a_failed_attempt_frees_the_request_for_another(self, broker):
+        service, _ = _service(broker, fail("400"), OK)
+        pending = _pending(broker)
+        assert (await service.attempt(pending, password="wrong")).code == "400"
+        assert (await service.attempt(pending, password=PASSWORD)).ok is True
+
+    @pytest.mark.asyncio
+    async def test_a_worker_that_raises_frees_the_request_for_another(self, broker):
+        service, _ = _service(broker, RuntimeError("boom"), OK)
+        pending = _pending(broker)
+        assert (await service.attempt(pending, password=PASSWORD)).code == "worker_error"
+        assert (await service.attempt(pending, password=PASSWORD)).ok is True
+
+    @pytest.mark.asyncio
+    async def test_a_handler_that_is_cancelled_frees_the_request(self, broker):
+        runner = PausedRunner()
+        _, pending, task = await _in_flight(broker, runner)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert broker.sessions.begin_attempt(pending.request_id)[0] == "started"
+
+    @pytest.mark.asyncio
+    async def test_a_locked_sign_in_frees_the_request(self, broker):
+        service, _ = _service(broker, fail("400"))
+        pending = _pending(broker)
+        for _ in range(3):
+            await service.attempt(pending, password="wrong")
+        assert (await service.attempt(pending, password=PASSWORD)).code == "locked"
+        assert broker.sessions.begin_attempt(pending.request_id)[0] == "started"
+
+    @pytest.mark.asyncio
+    async def test_a_missing_account_frees_the_request(self, broker):
+        broker.nas_configs["nas1"]["username"] = ""
+        service, _ = _service(broker, OK)
+        pending = _pending(broker)
+        assert (await service.attempt(pending, password=PASSWORD)).code == "username_required"
+        assert broker.sessions.begin_attempt(pending.request_id)[0] == "started"
+
+    @pytest.mark.asyncio
+    async def test_a_nas_the_client_may_not_use_is_never_installed_and_is_logged_out(self, broker):
+        """alice may use nas1 only; a request for nas2 (however it came to exist)
+        must not become her session."""
+        service, _ = _service(broker, OK)
+        pending = _pending(broker, "alice", "nas2")
+
+        outcome = await service.attempt(pending, password=PASSWORD)
+
+        assert (outcome.ok, outcome.code) == (False, "request_withdrawn")
+        assert broker.sessions.get("alice", "nas2", touch=False) is None
+        assert broker.logged_out.wait(2)
+        assert broker.logouts == [("https://nas2.example.test:5001", "SID-FROM-WORKER")]
+
+    @pytest.mark.asyncio
+    async def test_a_request_withdrawn_before_the_worker_starts_never_reaches_it(self, broker):
+        service, runner = _service(broker, OK)
+        pending = _pending(broker)
+        broker.sessions.cancel_pending("alice", "nas1")
+        outcome = await service.attempt(pending, password=PASSWORD)
+        assert outcome.code == "expired_request"
+        assert runner.requests == []
+
+    @pytest.mark.asyncio
+    async def test_a_session_that_is_adopted_is_not_logged_out(self, broker):
+        service, _ = _service(broker, OK)
+        await service.attempt(_pending(broker), password=PASSWORD)
+        assert broker.logged_out.wait(0.2) is False
+        assert broker.logouts == []
 
 
 class TestNasConfigAccessor:

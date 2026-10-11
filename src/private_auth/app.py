@@ -59,6 +59,10 @@ _NOTICES = {
     "disconnected": "Disconnected.",
     "cancelled": "Sign-in request cancelled.",
     "expired": "That sign-in request has expired. Start a new one.",
+    "withdrawn": (
+        "That sign-in was cancelled or expired before it finished, so it was not used. "
+        "Start a new one."
+    ),
 }
 
 
@@ -440,12 +444,12 @@ class PrivateLoginApp:
             logger.info("A private sign-in succeeded for %s on %s", pending.owner, pending.nas)
             return RedirectResponse("/?m=connected", status_code=303)
         logger.info("A private sign-in did not complete (%s)", outcome.code)
-        return self._render_login(
-            request_id,
-            session,
-            (outcome.message, True),
-            status=429 if outcome.code == "locked" else 200,
-        )
+        if outcome.code == "request_withdrawn":
+            # Cancelled, expired or disconnected while the worker ran: the page for
+            # that request is gone, so go back to the start.
+            return RedirectResponse("/?m=withdrawn", status_code=303)
+        status = {"locked": 429, "in_progress": 409}.get(outcome.code, 200)
+        return self._render_login(request_id, session, (outcome.message, True), status=status)
 
     async def _pair_action(self, request: Request, action: str) -> Response:
         _, form, refusal = await self._authorized_form(request)
