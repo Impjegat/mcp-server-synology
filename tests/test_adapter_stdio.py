@@ -111,11 +111,19 @@ class TestThroughTheAdapter:
     async def test_a_client_reaches_the_broker_through_the_adapter(self, tmp_path, broker):
         broker.start()
         async with adapter(tmp_path, broker.port) as session:
-            tools = {t.name for t in (await session.list_tools()).tools}
+            listing = (await session.list_tools()).tools
+            tools = {t.name for t in listing}
             shares = await session.call_tool("list_shares", {"nas_name": "default"})
             status = await session.call_tool("synology_status", {})
 
         assert "list_shares" in tools and "synology_login" not in tools
+        # the broker's titles and notes reach the application through the adapter
+        by_name = {t.name: t for t in listing}
+        assert by_name["list_shares"].title == "Browse shared folders"
+        assert by_name["synology_health_summary"].title == "NAS health summary"
+        assert by_name["list_shares"].annotations.read_only_hint is True
+        assert "never ask for, or accept, a NAS password" in by_name["synology_status"].description
+        assert all(t.title for t in listing)
         assert shares.is_error is True and shares.content[0].text.startswith(
             "AUTHENTICATION_REQUIRED"
         )
