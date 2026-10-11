@@ -696,6 +696,147 @@ class TestListingFiltersItsChildren:
         assert "real_path" not in call[2]["additional"]
 
 
+class TestManyEntriesDoNotMultiplyTheLookups:
+    """A denied folder that does not exist is placed by walking up to its nearest
+    existing parent, one request per level. That answer is not remembered (the
+    folder may appear, or become a link, a moment later), so it must be worked out
+    once for a listing or a search and not again for every entry in it."""
+
+    # One deny entry three levels deep that does not exist, one whose whole path
+    # (not even its share) is missing.
+    DENIED = ["/docs/hidden/deep", "/nosuchshare/x"]
+
+    def _station(self):
+        from filestation import SynologyFileStation
+
+        policy = _policy(roots=("/docs",), deny=self.DENIED)
+        fs = SynologyFileStation(URL, "SID", folder_guard=policy.guard("nas1"))
+        fs.fake = FakeDSM(real_paths={"/docs": "/volume1/docs"})
+        fs._make_request = fs.fake
+        return fs
+
+    @staticmethod
+    def _probes(fs, path):
+        return [
+            c
+            for c in fs.fake.calls
+            if c[:2] == ("SYNO.FileStation.List", "getinfo") and c[2].get("path") == path
+        ]
+
+    @pytest.mark.parametrize("path", DENIED)
+    def test_a_listing_places_each_denied_folder_once_however_many_children_it_has(self, path):
+        probed = {}
+        for count in (5, 60):
+            fs = self._station()
+            fs.fake.listing = [_child(f"f{i}.txt", f"/volume1/docs/f{i}.txt") for i in range(count)]
+            assert len(fs.list_directory("/docs")) == count
+            probed[count] = len(self._probes(fs, path))
+        assert probed == {5: 1, 60: 1}
+
+    def test_the_whole_listing_costs_the_same_for_five_children_as_for_sixty(self):
+        calls = {}
+        for count in (5, 60):
+            fs = self._station()
+            fs.fake.listing = [_child(f"f{i}.txt", f"/volume1/docs/f{i}.txt") for i in range(count)]
+            fs.list_directory("/docs")
+            calls[count] = len(fs.fake.calls)
+        assert calls[5] == calls[60]
+
+    @pytest.mark.parametrize("path", DENIED)
+    def test_a_search_places_each_denied_folder_once_however_many_hits_it_has(self, path):
+        probed = {}
+        for count in (5, 60):
+            fs = self._station()
+            fs.fake.hits = [
+                {
+                    "name": f"f{i}.txt",
+                    "path": f"/docs/f{i}.txt",
+                    "additional": {"real_path": f"/volume1/docs/f{i}.txt"},
+                }
+                for i in range(count)
+            ]
+            assert len(fs.search_files("/docs", "*.txt")) == count
+            probed[count] = len(self._probes(fs, path))
+        assert probed == {5: 1, 60: 1}
+
+    def test_a_single_request_still_works_the_denied_folder_out_afresh_each_time(self):
+        """Nothing is remembered between requests: the folder may be created."""
+        fs = self._station()
+        for _ in range(3):
+            fs.get_file_info("/docs")
+        assert len(self._probes(fs, "/docs/hidden/deep")) == 3
+
+    def test_children_are_still_judged_against_the_denied_folder_found_for_the_listing(self):
+        from filestation import SynologyFileStation
+
+        policy = _policy(roots=("/docs",), deny=["/docs/private"])
+        fs = SynologyFileStation(URL, "SID", folder_guard=policy.guard("nas1"))
+        fs.fake = FakeDSM(
+            real_paths={"/docs": "/volume1/docs", "/docs/private": "/volume1/docs/private"},
+            listing=[
+                _child("shortcut", "/volume1/docs/private", isdir=True),
+                _child("readme.txt", "/volume1/docs/readme.txt"),
+            ],
+        )
+        fs._make_request = fs.fake
+        assert [e["name"] for e in fs.list_directory("/docs")] == ["readme.txt"]
+
+    def test_denied_locations_resolved_once_can_be_handed_to_many_checks(self):
+        lookup = TestDeniedFoldersInThePhysicalNamespace._dsm(
+            {"/docs/private": "/volume1/docs/private"}
+        )
+        guard = _policy(deny=["/docs/private"]).guard("nas1")
+        denied = guard.denied_locations(lookup)
+        assert denied == ("/volume1/docs/private",)
+
+        for _ in range(3):
+            # No lookup at all: the answer already worked out is used.
+            guard.verify_real(
+                "/docs/a.txt", "/volume1/docs/a.txt", lambda root: "/volume1/docs", denied=denied
+            )
+        assert lookup.asked == ["/docs/private"]
+        with pytest.raises(AuthorizationDenied):
+            guard.verify_real(
+                "/docs/x", "/volume1/docs/private/x", lambda root: "/volume1/docs", denied=denied
+            )
+
+    def test_an_empty_answer_means_nothing_is_denied_not_ask_again(self):
+        lookup = TestDeniedFoldersInThePhysicalNamespace._dsm({})
+        guard = _policy(deny=["/nosuchshare/x"]).guard("nas1")
+        denied = guard.denied_locations(lookup)
+        assert denied == ()
+        asked = list(lookup.asked)
+        guard.verify_real(
+            "/docs/a.txt", "/volume1/docs/a.txt", lambda root: "/volume1/docs", denied=denied
+        )
+        assert lookup.asked == asked
+
+
+class TestALeftOutChildIsCountedNotNamed:
+    def test_a_listing_logs_how_many_children_it_left_out_and_nothing_about_them(
+        self, station, caplog
+    ):
+        station.fake.listing = [
+            _child("a.txt", "/volume1/docs/a.txt"),
+            _child(".env", "/volume1/docs/.env"),
+            _child("linkaway", "/volume1/elsewhere", isdir=True),
+        ]
+        with caplog.at_level("DEBUG", logger="filestation.synology_filestation"):
+            station.list_directory("/docs")
+
+        messages = [r.getMessage() for r in caplog.records if r.name.startswith("filestation")]
+        assert any("2" in m and "left out" in m for m in messages)
+        for message in messages:
+            for name in (".env", "linkaway", "elsewhere", "a.txt", "/volume1"):
+                assert name not in message
+
+    def test_nothing_is_logged_when_nothing_was_left_out(self, station, caplog):
+        station.fake.listing = [_child("a.txt", "/volume1/docs/a.txt")]
+        with caplog.at_level("DEBUG", logger="filestation.synology_filestation"):
+            station.list_directory("/docs")
+        assert not [r for r in caplog.records if "left out" in r.getMessage()]
+
+
 class TestFileStationSearch:
     def test_hits_outside_the_root_or_leading_out_of_it_are_dropped(self, station):
         station.fake.real_paths["/docs/sub/x.txt"] = "/volume1/docs/sub/x.txt"

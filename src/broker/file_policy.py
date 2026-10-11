@@ -277,12 +277,22 @@ class FolderGuard:
     def share_in_scope(self, share_path: str) -> bool:
         return self._policy.share_in_scope(self.alias, share_path)
 
+    def denied_locations(
+        self, lookup: Optional[Callable[[str], Tuple[bool, Optional[str]]]]
+    ) -> Tuple[str, ...]:
+        """Where the administrator's denied folders really are (see
+        `FolderPolicy.real_denied_locations`). A listing or a search judges many
+        entries against the same denied folders, so it works this out once and
+        hands the answer to `verify_real` for each entry."""
+        return self._policy.real_denied_locations(self.alias, lookup)
+
     def verify_real(
         self,
         canonical: str,
         real_path: Optional[str],
         resolve_root_real: Callable[[str], Optional[str]],
         lookup: Optional[Callable[[str], Tuple[bool, Optional[str]]]] = None,
+        denied: Optional[Tuple[str, ...]] = None,
     ) -> None:
         """Refuse unless DSM's resolved `real_path` for `canonical` is inside
         the real location of the allowed root that contains it, and is not inside
@@ -293,6 +303,8 @@ class FolderGuard:
         or outside a denied folder, so it is not assumed to. `lookup` asks DSM
         `(found, real_path)` for a share path, to place the denied folders (see
         `FolderPolicy.real_denied_locations`); without it, any denial refuses.
+        `denied` is that placement already worked out by `denied_locations`; given
+        (even empty, which means nothing is denied), nothing is looked up.
         """
         root = self._policy.root_for(self.alias, canonical)
         if root is None:
@@ -304,6 +316,8 @@ class FolderGuard:
         if not _within(real, canonicalize(root_real)) or self._policy.is_denied(real):
             raise AuthorizationDenied(_DENIED)
         folded = real.casefold()
-        for denied in self._policy.real_denied_locations(self.alias, lookup):
-            if _within(folded, denied.casefold()):
+        if denied is None:
+            denied = self._policy.real_denied_locations(self.alias, lookup)
+        for location in denied:
+            if _within(folded, location.casefold()):
                 raise AuthorizationDenied(_DENIED)
