@@ -7,6 +7,8 @@ Download Station tests use a tiny fake DSM and fail if a request that should hav
 been refused reaches it.
 """
 
+import copy
+import json
 import unicodedata
 
 import pytest
@@ -239,6 +241,158 @@ class TestRealPaths:
         assert asked == ["/docs", "/docs", "/docs"]
 
 
+class TestDeniedFoldersInThePhysicalNamespace:
+    """`deny_paths` are share paths (`/docs/private`); `verify_real` is handed where
+    DSM says a target really lives (`/volume1/docs/private/x`). A denied folder has
+    to be judged in the same namespace as the target, or a link into it passes
+    (implementation review R02)."""
+
+    @staticmethod
+    def _dsm(locations):
+        """A `lookup(path) -> (found, real)` over a dict; a path that is not in it
+        does not exist. Records what was asked."""
+        asked = []
+
+        def lookup(path):
+            asked.append(path)
+            if path not in locations:
+                return False, None
+            return True, locations[path]
+
+        lookup.asked = asked
+        return lookup
+
+    @staticmethod
+    def _verify(policy, requested, real, lookup, root_real="/volume1/docs"):
+        policy.guard("nas1").verify_real(requested, real, lambda root: root_real, lookup)
+
+    def _denying(self, **kwargs):
+        return _policy(deny=["/docs/private"], **kwargs)
+
+    def test_r02_a_target_inside_the_real_location_of_a_denied_folder_is_refused(self):
+        lookup = self._dsm({"/docs/private": "/volume1/docs/private"})
+        for real in ("/volume1/docs/private", "/volume1/docs/private/secret.txt"):
+            with pytest.raises(AuthorizationDenied):
+                self._verify(self._denying(), "/docs/shortcut/secret.txt", real, lookup)
+
+    def test_a_lookalike_of_the_denied_folder_is_allowed(self):
+        lookup = self._dsm({"/docs/private": "/volume1/docs/private"})
+        self._verify(self._denying(), "/docs/a.txt", "/volume1/docs/privateer/a.txt", lookup)
+        self._verify(self._denying(), "/docs/a.txt", "/volume1/docs/public/a.txt", lookup)
+
+    def test_r02_a_denied_folder_that_is_itself_a_link_is_followed(self):
+        lookup = self._dsm({"/docs/private": "/volume1/docs/archive/vault"})
+        with pytest.raises(AuthorizationDenied):
+            self._verify(self._denying(), "/docs/alias/y", "/volume1/docs/archive/vault/y", lookup)
+        # The link's own place, once it points elsewhere, is not what is denied.
+        self._verify(self._denying(), "/docs/private2/y", "/volume1/docs/private/y", lookup)
+
+    def test_r02_a_denied_folder_that_does_not_exist_is_judged_by_its_nearest_parent(self):
+        """Nothing to protect today, but a link made to where it would be must not
+        become a way in once it exists."""
+        lookup = self._dsm({"/docs": "/volume1/docs"})
+        with pytest.raises(AuthorizationDenied):
+            self._verify(self._denying(), "/docs/shortcut", "/volume1/docs/private/x", lookup)
+        self._verify(self._denying(), "/docs/a.txt", "/volume1/docs/a.txt", lookup)
+
+    def test_a_denied_folder_whose_whole_path_is_missing_protects_nothing(self):
+        self._verify(self._denying(), "/docs/a.txt", "/volume1/docs/a.txt", self._dsm({}))
+
+    def test_a_missing_denied_folder_is_followed_up_to_sixteen_levels_and_no_further(self):
+        """Nothing on a path that deep exists, and past sixteen levels the search for
+        an existing parent stops: not finding one is not taken to mean it is safe."""
+        shallow = _policy(deny=["/" + "/".join(["d"] * 16)])
+        self._verify(shallow, "/docs/a.txt", "/volume1/docs/a.txt", self._dsm({}))
+        deep = _policy(deny=["/" + "/".join(["d"] * 17)])
+        with pytest.raises(AuthorizationDenied):
+            self._verify(deep, "/docs/a.txt", "/volume1/docs/a.txt", self._dsm({}))
+
+    def test_r02_the_comparison_ignores_case(self):
+        """Judged by the denial alone: the root is wide enough that only the denied
+        folder can refuse this target."""
+        lookup = self._dsm({"/docs/private": "/volume1/docs/Private"})
+        with pytest.raises(AuthorizationDenied):
+            self._verify(
+                self._denying(), "/docs/x", "/volume1/DOCS/private/x", lookup, root_real="/volume1"
+            )
+        # The same target one folder over is not refused, so it was the denial.
+        self._verify(
+            self._denying(), "/docs/x", "/volume1/DOCS/privateer/x", lookup, root_real="/volume1"
+        )
+
+    def test_r02_an_equivalent_path_through_another_share_is_refused(self):
+        policy = _policy(roots=("/docs", "/archive"), deny=["/docs/private"])
+        lookup = self._dsm({"/docs/private": "/volume1/docs/private"})
+        with pytest.raises(AuthorizationDenied):
+            self._verify(
+                policy,
+                "/archive/p/x.txt",
+                "/volume1/docs/private/x.txt",
+                lookup,
+                root_real="/volume1/docs",  # /archive is another door onto the same volume path
+            )
+
+    def test_r02_a_denied_folder_that_exists_but_cannot_be_located_refuses_everything(self):
+        for real in (None, ""):
+            lookup = self._dsm({"/docs/private": real})
+            with pytest.raises(AuthorizationDenied):
+                self._verify(self._denying(), "/docs/a.txt", "/volume1/docs/a.txt", lookup)
+
+    def test_r02_with_denials_and_no_way_to_resolve_them_nothing_is_allowed(self):
+        with pytest.raises(AuthorizationDenied):
+            self._denying().guard("nas1").verify_real(
+                "/docs/a.txt", "/volume1/docs/a.txt", lambda root: "/volume1/docs"
+            )
+
+    def test_without_denials_no_lookup_is_needed_or_made(self):
+        _policy().guard("nas1").verify_real(
+            "/docs/a.txt", "/volume1/docs/a.txt", lambda root: "/volume1/docs"
+        )
+
+    def test_a_failed_lookup_is_not_swallowed_or_remembered(self):
+        policy = self._denying(real_root_ttl=300)
+        answers = iter([RuntimeError("the NAS did not answer"), (True, "/volume1/docs/private")])
+        asked = []
+
+        def lookup(path):
+            asked.append(path)
+            answer = next(answers)
+            if isinstance(answer, Exception):
+                raise answer
+            return answer
+
+        with pytest.raises(RuntimeError):
+            self._verify(policy, "/docs/a.txt", "/volume1/docs/a.txt", lookup)
+        self._verify(policy, "/docs/a.txt", "/volume1/docs/a.txt", lookup)  # recovers at once
+        assert asked == ["/docs/private", "/docs/private"]
+
+    def test_the_denied_locations_are_asked_for_once_and_remembered_briefly(self):
+        clock = FakeClock()
+        policy = self._denying(clock=clock, real_root_ttl=60)
+        lookup = self._dsm({"/docs/private": "/volume1/docs/private"})
+        for _ in range(3):
+            self._verify(policy, "/docs/a.txt", "/volume1/docs/a.txt", lookup)
+        assert lookup.asked == ["/docs/private"]
+
+        clock.advance(61)
+        self._verify(policy, "/docs/a.txt", "/volume1/docs/a.txt", lookup)
+        assert lookup.asked == ["/docs/private", "/docs/private"]
+
+    def test_a_folder_that_was_missing_is_asked_about_again_every_time(self):
+        """Not remembered: it may be created, or replaced by a link, a moment later."""
+        policy = self._denying(real_root_ttl=300)
+        lookup = self._dsm({"/docs": "/volume1/docs"})
+        for _ in range(2):
+            self._verify(policy, "/docs/a.txt", "/volume1/docs/a.txt", lookup)
+        assert lookup.asked == ["/docs/private", "/docs", "/docs/private", "/docs"]
+
+    def test_every_denied_folder_is_checked(self):
+        policy = _policy(deny=["/docs/private", "/docs/hr"])
+        lookup = self._dsm({"/docs/private": "/volume1/docs/private", "/docs/hr": "/volume1/hr"})
+        with pytest.raises(AuthorizationDenied):
+            self._verify(policy, "/docs/x", "/volume1/hr/payroll.txt", lookup, root_real="/volume1")
+
+
 # ----------------------------------------------------------------------------
 # File Station
 # ----------------------------------------------------------------------------
@@ -271,7 +425,14 @@ def _without_a_guard():
 
 class TestFileStationFolders:
     def test_a_folder_inside_a_root_is_listed(self, station):
-        station.fake.listing = [{"name": "a.txt", "path": "/docs/a.txt", "isdir": False}]
+        station.fake.listing = [
+            {
+                "name": "a.txt",
+                "path": "/docs/a.txt",
+                "isdir": False,
+                "additional": {"real_path": "/volume1/docs/a.txt"},
+            }
+        ]
         assert [e["name"] for e in station.list_directory("/docs")] == ["a.txt"]
 
     @pytest.mark.parametrize(
@@ -345,6 +506,194 @@ class TestFileStationFolders:
         fs._make_request = FakeDSM(shares=[{"name": "music", "path": "/music"}])
         assert [s["name"] for s in fs.list_shares()] == ["music"]
         assert fs._make_request.methods() == [("SYNO.FileStation.List", "list_share")]
+
+
+@pytest.fixture
+def guarded_station():
+    """A File Station limited to /docs, with /docs/private denied, and a link
+    (`shortcut`) inside /docs that leads into the denied folder."""
+    from filestation import SynologyFileStation
+
+    policy = _policy(roots=("/docs",), deny=["/docs/private"])
+    fs = SynologyFileStation(URL, "SID", folder_guard=policy.guard("nas1"))
+    fs.fake = FakeDSM(
+        real_paths={
+            "/docs": "/volume1/docs",
+            "/docs/private": "/volume1/docs/private",
+            "/docs/private/secret.txt": "/volume1/docs/private/secret.txt",
+            "/docs/public": "/volume1/docs/public",
+            "/docs/readme.txt": "/volume1/docs/readme.txt",
+            "/docs/shortcut": "/volume1/docs/private",
+            "/docs/shortcut/secret.txt": "/volume1/docs/private/secret.txt",
+        }
+    )
+    fs._make_request = fs.fake
+    return fs
+
+
+class TestALinkIntoADeniedFolder:
+    """The reviewer's case: allowed `/docs`, denied `/docs/private`, and a
+    permitted-looking link inside `/docs` that resolves into it (R02)."""
+
+    def test_r02_the_content_behind_the_link_is_never_downloaded(
+        self, guarded_station, monkeypatch
+    ):
+        def no_download(*args, **kwargs):
+            raise AssertionError("a download request was made")
+
+        monkeypatch.setattr("filestation.synology_filestation.requests.get", no_download)
+        for path in ("/docs/shortcut/secret.txt", "/docs/shortcut"):
+            with pytest.raises(AuthorizationDenied):
+                guarded_station.get_file_content(path)
+
+    def test_r02_the_link_cannot_be_inspected_or_listed(self, guarded_station):
+        with pytest.raises(AuthorizationDenied):
+            guarded_station.get_file_info("/docs/shortcut/secret.txt")
+        with pytest.raises(AuthorizationDenied):
+            guarded_station.list_directory("/docs/shortcut")
+        assert ("SYNO.FileStation.List", "list") not in guarded_station.fake.methods()
+
+    def test_r02_a_search_does_not_return_what_is_behind_the_link(self, guarded_station):
+        guarded_station.fake.hits = [
+            {
+                "name": "secret.txt",
+                "path": "/docs/shortcut/secret.txt",
+                "additional": {"real_path": "/volume1/docs/private/secret.txt"},
+            },
+            {
+                "name": "readme.txt",
+                "path": "/docs/readme.txt",
+                "additional": {"real_path": "/volume1/docs/readme.txt"},
+            },
+        ]
+        hits = guarded_station.search_files("/docs", "*.txt")
+        assert [h["name"] for h in hits] == ["readme.txt"]
+
+    def test_the_denied_folder_itself_is_refused_directly_as_before(self, guarded_station):
+        for path in ("/docs/private", "/docs/private/secret.txt"):
+            with pytest.raises(AuthorizationDenied):
+                guarded_station.get_file_info(path)
+
+    def test_ordinary_files_and_folders_are_still_reachable(self, guarded_station):
+        assert guarded_station.get_file_info("/docs/readme.txt")["path"] == "/docs/readme.txt"
+        guarded_station.fake.listing = []
+        assert guarded_station.list_directory("/docs/public") == []
+
+    def test_r02_with_the_denied_folder_unlocatable_nothing_is_reachable(self, guarded_station):
+        """DSM finds `/docs/private` but will not say where it is: the denial cannot
+        be applied, so nothing is shown rather than assuming the target is safe."""
+        original = guarded_station.fake.__call__
+
+        def omit_real_path(api, version, method, use_post=False, **params):
+            result = original(api, version, method, use_post, **params)
+            if method == "getinfo" and params.get("path") == "/docs/private":
+                result["files"][0]["additional"].pop("real_path")
+            return result
+
+        guarded_station._make_request = omit_real_path
+        with pytest.raises(AuthorizationDenied):
+            guarded_station.get_file_info("/docs/readme.txt")
+
+    def test_a_link_made_to_where_a_missing_denied_folder_would_be_is_refused(
+        self, guarded_station
+    ):
+        del guarded_station.fake.real_paths["/docs/private"]
+        del guarded_station.fake.real_paths["/docs/private/secret.txt"]
+        del guarded_station.fake.real_paths["/docs/shortcut/secret.txt"]
+        with pytest.raises(AuthorizationDenied):
+            guarded_station.get_file_info("/docs/shortcut")
+
+
+def _child(name, real, **extra):
+    entry = {
+        "name": name,
+        "path": f"/docs/{name}",
+        "isdir": extra.pop("isdir", False),
+        "additional": {"real_path": real, **extra.pop("additional", {})},
+    }
+    return {**entry, **extra}
+
+
+class TestListingFiltersItsChildren:
+    """Browsing checked the folder asked for and then returned every child,
+    whatever it was or pointed at (implementation review R06)."""
+
+    CHILDREN = [
+        _child("a.txt", "/volume1/docs/a.txt", additional={"size": 5}),
+        _child("sub", "/volume1/docs/sub", isdir=True, additional={"size": 0}),
+        _child(".env", "/volume1/docs/.env"),
+        _child("secrets", "/volume1/docs/secrets", isdir=True),
+        _child("id.pem", "/volume1/docs/id.pem"),
+        _child("out", "/volume1/elsewhere", isdir=True),  # a link leading out of the root
+        {"name": "unknown", "path": "/docs/unknown", "additional": {}},  # no real path
+        {"name": "bare", "path": "/docs/bare"},  # no `additional` at all
+        {"name": "pathless", "additional": {"real_path": "/volume1/docs/pathless"}},
+        "not-an-object",
+    ]
+
+    def test_r06_denied_names_outside_links_and_unresolved_children_are_omitted(self, station):
+        station.fake.listing = copy.deepcopy(self.CHILDREN)
+        names = [e["name"] for e in station.list_directory("/docs")]
+        assert names == ["a.txt", "sub"]
+
+    def test_r06_no_metadata_of_an_omitted_child_is_returned(self, station):
+        station.fake.listing = copy.deepcopy(self.CHILDREN)
+        text = str(station.list_directory("/docs"))
+        for name in (
+            ".env",
+            "secrets",
+            "id.pem",
+            "elsewhere",
+            "unknown",
+            "bare",
+            "pathless",
+            "not-an-object",
+        ):
+            assert name not in text
+
+    def test_r06_permitted_children_keep_their_metadata(self, station):
+        station.fake.listing = copy.deepcopy(self.CHILDREN)
+        first = station.list_directory("/docs")[0]
+        assert (first["name"], first["path"], first["type"], first["size"]) == (
+            "a.txt",
+            "/docs/a.txt",
+            "file",
+            5,
+        )
+
+    def test_r06_dsm_is_asked_where_each_child_really_is(self, station):
+        station.list_directory("/docs")
+        call = next(c for c in station.fake.calls if c[:2] == ("SYNO.FileStation.List", "list"))
+        assert "real_path" in json.loads(call[2]["additional"])
+
+    def test_r06_it_is_asked_even_when_no_other_detail_is_wanted(self, station):
+        station.list_directory("/docs", additional_info=False)
+        call = next(c for c in station.fake.calls if c[:2] == ("SYNO.FileStation.List", "list"))
+        assert json.loads(call[2]["additional"]) == ["real_path"]
+
+    def test_r06_the_real_path_itself_is_not_passed_on(self, station):
+        station.fake.listing = copy.deepcopy(self.CHILDREN)
+        assert "/volume1" not in str(station.list_directory("/docs"))
+
+    def test_r06_a_child_that_is_a_denied_folder_or_a_link_into_one_is_omitted(
+        self, guarded_station
+    ):
+        guarded_station.fake.listing = [
+            _child("public", "/volume1/docs/public", isdir=True),
+            _child("private", "/volume1/docs/private", isdir=True),
+            _child("shortcut", "/volume1/docs/private", isdir=True),
+            _child("readme.txt", "/volume1/docs/readme.txt"),
+        ]
+        names = [e["name"] for e in guarded_station.list_directory("/docs")]
+        assert names == ["public", "readme.txt"]
+
+    def test_without_a_policy_every_child_is_returned_and_no_real_path_is_requested(self):
+        fs = _without_a_guard()
+        objects = [dict(c) for c in self.CHILDREN if isinstance(c, dict)]
+        fs._make_request = FakeDSM(listing=objects)
+        assert len(fs.list_directory("/anywhere")) == len(objects)
+        call = next(c for c in fs._make_request.calls if c[:2] == ("SYNO.FileStation.List", "list"))
+        assert "real_path" not in call[2]["additional"]
 
 
 class TestFileStationSearch:

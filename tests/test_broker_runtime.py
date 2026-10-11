@@ -380,7 +380,16 @@ class TestFoldersThroughTheExecutor:
         broker.sign_in("alice")
         fake = FakeDSM(
             real_paths={"/docs": "/volume1/docs"},
-            listing=[{"name": "a.txt", "path": "/docs/a.txt", "isdir": False}],
+            listing=[
+                {
+                    "name": "a.txt",
+                    "path": "/docs/a.txt",
+                    "isdir": False,
+                    "additional": {"real_path": "/volume1/docs/a.txt"},
+                },
+                # A child whose real location DSM does not give is never shown.
+                {"name": "b.txt", "path": "/docs/b.txt", "isdir": False},
+            ],
         )
         with patch.object(SynologyFileStation, "_make_request", side_effect=fake):
             result = await _call(
@@ -388,7 +397,7 @@ class TestFoldersThroughTheExecutor:
             )
 
         assert result.is_error is False
-        assert json.loads(_text(result))[0]["name"] == "a.txt"
+        assert [entry["name"] for entry in json.loads(_text(result))] == ["a.txt"]
 
     @pytest.mark.asyncio
     async def test_a_client_with_no_folders_listed_reaches_no_files(self, broker, no_nas_traffic):

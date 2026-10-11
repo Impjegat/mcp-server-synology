@@ -129,15 +129,16 @@ One file, read at start-up, never writable by the AI. See [`config/broker.exampl
 | `clients.<name>.token_sha256` | The digest from step 4 |
 | `clients.<name>.nas` | The NAS units (names from `settings.json`) this client may use |
 | `clients.<name>.tools` | The tools it may call. Omit it for the default set: browsing, file reading and monitoring ([`TOOL_CATALOG.md`](TOOL_CATALOG.md), "On by default") |
-| `clients.<name>.folders` | Per NAS, the folders it may reach. Anything outside is refused, including through symbolic links |
+| `clients.<name>.folders` | Per NAS, the folders it may reach. Anything outside is refused, including through symbolic links. A folder listing or a search shows only what is inside, and the NFS share list only the shares these folders reach |
 | `clients.<name>.disconnect` | Whether it may end a session (default `true`) |
-| `deny_paths` | Folders refused for every client |
+| `deny_paths` | Folders refused for every client, however they are reached: a symbolic link, or a second share onto the same place, that leads into one is refused too |
 | `session` | `idle_seconds` (default 900), `absolute_seconds` (default 28800, never extended by use) and `pending_seconds` (default 300) |
 
 Two things worth knowing:
 
 - The broker applies **restricted mode as well as the policy**. To give a client a tool that changes things you need both the tool in its entry and `RESTRICTED_MODE=false` on the broker. Restricted mode is the better default.
 - `synology_login` can never be granted, and the account, group and permission tools are off by default.
+- Folders are judged twice: by the path that was asked for, and by where DSM says it really is. A denied folder is placed the same way, so a link into it is refused. Where DSM will not say where something is (a folder it will not locate, or an entry in a listing with no real location), the answer is no: that entry is left out, and if it is a denied folder that cannot be located, nothing is served until it can be. DSM's answer for a denied folder or an allowed root is remembered for five minutes, so a folder moved or replaced by a link takes up to that long to be seen.
 
 ### 6. Start the broker
 

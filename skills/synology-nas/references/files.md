@@ -25,6 +25,7 @@ All accept the optional `nas_name` / `base_url` target.
 - The root `/` is empty for file operations — it's the share index. Use `list_shares` to enumerate.
 - Real data lives under `/volume1/...` (or `/volume2/...`, etc., on multi-volume systems). The shares like `Photos`, `homes`, `video` are accessible at `/Photos`, `/homes`, `/video` — they're symlinks/mounts for the underlying `/volume1/Photos` etc.
 - When in doubt, `list_directory` the parent before constructing a child path. NAS layouts vary by user.
+- With manual authentication a listing or a search shows only what the client's folders allow. Something missing from a listing may be hidden by policy rather than absent, and `AUTHORIZATION_DENIED` on a path means the folder policy refused it; don't try another route to it.
 
 ## Workflow patterns
 
