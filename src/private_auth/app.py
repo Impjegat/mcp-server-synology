@@ -7,7 +7,7 @@
 # the account has one). Nothing here is reachable with an MCP client's bearer
 # token, and an MCP call cannot approve, start or alter a sign-in.
 #
-# What it guarantees (plans/2026-10-06-manual-authentication/PLAN.md §5.1):
+# What it guarantees (plans/shipped/2026-10-06-manual-authentication/PLAN.md §5.1):
 #   - every response carries no-store, a strict CSP and framing/referrer limits;
 #   - every state-changing request needs the owner session, a CSRF token and a
 #     matching Origin;

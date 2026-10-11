@@ -191,7 +191,7 @@ class SynologyDownloadStation:
                         self.session_id, self.syno_token = recovered
                         # A read is asked again; a change stops here, with the
                         # session already renewed for the caller's next try.
-                        raise_unless_read_only(method)
+                        raise_unless_read_only(api, method)
                         return self._make_request(api, version, method, _retry=False, **params)
                 error_msg = self._get_error_message(error_code)
                 raise DownloadStationAPIError(

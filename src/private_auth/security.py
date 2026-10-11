@@ -1,5 +1,5 @@
 # src/private_auth/security.py - Rate limits, owner sessions and request checks
-# for the private login interface (plans/2026-10-06-manual-authentication/
+# for the private login interface (plans/shipped/2026-10-06-manual-authentication/
 # PLAN.md §5.1).
 #
 # None of this holds a NAS credential. The owner session is the proof that the

@@ -127,7 +127,7 @@ One file, read at start-up, never writable by the AI. See [`config/broker.exampl
 | Setting | Meaning |
 |---|---|
 | `clients.<name>.token_sha256` | The digest from step 4 |
-| `clients.<name>.expires` | **Required.** When this client's grant ends: a date (`2027-06-30`, good through the whole of that day, UTC) or a datetime with a time zone (`2027-06-30T12:00:00Z`), at most a year after the broker starts. From then its token is refused. See [Renewing or revoking a client](#renewing-or-revoking-a-client) |
+| `clients.<name>.expires` | **Required.** When this client's grant ends: a date (`2027-06-30`, good through the whole of that day, UTC) or a datetime with a time zone (`2027-06-30T12:00:00Z`), at most a year after the broker starts and not before the year 2000. From then its token is refused. See [Renewing or revoking a client](#renewing-or-revoking-a-client) |
 | `clients.<name>.nas` | The NAS units (names from `settings.json`) this client may use |
 | `clients.<name>.tools` | The tools it may call. Omit it for the default set: browsing, file reading and monitoring ([`TOOL_CATALOG.md`](TOOL_CATALOG.md), "On by default") |
 | `clients.<name>.folders` | Per NAS, the folders it may reach. Anything outside is refused, including through symbolic links. A folder listing or a search shows only what is inside, and the NFS share list only the shares these folders reach (a share that merely holds one of them appears by name alone, with none of its NFS rules) |
@@ -329,4 +329,4 @@ The single-process server that logs in with a stored password still works, for a
 | `deploy/broker/` | Container template for the broker |
 | `Dockerfile` | `--target adapter`, `--target broker`, and `legacy` |
 | [`TOOL_CATALOG.md`](TOOL_CATALOG.md) | Every tool, in plain language |
-| `plans/2026-10-06-manual-authentication/PLAN.md` | The design and its reasoning |
+| `plans/shipped/2026-10-06-manual-authentication/PLAN.md` | The design and its reasoning |

@@ -16,7 +16,7 @@ Usage (in the application's MCP registration):
 Configuration is a small JSON file (default ~/.config/synology-mcp/adapter.json,
 or the path in SYNOLOGY_ADAPTER_CONFIG) naming the broker's address, how to trust
 its certificate and where this client's token is kept. See
-plans/2026-10-06-manual-authentication/PLAN.md §3 and §6.1.
+plans/shipped/2026-10-06-manual-authentication/PLAN.md §3 and §6.1.
 """
 
 import argparse

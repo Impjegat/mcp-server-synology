@@ -4,7 +4,7 @@
 # client and lists, for that client, the NAS aliases it may use, the tools it
 # may call and the folder roots it may reach, plus the session deadlines. It is
 # read once at startup and never changed by a request, and nothing a client
-# sends can enlarge it (plans/2026-10-06-manual-authentication/PLAN.md §3.2,
+# sends can enlarge it (plans/shipped/2026-10-06-manual-authentication/PLAN.md §3.2,
 # §6.2).
 #
 # The file holds only a SHA-256 digest of each client's bearer token, never the
@@ -104,6 +104,11 @@ _CLIENT_KEYS = {"token_sha256", "nas", "tools", "folders", "disconnect", "expire
 # How far ahead a grant may end, and how soon before it ends the broker says so.
 _MAX_GRANT_SECONDS = 366 * 86400
 _WARN_SECONDS = 14 * 86400
+# The earliest end a grant may name: the start of the year 2000, UTC. Before 1970 a
+# moment is a negative timestamp, which not every platform can turn back into a
+# date (Windows raises), and start-up names each ended grant by its date. A date
+# that old is a mistake, not a renewal that was forgotten.
+_EARLIEST_GRANT_END = 946684800
 _DAY_ONLY = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 # Keys that suggest someone put a secret where a digest belongs.
 _SECRET_LOOKING = re.compile(r"(token|password|passwd|secret|otp|sid|cookie|session)", re.I)
@@ -238,9 +243,14 @@ def _parse_expiry(where: str, value: Any, now: float) -> float:
             )
             if ends.tzinfo is None:
                 raise ValueError("no time zone")
+        expires_at = ends.timestamp()
     except (ValueError, OverflowError):
         raise PolicyError(f"{where}.expires: must be {hint}") from None
-    expires_at = ends.timestamp()
+    if expires_at < _EARLIEST_GRANT_END:
+        raise PolicyError(
+            f"{where}.expires: is too far in the past (before the year 2000); "
+            f"pick {hint.split(', or')[0]}"
+        )
     if expires_at > now + _MAX_GRANT_SECONDS:
         raise PolicyError(
             f"{where}.expires: is more than a year away; a grant may last at most a year, "
@@ -444,5 +454,8 @@ class PolicyTokenVerifier:
             token=f"sha256:{digest[:12]}",
             client_id=match.name,
             scopes=[],
+            # Whole seconds, rounded down: the SDK makes its own check against this
+            # and can only ever refuse a moment early, never accept one late. The
+            # exact moment above is what decides.
             expires_at=int(expires_at),
         )

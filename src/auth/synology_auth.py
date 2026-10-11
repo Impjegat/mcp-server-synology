@@ -147,7 +147,7 @@ class SynologyAuth:
         # one-time code) for each new sign-in, and this object keeps neither.
         # No credentials are cached, no trusted-device token is requested,
         # stored or reused, and an expired session is never renewed
-        # automatically — see plans/2026-10-06-manual-authentication/PLAN.md
+        # automatically — see plans/shipped/2026-10-06-manual-authentication/PLAN.md
         # §5.2. Defaults to the process-wide auth mode.
         self.manual_mode: bool = (
             config.auth_mode == "broker" if manual_mode is None else manual_mode

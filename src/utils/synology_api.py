@@ -40,10 +40,22 @@ READ_ONLY_METHODS = frozenset(
 )
 
 
-def raise_unless_read_only(method: str) -> None:
+# A method that only reads when it is sent to one API, though the same name changes
+# something on others: `start` begins a search, a delete and a move.
+READ_ONLY_CALLS = frozenset({("SYNO.FileStation.Search", "start")})
+
+
+def is_read_only(api: str, method: str) -> bool:
+    """Whether a request only reads, and so may be repeated once after a lost
+    session is renewed. The method decides, with the API as well for the few
+    names that read on one API and change on another."""
+    return method in READ_ONLY_METHODS or (api, method) in READ_ONLY_CALLS
+
+
+def raise_unless_read_only(api: str, method: str) -> None:
     """Called once a lost session has been renewed: let a read be repeated, and
     stop a change with `SessionRenewedNotRepeated`."""
-    if method not in READ_ONLY_METHODS:
+    if not is_read_only(api, method):
         raise SessionRenewedNotRepeated()
 
 
@@ -181,16 +193,11 @@ class SynologyAPIClient:
                 if new_sid:
                     self.session_id = new_sid
                     self.syno_token = new_token
-                    if method not in READ_ONLY_METHODS:
-                        # The session is renewed for the next call, but a change is
-                        # not repeated on the strength of a guess about the verb.
-                        return {
-                            "success": False,
-                            "error": {
-                                "code": "session_renewed",
-                                "message": str(SessionRenewedNotRepeated()),
-                            },
-                        }
+                    # The session is renewed for the next call, but a change is not
+                    # repeated on the strength of a guess about the verb. It raises,
+                    # as File Station and Download Station do, so the client is told
+                    # the same thing whichever service it was talking to.
+                    raise_unless_read_only(api, method)
                     result = self._do_request(api, method, version, extra_params, use_post)
         return result
 

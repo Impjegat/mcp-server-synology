@@ -21,7 +21,12 @@ from mcp.shared.exceptions import MCPError
 import tool_catalog
 from auth import SynologyAuth, iter_all_secrets, request_secrets
 from broker.bridge import SessionBridge
-from broker.errors import AUTHORIZATION_DENIED, AuthenticationRequired, AuthorizationDenied
+from broker.errors import (
+    AUTHORIZATION_DENIED,
+    AuthenticationRequired,
+    AuthorizationDenied,
+    SessionRenewedNotRepeated,
+)
 from broker.file_policy import FolderGuard, FolderPolicy
 from config import config
 from container import SynologyContainer
@@ -989,6 +994,12 @@ class SynologyMCPServer:
             return self._error_result(str(e))
         except AuthorizationDenied as e:
             logger.warning(f"Tool {name} denied by policy")
+            return self._error_result(str(e))
+        except SessionRenewedNotRepeated as e:
+            # Legacy mode renewed an expired session but did not repeat a change.
+            # The sentence is fixed and says what to do; the session is good, so
+            # unlike a lost one it is kept.
+            logger.info(f"Tool {name} found the session expired and did not repeat it")
             return self._error_result(str(e))
         except ToolExecutionError as e:
             message = self._redact_text(str(e))
