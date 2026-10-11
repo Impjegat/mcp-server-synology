@@ -11,8 +11,10 @@ from urllib3.connectionpool import HTTPConnectionPool
 
 from tests.socket_guard import is_local_address
 
-# The suite's progress output is full of emoji, and pytest.ini runs with -s
-# (no output capture), so those print()s go straight to the real stdout. When
+# The suite's progress output is full of emoji, and the banner and summary
+# below are printed from pytest_sessionstart/pytest_sessionfinish, outside
+# pytest's output capture (which is only on while a test is collected or run),
+# so those print()s go straight to the real stdout, with or without -s. When
 # that is a pipe or a file on Windows — as in CI, or `pytest | tee log` — Python
 # encodes it with the ANSI code page (cp1252), which has no emoji: the banner
 # printed by pytest_sessionstart raised UnicodeEncodeError and aborted the whole
@@ -237,16 +239,7 @@ def test_destination(download_station):
     return "downloads"
 
 
-# Test markers for categorizing tests
-def pytest_configure(config):
-    """Configure custom pytest markers."""
-    config.addinivalue_line("markers", "real_nas: tests that require real NAS connection")
-    config.addinivalue_line("markers", "destructive: tests that modify NAS state")
-    config.addinivalue_line("markers", "slow: tests that may take a long time")
-    config.addinivalue_line(
-        "markers",
-        "docker: tests that run the built adapter and broker images (SYNOLOGY_TEST_DOCKER=1)",
-    )
+# Test markers (real_nas, destructive, slow, docker) are registered in pytest.ini.
 
 
 # Custom test collection - only run if credentials are available

@@ -99,6 +99,7 @@
 - `config.py` no longer raises in a process started with a minimal environment: `Path.home()` was evaluated even when `XDG_CONFIG_HOME` was set.
 - Disconnecting says whether the NAS confirmed the session closed, instead of implying it did (review of #19).
 - `get_file_info` no longer reports a nonexistent path as an empty file. DSM answers `getinfo` for a missing path with `success: true` and an error `code` (408) inside the file entry; that is now raised as "File not found" (any other per-entry code as an error), so the tool returns `isError: true`.
+- `pytest.ini` began with `[tool:pytest]` (the `setup.cfg` form), so pytest ignored the whole file and its options never applied. It now starts with `[pytest]`; `--strict-markers` and the marker list are live (the `docker` marker is registered there instead of only in `tests/conftest.py`), and `-v`, `-s`, `--disable-warnings` and the `DeprecationWarning` filters are dropped. `tests/test_pytest_config.py` fails if the file stops being read.
 
 ### Removed
 - Dead code: the second tool-dispatch path (`call_tool_direct`, which had already drifted out of sync with the live one), `get_tools_list`, and the unused `src/utils/logger.py`.
