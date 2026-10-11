@@ -18,6 +18,7 @@ from jsonschema.validators import validator_for
 from mcp.server import NotificationOptions, Server, ServerRequestContext
 from mcp.shared.exceptions import MCPError
 
+import tool_catalog
 from auth import SynologyAuth, iter_all_secrets, request_secrets
 from broker.bridge import SessionBridge
 from broker.errors import AUTHORIZATION_DENIED, AuthenticationRequired, AuthorizationDenied
@@ -408,17 +409,27 @@ class SynologyMCPServer:
 
     @staticmethod
     def _annotate_tool(tool: "types.Tool") -> "types.Tool":
-        """Attach MCP readOnlyHint/destructiveHint annotations. This is
-        purely descriptive metadata for MCP clients about whether a tool
-        performs writes — not an access control, and not the same question
-        as "is this tool allowed under restricted mode" (that's
-        _is_tool_allowed; the two diverge for _ACCOUNT_ENUMERATION_TOOLS,
-        which are read-only but excluded from restricted mode's default set
-        on trust-tier grounds)."""
+        """Attach the presentation metadata: a plain-language title (both
+        `Tool.title` and `annotations.title`, because clients differ in which
+        they read), the readOnlyHint/destructiveHint annotations, and the
+        notes from `tool_catalog` that matter to a model. This is purely
+        descriptive metadata for MCP clients — not an access control, and not
+        the same question as "is this tool allowed under restricted mode"
+        (that's _is_tool_allowed; the two diverge for
+        _ACCOUNT_ENUMERATION_TOOLS, which are read-only but excluded from
+        restricted mode's default set on trust-tier grounds). The tool's
+        stable `name` is never touched."""
         read_only = tool.name in _READ_ONLY_TOOLS
+        title = tool_catalog.title_for(tool.name)
         tool.annotations = types.ToolAnnotations(
+            title=title,
             read_only_hint=read_only,
             destructive_hint=tool.name in _DESTRUCTIVE_TOOLS,
+        )
+        if title is not None:
+            tool.title = title
+        tool.description = tool_catalog.described(
+            tool.name, tool.description, manual_authentication=config.auth_mode == "broker"
         )
         return tool
 
