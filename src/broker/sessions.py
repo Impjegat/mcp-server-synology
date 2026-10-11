@@ -13,6 +13,7 @@
 #   therefore never end a newer login (`invalidate` checks it).
 # - A broker restart loses every session: nothing is stored to restore.
 
+import itertools
 import secrets
 import threading
 import time
@@ -51,6 +52,21 @@ class PendingLogin:
     expires_at: float
 
 
+@dataclass(frozen=True)
+class LoginAttempt:
+    """One claim on a pending sign-in request: the request, and which attempt holds
+    it. It holds no credential. A session that a login produces may be adopted only
+    while this attempt still holds a request that is still the live one."""
+
+    pending: PendingLogin
+    attempt_id: int
+
+
+# What `begin_attempt` can say.
+ATTEMPT_STARTED = "started"
+ATTEMPT_EXPIRED = "expired"  # unknown, expired, cancelled or replaced
+ATTEMPT_IN_PROGRESS = "in_progress"  # another attempt already holds it
+
 Key = Tuple[str, str]
 
 
@@ -63,6 +79,12 @@ class SessionManager:
         # Never reset or reused, even after a session is removed.
         self._generations: Dict[Key, int] = {}
         self._pending: Dict[Key, PendingLogin] = {}
+        # The attempt (a sign-in whose worker is running) that holds each pending
+        # request. It lives and dies with the request: whatever withdraws the
+        # request withdraws the attempt, so a result that arrives late finds
+        # nothing to adopt it.
+        self._attempts: Dict[Key, int] = {}
+        self._attempt_ids = itertools.count(1)
         # Sessions that ended on a deadline, waiting for their remote logout.
         self._expired: List[SessionRecord] = []
 
@@ -79,6 +101,29 @@ class SessionManager:
             self._expired.append(self._sessions.pop(key))
         for key in [k for k, p in self._pending.items() if p.expires_at <= now]:
             del self._pending[key]
+            self._attempts.pop(key, None)
+
+    def _withdraw_locked(self, owner: str, nas: Optional[str] = None) -> None:
+        """Withdraw the owner's pending requests (and the attempts holding them): all
+        of them, or just the one for `nas`."""
+        for key in [k for k in self._pending if k[0] == owner and (nas is None or k[1] == nas)]:
+            del self._pending[key]
+            self._attempts.pop(key, None)
+
+    def _install_locked(
+        self, key: Key, base_url: str, session_id: str, syno_token: Optional[str], now: float
+    ) -> Tuple[SessionRecord, Optional[SessionRecord]]:
+        generation = self._generations.get(key, 0) + 1
+        self._generations[key] = generation
+        record = SessionRecord(
+            key[0], key[1], base_url, session_id, syno_token, generation, now, now
+        )
+        replaced = self._sessions.get(key)
+        self._sessions[key] = record
+        # Signing in settles the request, and ends the attempt that made it.
+        self._pending.pop(key, None)
+        self._attempts.pop(key, None)
+        return record, replaced
 
     # -- sessions ----------------------------------------------------------
 
@@ -97,15 +142,37 @@ class SessionManager:
         with self._lock:
             now = self._clock()
             self._expire_locked(now)
-            generation = self._generations.get(key, 0) + 1
-            self._generations[key] = generation
-            record = SessionRecord(
-                owner, nas, base_url, session_id, syno_token, generation, now, now
-            )
-            replaced = self._sessions.get(key)
-            self._sessions[key] = record
-            self._pending.pop(key, None)
-            return record, replaced
+            return self._install_locked(key, base_url, session_id, syno_token, now)
+
+    def install_for_attempt(
+        self,
+        attempt: LoginAttempt,
+        base_url: str,
+        session_id: str,
+        syno_token: Optional[str] = None,
+    ) -> Optional[Tuple[SessionRecord, Optional[SessionRecord]]]:
+        """Adopt the session a login produced, but only while the request it answered
+        is still the live one and `attempt` still holds it. Returns what `install`
+        does, or None when the request was cancelled, expired, replaced, or ended by
+        a disconnect while the worker ran. Nothing is installed then, and the caller
+        ends `session_id` on the NAS.
+
+        This is one step under one lock. Checking the request before the worker
+        starts is not enough: the worker takes seconds, and everything above can
+        happen in them."""
+        pending = attempt.pending
+        key = (pending.owner, pending.nas)
+        with self._lock:
+            now = self._clock()
+            self._expire_locked(now)
+            current = self._pending.get(key)
+            if (
+                current is None
+                or current.request_id != pending.request_id
+                or self._attempts.get(key) != attempt.attempt_id
+            ):
+                return None
+            return self._install_locked(key, base_url, session_id, syno_token, now)
 
     def get(self, owner: str, nas: str, *, touch: bool = True) -> Optional[SessionRecord]:
         """The live session, or None when there is none or it has expired. A
@@ -136,16 +203,22 @@ class SessionManager:
             return True
 
     def revoke(self, owner: str, nas: Optional[str] = None) -> List[SessionRecord]:
-        """End every session of `owner` (or just the one for `nas`). Returns the
-        removed records so their DSM sessions can be ended."""
+        """End every session of `owner` (or just the one for `nas`), and withdraw
+        any sign-in still waiting for, or being made for, the same. A disconnect
+        means "no connection", so a login that was running must not complete it
+        afterwards. Returns the removed records so their DSM sessions can be ended."""
         with self._lock:
             keys = [k for k in self._sessions if k[0] == owner and (nas is None or k[1] == nas)]
-            return [self._sessions.pop(k) for k in keys]
+            removed = [self._sessions.pop(k) for k in keys]
+            self._withdraw_locked(owner, nas)
+            return removed
 
     def revoke_all(self) -> List[SessionRecord]:
         with self._lock:
             removed = list(self._sessions.values())
             self._sessions.clear()
+            self._pending.clear()
+            self._attempts.clear()
             return removed
 
     def take_expired(self) -> List[SessionRecord]:
@@ -223,5 +296,35 @@ class SessionManager:
             return None
 
     def cancel_pending(self, owner: str, nas: str) -> bool:
+        """Withdraw the request, and with it any attempt that is running for it."""
         with self._lock:
+            self._attempts.pop((owner, nas), None)
             return self._pending.pop((owner, nas), None) is not None
+
+    # -- attempts -------------------------------------------------------------
+
+    def begin_attempt(self, request_id: str) -> Tuple[str, Optional[LoginAttempt]]:
+        """Claim the pending request `request_id` for one sign-in. Returns
+        `(ATTEMPT_STARTED, attempt)`, or `(ATTEMPT_EXPIRED, None)` when there is no
+        such live request, or `(ATTEMPT_IN_PROGRESS, None)` when another attempt
+        already holds it: a second submission cannot start a second worker for the
+        same request, or race the first to install a session."""
+        with self._lock:
+            self._expire_locked(self._clock())
+            for key, pending in self._pending.items():
+                if secrets.compare_digest(pending.request_id, request_id):
+                    if key in self._attempts:
+                        return ATTEMPT_IN_PROGRESS, None
+                    attempt_id = next(self._attempt_ids)
+                    self._attempts[key] = attempt_id
+                    return ATTEMPT_STARTED, LoginAttempt(pending, attempt_id)
+            return ATTEMPT_EXPIRED, None
+
+    def release_attempt(self, attempt: LoginAttempt) -> None:
+        """Let go of a claim that did not end in a session, so the owner can try
+        again. Releases only this attempt's own claim: an old attempt that was
+        withdrawn never frees a newer one, and releasing after a success is a no-op."""
+        key = (attempt.pending.owner, attempt.pending.nas)
+        with self._lock:
+            if self._attempts.get(key) == attempt.attempt_id:
+                del self._attempts[key]

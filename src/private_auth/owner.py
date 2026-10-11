@@ -28,6 +28,11 @@ STATE_TTL_SECONDS = 120
 MAX_OUTSTANDING_CHALLENGES = 256
 DEFAULT_CODE_MINUTES = 10
 
+# What a challenge was made for. Anyone who can reach the page can ask for either
+# kind, so each may be redeemed only for its own purpose.
+_PURPOSE_SIGN_IN = "sign-in"
+_PURPOSE_ENROLL = "enroll"
+
 
 def _b64(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
@@ -163,14 +168,26 @@ class OwnerStore:
             self._write(data)
             return code
 
-    def check_enrollment_code(self, code: str, *, now: Optional[float] = None) -> bool:
+    def match_enrollment_code(self, code: str, *, now: Optional[float] = None) -> Optional[str]:
+        """The digest of the open enrollment code, if `code` is that code and it has
+        not expired; otherwise None.
+
+        A begun enrollment keeps this digest, and can finish only while the same
+        code is still the open one (see `add_credential_consuming_code`). Without
+        that, anything that made a challenge, including a sign-in challenge that
+        needs no code at all, could be used to enrol a passkey."""
         with self._lock:
             enrollment = self._read()["enrollment"]
         if not enrollment or (now if now is not None else time.time()) >= enrollment["expires_at"]:
-            return False
-        return hmac.compare_digest(
+            return None
+        if hmac.compare_digest(
             hashlib.sha256(code.encode()).hexdigest(), enrollment["code_sha256"]
-        )
+        ):
+            return str(enrollment["code_sha256"])
+        return None
+
+    def check_enrollment_code(self, code: str, *, now: Optional[float] = None) -> bool:
+        return self.match_enrollment_code(code, now=now) is not None
 
     def enrollment_open(self, *, now: Optional[float] = None) -> bool:
         """Whether an enrollment code exists and has not expired or been used."""
@@ -188,18 +205,29 @@ class OwnerStore:
         sign_count: int,
         label: str,
         *,
+        code_sha256: str,
         now: Optional[float] = None,
     ) -> bool:
         """Add a passkey and use up the enrollment code in one step, only if the
-        code is still open. Checking, adding and consuming under separate lock
+        code is still open *and is the code `code_sha256` names*: the one the
+        enrollment began with. Checking, adding and consuming under separate lock
         acquisitions would let two enrollments that both began with the same code
-        each pass the check and each add a passkey. False means the code was
-        already used or has expired, and nothing was added."""
+        each pass the check and each add a passkey; and without naming the code, an
+        enrollment begun under an earlier code (or never begun with one at all)
+        would finish against whichever code happens to be open now. False means
+        the code was replaced, already used or has expired, and nothing was added.
+
+        `code_sha256` has no default on purpose: a caller that does not say which
+        code it holds cannot add a passkey."""
         with self._lock:
             data = self._read()
             enrollment = data["enrollment"]
             current = now if now is not None else time.time()
-            if not enrollment or current >= enrollment["expires_at"]:
+            if (
+                not enrollment
+                or current >= enrollment["expires_at"]
+                or not hmac.compare_digest(str(enrollment["code_sha256"]), str(code_sha256))
+            ):
                 return False
             data["credentials"].append(
                 {
@@ -244,7 +272,8 @@ class PasskeyOwnerAuth:
         self._origin = origin.rstrip("/")
         self._rp_name = rp_name
         self._clock = clock
-        self._challenges: Dict[str, Tuple[bytes, float]] = {}
+        # state -> (challenge, expires, what it was made for, what it is bound to)
+        self._challenges: Dict[str, Tuple[bytes, float, str, str]] = {}
         self._lock = threading.Lock()
 
     def has_owner(self) -> bool:
@@ -252,7 +281,10 @@ class PasskeyOwnerAuth:
 
     # -- challenge bookkeeping ----------------------------------------------
 
-    def _remember(self, challenge: bytes) -> str:
+    def _remember(self, challenge: bytes, purpose: str, binding: str = "") -> str:
+        """Keep a challenge for later and return the state that names it. It is made
+        for one `purpose` and, for an enrollment, bound to the digest of the code
+        it began with."""
         state = secrets.token_urlsafe(24)
         now = self._clock()
         with self._lock:
@@ -261,13 +293,21 @@ class PasskeyOwnerAuth:
             # nothing down by filling the table (the callers are also rate limited).
             while len(self._challenges) >= MAX_OUTSTANDING_CHALLENGES:
                 del self._challenges[next(iter(self._challenges))]
-            self._challenges[state] = (challenge, now + STATE_TTL_SECONDS)
+            self._challenges[state] = (challenge, now + STATE_TTL_SECONDS, purpose, binding)
         return state
 
-    def _take(self, state: str) -> Optional[bytes]:
+    def _take(self, state: str, purpose: str) -> Optional[Tuple[bytes, str]]:
+        """The challenge and its binding, if `state` is known, has not expired and was
+        made for `purpose`. A state is single-use: it is spent even when it is
+        presented for the wrong purpose, so a misuse cannot be retried."""
         with self._lock:
-            challenge, expires = self._challenges.pop(state, (None, 0.0))
-        return challenge if challenge is not None and expires > self._clock() else None
+            entry = self._challenges.pop(state, None)
+        if entry is None:
+            return None
+        challenge, expires, made_for, binding = entry
+        if made_for != purpose or expires <= self._clock():
+            return None
+        return challenge, binding
 
     # -- authenticating the owner -------------------------------------------
 
@@ -289,14 +329,17 @@ class PasskeyOwnerAuth:
             ],
             user_verification=UserVerificationRequirement.REQUIRED,
         )
-        return self._remember(options.challenge), json.loads(options_to_json(options))
+        return self._remember(options.challenge, _PURPOSE_SIGN_IN), json.loads(
+            options_to_json(options)
+        )
 
     def finish_authentication(self, state: str, credential: Dict[str, Any]) -> bool:
         from webauthn import verify_authentication_response
 
-        challenge = self._take(state)
-        if challenge is None:
+        taken = self._take(state, _PURPOSE_SIGN_IN)
+        if taken is None:
             return False
+        challenge, _ = taken
         try:
             raw_id = _unb64(str(credential.get("rawId") or credential.get("id")))
             stored = next((c for c in self._store.credentials() if c.credential_id == raw_id), None)
@@ -329,7 +372,8 @@ class PasskeyOwnerAuth:
             UserVerificationRequirement,
         )
 
-        if not self._store.check_enrollment_code(code):
+        digest = self._store.match_enrollment_code(code)
+        if digest is None:
             return None
         options = generate_registration_options(
             rp_id=self._rp_id,
@@ -344,16 +388,22 @@ class PasskeyOwnerAuth:
                 PublicKeyCredentialDescriptor(id=c.credential_id) for c in self._store.credentials()
             ],
         )
-        return self._remember(options.challenge), json.loads(options_to_json(options))
+        return self._remember(options.challenge, _PURPOSE_ENROLL, digest), json.loads(
+            options_to_json(options)
+        )
 
     def finish_enrollment(
         self, state: str, credential: Dict[str, Any], label: str = "passkey"
     ) -> bool:
         from webauthn import verify_registration_response
 
-        challenge = self._take(state)
-        if challenge is None:
+        # Only a challenge made by `begin_enrollment`, under a code that was valid
+        # then, can get this far. A sign-in challenge has a different purpose and is
+        # refused here, however it was signed.
+        taken = self._take(state, _PURPOSE_ENROLL)
+        if taken is None:
             return False
+        challenge, digest = taken
         try:
             verified = verify_registration_response(
                 credential=credential,
@@ -364,9 +414,15 @@ class PasskeyOwnerAuth:
             )
         except Exception:
             return False
-        # The code is single-use. Whether it is still open is decided together
-        # with adding the passkey, so that two enrollments begun with the same
-        # code cannot both finish, and one that outlived the code does not count.
+        # The code is single-use. Whether it is still open, and still the code this
+        # enrollment began with, is decided together with adding the passkey, so
+        # that two enrollments begun with the same code cannot both finish, one that
+        # outlived the code does not count, and one begun under a code that has since
+        # been replaced does not finish against the new one.
         return self._store.add_credential_consuming_code(
-            verified.credential_id, verified.credential_public_key, verified.sign_count, label[:64]
+            verified.credential_id,
+            verified.credential_public_key,
+            verified.sign_count,
+            label[:64],
+            code_sha256=digest,
         )

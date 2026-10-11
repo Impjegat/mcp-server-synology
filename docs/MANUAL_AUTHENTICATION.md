@@ -234,7 +234,7 @@ Restart the application. It should list the tools straight away, even before you
 4. Type your NAS password, and the verification code if the account uses one. Submit. The worker signs in, hands the session to the broker and exits; the password is not kept.
 5. Ask the AI again.
 
-**How long it lasts.** A session ends after 15 minutes without use or 8 hours in all, whichever comes first (the policy can change both; use never extends the 8 hours). Restarting the AI application does not extend it and does not end it. The page's **Disconnect** button, or the `synology_logout` tool if the client may use it, ends it at once and logs out of the NAS.
+**How long it lasts.** A session ends after 15 minutes without use or 8 hours in all, whichever comes first (the policy can change both; use never extends the 8 hours). Restarting the AI application does not extend it and does not end it. The page's **Disconnect** button, or the `synology_logout` tool if the client may use it, ends it at once and logs out of the NAS. Either also withdraws a sign-in that is still being made, and so does cancelling the request from the front page, or letting it expire: a password you have just submitted cannot complete a connection you have just ended, and a session the NAS opened for it is logged out again, never used. Submit once; a second submit while the first is still running is told to wait.
 
 **If you mistype.** Three wrong answers in five minutes lock that sign-in for ten, well inside what DSM's own auto-block tolerates, and a locked sign-in does not contact the NAS. Asking for a code, an unreachable NAS and a certificate problem do not count against you.
 

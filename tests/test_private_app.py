@@ -7,6 +7,7 @@ opens nothing here, and no password, code or session ever appears in a response,
 a cookie, a redirect or a log line.
 """
 
+import asyncio
 import contextlib
 import logging
 import re
@@ -777,6 +778,209 @@ class TestDisconnectAndCancel:
             )
         assert response.status_code == 403
         assert private.broker.sessions.get("alice", "nas1", touch=False) is not None
+
+
+class PausedRunner:
+    """A worker that waits to be released, so the page can be used while it runs."""
+
+    def __init__(self, reply=None):
+        self.reply = reply or OK
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+        self.requests = []
+
+    async def __call__(self, payload):
+        self.requests.append(dict(payload))
+        self.started.set()
+        await self.release.wait()
+        return self.reply
+
+
+class TestWithdrawnWhileSigningIn:
+    """Using the page while the worker is talking to the NAS (implementation
+    review R05): what the owner withdrew must not come back as a connection."""
+
+    async def _submitting(self, http, runner, **fields):
+        location, token = await start_pending(http)
+        submit = asyncio.ensure_future(
+            http.post(
+                location,
+                headers=JSON_HEADERS,
+                data=form(token, password=PASSWORD, otp=OTP, **fields),
+            )
+        )
+        await asyncio.wait_for(runner.started.wait(), 5)
+        return location, token, submit
+
+    @pytest.mark.asyncio
+    async def test_r05_cancelling_in_the_page_while_the_worker_runs_connects_nothing(self, broker):
+        runner = PausedRunner()
+        private = Private(broker, runner, FakeOwner())
+        async with private.client() as http:
+            await sign_in(http)
+            _, token, submit = await self._submitting(http, runner)
+            cancelled = await http.post(
+                "/pending/cancel",
+                headers=JSON_HEADERS,
+                data=form(token, client="alice", nas="nas1"),
+            )
+            runner.release.set()
+            response = await asyncio.wait_for(submit, 5)
+            notice = (await http.get(response.headers["location"])).text
+
+        assert cancelled.headers["location"] == "/?m=cancelled"
+        assert (response.status_code, response.headers["location"]) == (303, "/?m=withdrawn")
+        assert "cancelled or expired before it finished" in notice
+        assert broker.sessions.get("alice", "nas1", touch=False) is None
+        assert broker.logged_out.wait(2)
+        assert broker.logouts == [("https://nas1.example.test:5001", "SID-FROM-WORKER")]
+        assert PASSWORD not in text_of(response) and "SID-FROM-WORKER" not in text_of(response)
+
+    @pytest.mark.asyncio
+    async def test_r05_disconnecting_in_the_page_while_the_worker_runs_connects_nothing(
+        self, broker
+    ):
+        runner = PausedRunner()
+        private = Private(broker, runner, FakeOwner())
+        async with private.client() as http:
+            await sign_in(http)
+            _, token, submit = await self._submitting(http, runner)
+            done = await http.post(
+                "/disconnect", headers=JSON_HEADERS, data=form(token, client="alice", nas="nas1")
+            )
+            runner.release.set()
+            response = await asyncio.wait_for(submit, 5)
+
+        assert done.headers["location"] == "/?m=disconnected"
+        assert response.headers["location"] == "/?m=withdrawn"
+        assert broker.sessions.get("alice", "nas1", touch=False) is None
+
+    @pytest.mark.asyncio
+    async def test_r05_the_request_expiring_while_the_worker_runs_connects_nothing(self, broker):
+        runner = PausedRunner()
+        private = Private(broker, runner, FakeOwner())
+        async with private.client() as http:
+            await sign_in(http)
+            _, _, submit = await self._submitting(http, runner)
+            broker.clock.advance(51)
+            runner.release.set()
+            response = await asyncio.wait_for(submit, 5)
+
+        assert response.headers["location"] == "/?m=withdrawn"
+        assert broker.sessions.get("alice", "nas1", touch=False) is None
+
+    @pytest.mark.asyncio
+    async def test_a_second_submission_while_the_first_runs_is_told_to_wait(self, broker):
+        runner = PausedRunner()
+        private = Private(broker, runner, FakeOwner())
+        async with private.client() as http:
+            await sign_in(http)
+            location, token, first = await self._submitting(http, runner)
+            # Bounded: a second worker would wait for a release that comes after this.
+            second = await asyncio.wait_for(
+                http.post(location, headers=JSON_HEADERS, data=form(token, password="another")), 5
+            )
+            runner.release.set()
+            done = await asyncio.wait_for(first, 5)
+
+        assert second.status_code == 409 and "already in progress" in second.text
+        assert "another" not in text_of(second)
+        assert len(runner.requests) == 1
+        assert done.headers["location"] == "/?m=connected"
+        assert broker.sessions.get("alice", "nas1", touch=False).session_id == "SID-FROM-WORKER"
+
+
+class TestEnrollmentCannotBeBypassed:
+    """The real passkey check behind the real app (implementation review R01)."""
+
+    RP_ID = "private.test"
+
+    def _owner_with_one_device_and_an_open_add_device_code(self, broker, tmp_path):
+        pytest.importorskip("webauthn")
+        from private_auth.owner import OwnerStore, PasskeyOwnerAuth
+        from tests.software_authenticator import SoftwareAuthenticator
+
+        store = OwnerStore(tmp_path / "owner.json")
+        owner = PasskeyOwnerAuth(store, rp_id=self.RP_ID, origin=ORIGIN, clock=broker.clock)
+        legit = SoftwareAuthenticator(self.RP_ID, ORIGIN)
+        state, options = owner.begin_enrollment(store.new_enrollment_code())
+        assert owner.finish_enrollment(state, legit.create(options), "phone") is True
+        code = store.new_enrollment_code(allow_additional=True)
+        return store, owner, legit, code
+
+    @pytest.mark.asyncio
+    async def test_r01_a_sign_in_challenge_cannot_enrol_a_passkey_without_the_code(
+        self, broker, tmp_path
+    ):
+        from tests.software_authenticator import SoftwareAuthenticator
+
+        store, owner, legit, _ = self._owner_with_one_device_and_an_open_add_device_code(
+            broker, tmp_path
+        )
+        attacker = SoftwareAuthenticator(self.RP_ID, ORIGIN)
+        private = Private(broker, Runner(OK), owner)
+        async with private.client() as http:
+            begin = (await http.post("/auth/begin", headers=JSON_HEADERS, json={})).json()
+            done = await http.post(
+                "/enroll/finish",
+                headers=JSON_HEADERS,
+                json={"state": begin["state"], "credential": attacker.create(begin["options"])},
+            )
+
+        assert done.status_code == 403
+        assert [c.credential_id for c in store.credentials()] == [legit.credential_id]
+
+    @pytest.mark.asyncio
+    async def test_the_attacker_cannot_then_sign_in_with_the_passkey_they_tried_to_add(
+        self, broker, tmp_path
+    ):
+        from tests.software_authenticator import SoftwareAuthenticator
+
+        _, owner, _, _ = self._owner_with_one_device_and_an_open_add_device_code(broker, tmp_path)
+        attacker = SoftwareAuthenticator(self.RP_ID, ORIGIN)
+        private = Private(broker, Runner(OK), owner)
+        async with private.client() as http:
+            begin = (await http.post("/auth/begin", headers=JSON_HEADERS, json={})).json()
+            await http.post(
+                "/enroll/finish",
+                headers=JSON_HEADERS,
+                json={"state": begin["state"], "credential": attacker.create(begin["options"])},
+            )
+            again = (await http.post("/auth/begin", headers=JSON_HEADERS, json={})).json()
+            signed = await http.post(
+                "/auth/finish",
+                headers=JSON_HEADERS,
+                json={"state": again["state"], "credential": attacker.get(again["options"])},
+            )
+
+        assert signed.status_code == 401
+
+    @pytest.mark.asyncio
+    async def test_the_real_code_still_enrols_an_additional_device_over_http(
+        self, broker, tmp_path
+    ):
+        from tests.software_authenticator import SoftwareAuthenticator
+
+        store, owner, legit, code = self._owner_with_one_device_and_an_open_add_device_code(
+            broker, tmp_path
+        )
+        second = SoftwareAuthenticator(self.RP_ID, ORIGIN)
+        private = Private(broker, Runner(OK), owner)
+        async with private.client() as http:
+            begin = (
+                await http.post("/enroll/begin", headers=JSON_HEADERS, json={"code": code})
+            ).json()
+            done = await http.post(
+                "/enroll/finish",
+                headers=JSON_HEADERS,
+                json={"state": begin["state"], "credential": second.create(begin["options"])},
+            )
+
+        assert done.status_code == 200
+        assert [c.credential_id for c in store.credentials()] == [
+            legit.credential_id,
+            second.credential_id,
+        ]
 
 
 class TestNothingSecretLeaks:

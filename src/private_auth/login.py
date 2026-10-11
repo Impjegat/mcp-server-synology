@@ -21,7 +21,7 @@ from typing import Any, Awaitable, Callable, Dict, Optional
 
 from broker.errors import RedirectRefused
 from broker.runtime import BrokerRuntime
-from broker.sessions import PendingLogin
+from broker.sessions import ATTEMPT_IN_PROGRESS, LoginAttempt, PendingLogin
 from private_auth.security import RateLimiter
 
 Runner = Callable[[Dict[str, Any]], Awaitable[Dict[str, Any]]]
@@ -61,6 +61,11 @@ _MESSAGES = {
     "username_required": "Enter the NAS account name.",
 }
 _GENERIC_FAILURE = "The sign-in did not complete."
+_IN_PROGRESS = "A sign-in for this request is already in progress. Wait for it to finish."
+_WITHDRAWN = (
+    "This sign-in request was cancelled or expired before it finished, so the session "
+    "was not used. Ask for a new one."
+)
 _SAFE_CODE = re.compile(r"^[A-Za-z0-9_]{1,40}$")
 _SAFE_VALUE = re.compile(r"^[\x21-\x7e]{1,2048}$")
 
@@ -197,12 +202,34 @@ class LoginService:
         username: Optional[str] = None,
     ) -> LoginOutcome:
         """Sign in for `pending`. The account is the configured one; only if none
-        is configured is a typed one used. Never raises."""
-        if self._runtime.sessions.find_pending(pending.request_id) is None:
+        is configured is a typed one used. Never raises.
+
+        The request is claimed for the whole attempt. Whatever the outcome (a wrong
+        password, an exception, the handler being cancelled) the claim is released,
+        so the owner can try again; a request that is withdrawn while the worker
+        runs (cancelled, expired, replaced, or its client disconnected) has no claim
+        left to adopt the worker's session with."""
+        status, claim = self._runtime.sessions.begin_attempt(pending.request_id)
+        if status == ATTEMPT_IN_PROGRESS:
+            return LoginOutcome(False, "in_progress", _IN_PROGRESS)
+        if claim is None:  # the request is gone: unknown, expired, cancelled or replaced
             return LoginOutcome(
                 False, "expired_request", "This sign-in request has expired. Ask for a new one."
             )
+        try:
+            return await self._attempt_claimed(claim, password=password, otp=otp, username=username)
+        finally:
+            self._runtime.sessions.release_attempt(claim)
 
+    async def _attempt_claimed(
+        self,
+        claim: LoginAttempt,
+        *,
+        password: str,
+        otp: Optional[str],
+        username: Optional[str],
+    ) -> LoginOutcome:
+        pending = claim.pending
         wait = self.locked_for(pending)
         if wait:
             minutes = max(1, (wait + 59) // 60)
@@ -232,9 +259,17 @@ class LoginService:
             payload.clear()
 
         if result.get("ok") is True:
-            self._runtime.install_login(
-                pending.owner, pending.nas, result["sid"], result.get("synotoken")
-            )
+            sid, token = result["sid"], result.get("synotoken")
+            try:
+                adopted = self._runtime.install_login_for_attempt(claim, sid, token)
+            except KeyError:  # the client may no longer use this NAS
+                adopted = None
+            if adopted is None:
+                # The sign-in worked on the NAS, but nobody wants it any more. It
+                # is never installed, and the NAS is told to end it. That is not a
+                # wrong password, so it does not count against the attempt limit.
+                self._runtime.end_unadopted_session(pending.owner, pending.nas, sid, token)
+                return LoginOutcome(False, "request_withdrawn", _WITHDRAWN)
             self._limiter.reset(self._key(pending))
             return LoginOutcome(True, "connected", "Connected.")
 

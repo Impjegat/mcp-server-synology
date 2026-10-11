@@ -2,6 +2,7 @@
 the real WebAuthn ceremonies, run end to end against a software authenticator.
 Every refusal is a plain False: the reason is never handed back."""
 
+import hashlib
 import json
 import os
 import stat
@@ -37,6 +38,11 @@ def owner(store, clock):
 @pytest.fixture
 def device():
     return SoftwareAuthenticator(RP_ID, ORIGIN)
+
+
+def _digest(code):
+    """What the store keeps of an enrollment code, and what a begun enrollment holds."""
+    return hashlib.sha256(code.encode()).hexdigest()
 
 
 def _enroll(owner, store, device, **kwargs):
@@ -300,14 +306,16 @@ class TestEnrollmentIsAtomic:
     ):
         import threading
 
-        store.new_enrollment_code()
+        digest = _digest(store.new_enrollment_code())
         self._slow_writes(store, monkeypatch)
         results, barrier = [], threading.Barrier(8)
 
         def attempt(index):
             barrier.wait()
             results.append(
-                store.add_credential_consuming_code(bytes([index]), b"key", 0, f"device {index}")
+                store.add_credential_consuming_code(
+                    bytes([index]), b"key", 0, f"device {index}", code_sha256=digest
+                )
             )
 
         threads = [threading.Thread(target=attempt, args=(i,)) for i in range(8)]
@@ -359,19 +367,115 @@ class TestEnrollmentIsAtomic:
         assert len(store.credentials()) == 1
 
     def test_without_an_open_code_nothing_is_added(self, store):
-        assert store.add_credential_consuming_code(b"id", b"key", 0, "x") is False
+        assert (
+            store.add_credential_consuming_code(b"id", b"key", 0, "x", code_sha256=_digest("any"))
+            is False
+        )
         assert store.credentials() == []
 
     def test_an_expired_code_adds_nothing(self, store):
-        store.new_enrollment_code(minutes=0)
-        assert store.add_credential_consuming_code(b"id", b"key", 0, "x") is False
+        digest = _digest(store.new_enrollment_code(minutes=0))
+        assert (
+            store.add_credential_consuming_code(b"id", b"key", 0, "x", code_sha256=digest) is False
+        )
         assert store.credentials() == []
 
     def test_a_valid_code_adds_one_passkey_and_is_used_up(self, store):
-        store.new_enrollment_code()
-        assert store.add_credential_consuming_code(b"id", b"key", 0, "x") is True
-        assert store.add_credential_consuming_code(b"id2", b"key2", 0, "y") is False
+        digest = _digest(store.new_enrollment_code())
+        assert (
+            store.add_credential_consuming_code(b"id", b"key", 0, "x", code_sha256=digest) is True
+        )
+        assert (
+            store.add_credential_consuming_code(b"id2", b"key2", 0, "y", code_sha256=digest)
+            is False
+        )
         assert [c.label for c in store.credentials()] == ["x"]
+
+
+class TestEnrollmentIsBoundToItsCode:
+    """Sign-in and enrollment each make a challenge, and anyone who can reach the
+    page can ask for either. A challenge made for one must not finish the other, and
+    an enrollment must finish only while the code it began with is still the open
+    one (implementation review R01)."""
+
+    @pytest.fixture
+    def enrolled(self, owner, store, device):
+        _enroll(owner, store, device)
+
+    def test_r01_a_sign_in_challenge_cannot_complete_enrollment(self, owner, store, enrolled):
+        # The owner has an add-device code open; the attacker does not know it.
+        store.new_enrollment_code(allow_additional=True)
+        state, options = owner.begin_authentication()  # a challenge anyone can ask for
+        attacker = SoftwareAuthenticator(RP_ID, ORIGIN)
+
+        assert owner.finish_enrollment(state, attacker.create(options)) is False
+
+        assert len(store.credentials()) == 1
+        assert store.enrollment_open() is True  # the real code was not used up
+        state, options = owner.begin_authentication()
+        assert owner.finish_authentication(state, attacker.get(options)) is False
+
+    def test_an_enrollment_challenge_cannot_complete_a_sign_in(
+        self, owner, store, device, enrolled
+    ):
+        state, options = owner.begin_enrollment(store.new_enrollment_code(allow_additional=True))
+        assert owner.finish_authentication(state, device.get(options)) is False
+
+    def test_a_wrong_use_burns_the_challenge(self, owner, store, device, enrolled):
+        """Presented for the wrong purpose, a state is spent, not kept for a retry:
+        not even the owner's valid signature can then redeem it."""
+        store.new_enrollment_code(allow_additional=True)
+        state, options = owner.begin_authentication()
+        attacker = SoftwareAuthenticator(RP_ID, ORIGIN)
+        assert owner.finish_enrollment(state, attacker.create(options)) is False
+        assert owner.finish_authentication(state, device.get(options)) is False
+
+    def test_r01_an_enrollment_begun_under_a_replaced_code_cannot_finish(
+        self, owner, store, device
+    ):
+        state, options = owner.begin_enrollment(store.new_enrollment_code())
+        second = store.new_enrollment_code()  # the owner asked for a new code meanwhile
+
+        assert owner.finish_enrollment(state, device.create(options)) is False
+
+        assert store.credentials() == []
+        assert store.check_enrollment_code(second)  # the new code is untouched
+
+    def test_r01_an_enrollment_cannot_finish_after_its_code_was_used_by_another(self, owner, store):
+        code = store.new_enrollment_code()
+        first, second = SoftwareAuthenticator(RP_ID, ORIGIN), SoftwareAuthenticator(RP_ID, ORIGIN)
+        (s1, o1), (s2, o2) = owner.begin_enrollment(code), owner.begin_enrollment(code)
+        assert owner.finish_enrollment(s1, first.create(o1)) is True
+
+        store.new_enrollment_code(allow_additional=True)  # a different code is open now
+        assert owner.finish_enrollment(s2, second.create(o2)) is False
+        assert [c.credential_id for c in store.credentials()] == [first.credential_id]
+
+    def test_r01_the_store_refuses_a_passkey_under_a_different_code(self, store):
+        store.new_enrollment_code()
+        other = _digest("a code that was never issued")
+        assert (
+            store.add_credential_consuming_code(b"id", b"key", 0, "x", code_sha256=other) is False
+        )
+        assert store.credentials() == []
+        assert store.enrollment_open() is True
+
+    def test_r01_the_store_will_not_add_a_passkey_without_naming_the_code(self, store):
+        store.new_enrollment_code()
+        with pytest.raises(TypeError):
+            store.add_credential_consuming_code(b"id", b"key", 0, "x")
+        assert store.credentials() == []
+
+    def test_the_first_and_an_additional_device_still_enrol(self, owner, store, device):
+        _enroll(owner, store, device)
+        second = SoftwareAuthenticator(RP_ID, ORIGIN)
+        _enroll(owner, store, second, allow_additional=True)
+        assert [c.credential_id for c in store.credentials()] == [
+            device.credential_id,
+            second.credential_id,
+        ]
+        state, options = owner.begin_authentication()
+        assert owner.finish_authentication(state, second.get(options)) is True
 
 
 class TestOutstandingChallenges:

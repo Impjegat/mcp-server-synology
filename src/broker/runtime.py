@@ -16,7 +16,7 @@ import mcp.types as types
 from auth import register_secret_source
 from broker.bridge import SessionBridge, SessionView
 from broker.policy import ClientPolicy, Policy
-from broker.sessions import SessionManager, SessionRecord
+from broker.sessions import LoginAttempt, SessionManager, SessionRecord
 
 logger = logging.getLogger(__name__)
 
@@ -161,6 +161,42 @@ class BrokerRuntime:
         if replaced is not None:
             self._logout_in_background(replaced)
         return record
+
+    def install_login_for_attempt(
+        self, attempt: LoginAttempt, session_id: str, syno_token: Optional[str] = None
+    ) -> Optional[SessionRecord]:
+        """Adopt the session a private login produced, but only while the sign-in
+        request it answered is still the live one and `attempt` still holds it.
+
+        None means the request was withdrawn while the worker ran (cancelled,
+        expired, replaced, or the client was disconnected): nothing was installed,
+        and the caller ends `session_id` on the NAS with `end_unadopted_session`.
+        A session it replaces is ended on the NAS, as with `install_login`."""
+        pending = attempt.pending
+        client = self.policy.clients[pending.owner]
+        if pending.nas not in client.nas:
+            raise KeyError(pending.nas)
+        adopted = self.sessions.install_for_attempt(
+            attempt, self.nas_config(pending.nas)["base_url"], session_id, syno_token
+        )
+        if adopted is None:
+            return None
+        record, replaced = adopted
+        if replaced is not None:
+            self._logout_in_background(replaced)
+        return record
+
+    def end_unadopted_session(
+        self, owner: str, nas: str, session_id: str, syno_token: Optional[str] = None
+    ) -> None:
+        """End, on the NAS, a session made for a login nobody wants any more, which
+        therefore never entered the session manager. Done in the background and
+        bounded like every other logout; a failure leaves the session to expire on
+        the NAS's own timer, never to be used here."""
+        record = SessionRecord(
+            owner, nas, self.nas_config(nas)["base_url"], session_id, syno_token, 0, 0.0, 0.0
+        )
+        self._logout_in_background(record)
 
     def reap_expired(self) -> None:
         """End, on the NAS, every session that has reached a deadline."""

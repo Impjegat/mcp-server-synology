@@ -46,8 +46,8 @@ This roadmap splits that work into PRs. Each PR gets its own plan folder here, a
 
 | Fix PR | Folder | Findings | Status |
 |---|---|---|---|
-| 1 | [`2026-10-11-fix-nas-transport`](../2026-10-11-fix-nas-transport/PLAN.md) | R03 redirects forward credentials, R04 certificate verification can be disabled, R08 private login ignores the server-level CA | Fixed in this branch, awaiting review |
-| 2 | `fix-private-login` | R01 enrollment bypass, R05 cancelled login still installs a session | Open |
+| 1 | [`2026-10-11-fix-nas-transport`](../2026-10-11-fix-nas-transport/PLAN.md) | R03 redirects forward credentials, R04 certificate verification can be disabled, R08 private login ignores the server-level CA | Merged ([#27](https://github.com/Impjegat/mcp-server-synology/pull/27)) |
+| 2 | [`2026-10-11-fix-private-login`](../2026-10-11-fix-private-login/PLAN.md) | R01 enrollment bypass, R05 cancelled login still installs a session | Fixed in this branch, awaiting review |
 | 3 | `fix-folder-policy` | R02 denied folder reachable through a link, R06 directory children unfiltered, R07 NFS discovery unscoped | Open |
 | 4 | `fix-grants-and-service-errors` | R12 client grants have no expiry, R09 download creation replayed, R10 expiry hidden by fallbacks, R11 legacy replay by HTTP verb | Open |
 
