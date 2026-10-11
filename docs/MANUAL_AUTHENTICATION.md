@@ -102,7 +102,7 @@ Use a **dedicated NAS account for this server**, not your own. DSM's monitoring 
 }
 ```
 
-Put it in the first directory above, mode `0600`, owned by the broker's account (the broker refuses a settings file another account owns or others can read). Connections are HTTPS only. For a NAS with a private certificate, set `verify_ssl` to the path of its CA bundle rather than `false`.
+Put it in the first directory above, mode `0600`, owned by the broker's account (the broker refuses a settings file another account owns or others can read). Connections are HTTPS only, and the NAS's certificate is always verified: `verify_ssl` must be `true` (the default) or, for a NAS with a private certificate, the path of the CA bundle that signed it (a file or a directory, and it must exist). The broker refuses to start with `false`, an empty value or a CA path that is not there, because your password and code travel over that connection. The broker also refuses to follow a redirect from the NAS, so a wrong address or port is an error, not a detour.
 
 ### 3. A TLS certificate for the broker
 

@@ -16,7 +16,7 @@ import requests
 from broker.errors import AuthenticationRequired, AuthorizationDenied
 from broker.file_policy import FolderGuard
 from utils.redact import redact
-from utils.synology_api import raise_if_authentication_required, recover_session
+from utils.synology_api import raise_if_authentication_required, recover_session, refuse_redirect
 
 # Paths no path-taking method below may touch, read or write. See
 # _check_critical_path.
@@ -197,6 +197,7 @@ class SynologyFileStation:
                     headers=self._csrf_headers(post=True),
                     verify=self.verify_ssl,
                     timeout=timeout,
+                    allow_redirects=False,
                 )
             else:
                 response = requests.get(
@@ -205,7 +206,9 @@ class SynologyFileStation:
                     headers=self._csrf_headers(post=False) or None,
                     verify=self.verify_ssl,
                     timeout=timeout,
+                    allow_redirects=False,
                 )
+            refuse_redirect(response)
             response.raise_for_status()
             return response.json()
 
@@ -349,7 +352,9 @@ class SynologyFileStation:
                 headers=upload_headers,
                 verify=self.verify_ssl,
                 timeout=15,
+                allow_redirects=False,
             )
+            refuse_redirect(response)
             response.raise_for_status()
             data = response.json()
         except requests.RequestException as e:
@@ -739,7 +744,9 @@ class SynologyFileStation:
                             headers=upload_headers,
                             verify=self.verify_ssl,
                             timeout=15,
+                            allow_redirects=False,
                         )
+                        refuse_redirect(response)
                         response.raise_for_status()
                         result = response.json()
                     except requests.RequestException as e:
@@ -1052,11 +1059,13 @@ class SynologyFileStation:
                 verify=self.verify_ssl,
                 stream=True,
                 timeout=15,
+                allow_redirects=False,
             )
             # `with response:` closes the connection on every exit path —
             # the oversize abort, a DSM error, an exception mid-stream —
             # not only the one that used to call close() by hand.
             with response:
+                refuse_redirect(response)
                 response.raise_for_status()
 
                 # Enforce the cap on the bytes actually read too, not just on

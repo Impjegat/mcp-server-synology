@@ -57,14 +57,18 @@ def validate(payload: Any) -> Optional[Dict[str, Any]]:
         return None
     if otp is not None and (not isinstance(otp, str) or not re.fullmatch(r"[0-9]{4,10}", otp)):
         return None
-    if not isinstance(verify, (bool, str)):
+    # The password and code are about to be sent, so the connection must be
+    # verified: `true`, or the path of a CA bundle. `false`, and an empty string
+    # (which `requests` reads as "do not verify"), are refused here whatever the
+    # broker's own configuration said.
+    if verify is not True and not (isinstance(verify, str) and verify.strip()):
         return None
     return {
         "base_url": base_url,
         "username": username,
         "password": password,
         "otp": otp or None,
-        "verify_ssl": verify,
+        "verify_ssl": verify if verify is True else verify.strip(),
     }
 
 

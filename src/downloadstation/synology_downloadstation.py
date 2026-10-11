@@ -6,12 +6,17 @@ from typing import Any, Dict, List, Optional
 
 import requests
 
-from broker.errors import AuthenticationRequired
+from broker.errors import AuthenticationRequired, RedirectRefused
 from broker.file_policy import FolderGuard
 from utils.redact import redact
-from utils.synology_api import raise_if_authentication_required, recover_session
+from utils.synology_api import raise_if_authentication_required, recover_session, refuse_redirect
 
 logger = logging.getLogger(__name__)
+
+# Errors that must reach the caller as they are. The fallbacks below turn an
+# ordinary failure into a default answer; these two say something a default
+# would hide: the session is gone, or the NAS tried to send the request on.
+_PASS_THROUGH = (AuthenticationRequired, RedirectRefused)
 
 
 class SynologyDownloadStation:
@@ -123,6 +128,7 @@ class SynologyDownloadStation:
                     headers=headers,
                     verify=self.verify_ssl,
                     timeout=15,
+                    allow_redirects=False,
                 )
             else:
                 response = requests.get(
@@ -131,8 +137,10 @@ class SynologyDownloadStation:
                     headers=headers,
                     verify=self.verify_ssl,
                     timeout=15,
+                    allow_redirects=False,
                 )
 
+            refuse_redirect(response)
             response.raise_for_status()
             data = response.json()
 
@@ -196,7 +204,7 @@ class SynologyDownloadStation:
                 "is_manager": data.get("is_manager", False),
                 "hostname": data.get("hostname", "Synology NAS"),
             }
-        except AuthenticationRequired:
+        except _PASS_THROUGH:
             raise
         except Exception as e:
             # Fallback response if API fails
@@ -229,7 +237,7 @@ class SynologyDownloadStation:
 
         try:
             data = self._make_request(self.task_api, self.task_version, "list", **params)
-        except AuthenticationRequired:
+        except _PASS_THROUGH:
             raise
         except Exception as e:
             # If version 2 fails, try version 1
@@ -300,7 +308,7 @@ class SynologyDownloadStation:
         try:
             data = self._make_request(self.info_api, "1", "getconfig")
             return data
-        except AuthenticationRequired:
+        except _PASS_THROUGH:
             raise
         except Exception:
             return {
@@ -383,7 +391,7 @@ class SynologyDownloadStation:
 
             return data
 
-        except AuthenticationRequired:
+        except _PASS_THROUGH:
             raise
         except Exception as e:
             logger.warning(self._redact(f"Create task failed: {e}"))
@@ -437,7 +445,7 @@ class SynologyDownloadStation:
                 "emule_speed_download": data.get("emule_speed_download", 0),
                 "emule_speed_upload": data.get("emule_speed_upload", 0),
             }
-        except AuthenticationRequired:
+        except _PASS_THROUGH:
             raise
         except Exception:
             # Fallback: calculate from task list
@@ -481,7 +489,9 @@ class SynologyDownloadStation:
                 headers=headers,
                 verify=self.verify_ssl,
                 timeout=15,
+                allow_redirects=False,
             )
+            refuse_redirect(response)
             response.raise_for_status()
             data = response.json()
 
@@ -496,7 +506,7 @@ class SynologyDownloadStation:
 
             return False
 
-        except AuthenticationRequired:
+        except _PASS_THROUGH:
             raise
         except Exception:
             # If we can't check, assume it doesn't exist
@@ -599,7 +609,9 @@ class SynologyDownloadStation:
                 headers=headers,
                 verify=self.verify_ssl,
                 timeout=15,
+                allow_redirects=False,
             )
+            refuse_redirect(response)
             response.raise_for_status()
             data = response.json()
 
@@ -611,7 +623,7 @@ class SynologyDownloadStation:
                 error_msg = self._get_error_message(error_code)
                 raise Exception(f"FileStation API error {error_code}: {error_msg}")
 
-        except AuthenticationRequired:
+        except _PASS_THROUGH:
             raise
         except Exception as e:
             # This request's URL carries `_sid=<session_id>` directly (it's

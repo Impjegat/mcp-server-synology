@@ -5,11 +5,29 @@ from typing import Any, Dict, Optional, Tuple
 
 import requests
 
-from broker.errors import AuthenticationRequired, is_session_lost
+from broker.errors import AuthenticationRequired, RedirectRefused, is_session_lost
 from config import config
 from utils.redact import redact
 
 logger = logging.getLogger(__name__)
+
+
+def refuse_redirect(response: Any) -> None:
+    """Raise `RedirectRefused` if the NAS answered with a redirect.
+
+    Every request to the NAS is sent with `allow_redirects=False`, because
+    following a redirect would repeat the request, body and session headers
+    included, at whatever address the answer names. A login carries the
+    password and the one-time code; every other request carries the session id
+    and token. With redirects off, `requests` hands the 3xx answer back, and
+    `raise_for_status()` does not treat it as an error, so each call checks it
+    here, before it reads the answer.
+
+    The address the NAS gave is deliberately not in the error.
+    """
+    status = getattr(response, "status_code", None)
+    if isinstance(status, int) and 300 <= status < 400:
+        raise RedirectRefused()
 
 
 def raise_if_authentication_required(code: Any) -> None:
@@ -161,6 +179,7 @@ class SynologyAPIClient:
                     headers=headers,
                     timeout=15,
                     verify=self.verify_ssl,
+                    allow_redirects=False,
                 )
             else:
                 resp = requests.get(
@@ -169,9 +188,16 @@ class SynologyAPIClient:
                     headers=headers,
                     timeout=15,
                     verify=self.verify_ssl,
+                    allow_redirects=False,
                 )
+            refuse_redirect(resp)
             resp.raise_for_status()
             return resp.json()
+        except RedirectRefused as e:
+            return {
+                "success": False,
+                "error": {"code": "redirect_refused", "message": str(e)},
+            }
         except requests.RequestException as e:
             # `str(e)` commonly embeds the full request URL — which carries
             # `_sid=<session_id>` on every GET call — so redact before

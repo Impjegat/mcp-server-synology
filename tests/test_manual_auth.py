@@ -185,6 +185,148 @@ class TestBrokerConfig:
                 assert cfg.save_device_id("nas1", DUMMY_DEVICE) is False
         assert path.read_text() == before
 
+    # -- the NAS certificate (implementation review R08 and R04) ------------
+
+    def _ca_bundle(self, tmp_path):
+        ca = tmp_path / "nas-ca.pem"
+        ca.write_text("not a real certificate")
+        return str(ca)
+
+    def test_r08_a_server_level_ca_bundle_reaches_every_nas_entry(self, config_module, tmp_path):
+        """`server.verify_ssl` is read after each NAS entry is built; the entries
+        must end with the final value, not the one they captured earlier."""
+        ca = self._ca_bundle(tmp_path)
+        nas = {**_NAS, "nas2": {**_NAS["nas1"], "host": "nas2.example.test"}}
+        settings = {"synology": nas, "server": {"verify_ssl": ca}}
+        cfg = _build(config_module, tmp_path, {"SYNOLOGY_AUTH_MODE": "broker"}, settings)
+
+        assert cfg.verify_ssl == ca
+        assert {alias: entry["verify_ssl"] for alias, entry in cfg.nas_configs.items()} == {
+            "nas1": ca,
+            "nas2": ca,
+        }
+
+    def test_r08_the_same_holds_in_legacy_mode(self, config_module, tmp_path):
+        ca = self._ca_bundle(tmp_path)
+        nas = {"nas1": {**_NAS["nas1"], "password": DUMMY_PASSWORD}}
+        cfg = _build(config_module, tmp_path, None, {"synology": nas, "server": {"verify_ssl": ca}})
+        assert cfg.nas_configs["nas1"]["verify_ssl"] == ca
+
+    def test_r08_a_ca_bundle_from_the_environment_reaches_the_entries(
+        self, config_module, tmp_path
+    ):
+        ca = self._ca_bundle(tmp_path)
+        env = {"SYNOLOGY_AUTH_MODE": "broker", "VERIFY_SSL": ca}
+        cfg = _build(config_module, tmp_path, env, {"synology": _NAS})
+        assert cfg.nas_configs["nas1"]["verify_ssl"] == ca
+
+    def test_r08_a_settings_ca_bundle_beats_the_environment_everywhere(
+        self, config_module, tmp_path
+    ):
+        env_ca = self._ca_bundle(tmp_path)
+        other = tmp_path / "other-ca.pem"
+        other.write_text("not a real certificate")
+        env = {"SYNOLOGY_AUTH_MODE": "broker", "VERIFY_SSL": env_ca}
+        settings = {"synology": _NAS, "server": {"verify_ssl": str(other)}}
+        cfg = _build(config_module, tmp_path, env, settings)
+        assert cfg.verify_ssl == str(other)
+        assert cfg.nas_configs["nas1"]["verify_ssl"] == str(other)
+
+    @pytest.mark.asyncio
+    async def test_r08_the_private_login_worker_is_given_the_ca_bundle(
+        self, config_module, tmp_path, monkeypatch
+    ):
+        """From the settings file all the way to the request the worker receives."""
+        from broker.runtime import BrokerRuntime
+        from private_auth.login import LoginService
+        from tests.broker_support import Broker
+
+        ca = self._ca_bundle(tmp_path)
+        settings = {"synology": _NAS, "server": {"verify_ssl": ca}}
+        cfg = _build(config_module, tmp_path, {"SYNOLOGY_AUTH_MODE": "broker"}, settings)
+
+        broker = Broker(monkeypatch, {"alice": {"nas": ["nas1"]}})
+        runtime = BrokerRuntime(
+            broker.policy,
+            broker.sessions,
+            cfg.nas_configs,
+            verify_ssl=cfg.verify_ssl,
+            remote_logout=lambda *args: True,
+        )
+        received = []
+
+        async def worker(payload):
+            received.append(dict(payload))
+            return {"ok": True, "sid": "SID-FROM-WORKER", "synotoken": None}
+
+        service = LoginService(runtime, runner=worker, clock=broker.clock)
+        outcome = await service.attempt(
+            broker.sessions.begin_pending("alice", "nas1"), password=DUMMY_PASSWORD
+        )
+
+        assert outcome.ok
+        assert received[0]["verify_ssl"] == ca
+
+    @pytest.mark.parametrize("value", ["false", "FALSE", "0", "no", "off", "", "   "])
+    def test_r04_disabled_verification_in_the_environment_is_refused(
+        self, config_module, tmp_path, value
+    ):
+        env = {"SYNOLOGY_AUTH_MODE": "broker", "SYNOLOGY_URL": BASE_URL, "VERIFY_SSL": value}
+        with pytest.raises(ValueError, match="VERIFY_SSL"):
+            _build(config_module, tmp_path, env)
+
+    @pytest.mark.parametrize("value", [False, "false", "off", "", "  ", 0, 1, None, []])
+    def test_r04_disabled_verification_in_settings_is_refused(self, config_module, tmp_path, value):
+        settings = {"synology": _NAS, "server": {"verify_ssl": value}}
+        with pytest.raises(ValueError, match="verify_ssl"):
+            _build(config_module, tmp_path, {"SYNOLOGY_AUTH_MODE": "broker"}, settings)
+
+    def test_r04_a_ca_bundle_that_is_not_there_is_refused_without_naming_it(
+        self, config_module, tmp_path
+    ):
+        missing = str(tmp_path / "no-such-ca.pem")
+        settings = {"synology": _NAS, "server": {"verify_ssl": missing}}
+        with pytest.raises(ValueError, match="CA bundle") as error:
+            _build(config_module, tmp_path, {"SYNOLOGY_AUTH_MODE": "broker"}, settings)
+        assert missing not in str(error.value)
+
+    @pytest.mark.parametrize("value", ["", "   "])
+    def test_r04_an_empty_value_is_called_empty_not_missing(self, config_module, tmp_path, value):
+        """`requests` reads an empty verify setting as "do not verify". The message
+        must say that, not send the owner looking for a CA file nobody named."""
+        env = {"SYNOLOGY_AUTH_MODE": "broker", "SYNOLOGY_URL": BASE_URL, "VERIFY_SSL": value}
+        with pytest.raises(ValueError, match="left empty") as error:
+            _build(config_module, tmp_path, env)
+        assert "cannot be found" not in str(error.value)
+
+    def test_r04_a_ca_bundle_file_or_directory_is_accepted(self, config_module, tmp_path):
+        ca = self._ca_bundle(tmp_path)
+        for value in (ca, str(tmp_path)):
+            settings = {"synology": _NAS, "server": {"verify_ssl": value}}
+            cfg = _build(config_module, tmp_path, {"SYNOLOGY_AUTH_MODE": "broker"}, settings)
+            assert cfg.verify_ssl == value
+
+    @pytest.mark.parametrize("value", [True, "true"])
+    def test_r04_verification_switched_on_is_accepted(self, config_module, tmp_path, value):
+        settings = {"synology": _NAS, "server": {"verify_ssl": value}}
+        cfg = _build(config_module, tmp_path, {"SYNOLOGY_AUTH_MODE": "broker"}, settings)
+        assert cfg.verify_ssl is True
+
+    def test_r04_verification_is_on_unless_something_says_otherwise(self, config_module, tmp_path):
+        cfg = _build(config_module, tmp_path, {"SYNOLOGY_AUTH_MODE": "broker"}, {"synology": _NAS})
+        assert cfg.verify_ssl is True
+
+    def test_r04_the_message_says_what_to_set_and_never_the_value(self, config_module, tmp_path):
+        settings = {"synology": _NAS, "server": {"verify_ssl": False}}
+        with pytest.raises(ValueError) as error:
+            _build(config_module, tmp_path, {"SYNOLOGY_AUTH_MODE": "broker"}, settings)
+        message = str(error.value)
+        assert "true" in message
+        assert "CA bundle" in message
+
+    def test_r04_legacy_mode_may_still_switch_verification_off(self, config_module, tmp_path):
+        assert _build(config_module, tmp_path, {"VERIFY_SSL": "false"}).verify_ssl is False
+
 
 # ----------------------------------------------------------------------------
 # Test helpers for the modules below
@@ -237,6 +379,34 @@ def _manual_auth(url="https://auth-manual.example.test:5001"):
 
 
 class TestManualSynologyAuth:
+    @pytest.mark.parametrize("verify", [False, "", "  ", None, 0])
+    def test_r04_manual_mode_refuses_to_be_built_without_verification(self, verify):
+        from auth.synology_auth import SynologyAuth
+
+        with pytest.raises(ValueError, match="verif"):
+            SynologyAuth(
+                "https://auth-unverified.example.test:5001", verify_ssl=verify, manual_mode=True
+            )
+
+    @pytest.mark.parametrize("verify", [True, "/etc/ssl/certs/nas-ca.pem"])
+    def test_r04_manual_mode_accepts_verification_or_a_ca_bundle(self, verify):
+        from auth.synology_auth import SynologyAuth
+
+        auth = SynologyAuth(
+            "https://auth-verified.example.test:5001", verify_ssl=verify, manual_mode=True
+        )
+        assert auth.verify_ssl == verify
+
+    def test_r04_legacy_mode_may_still_disable_verification(self):
+        from auth import synology_auth
+        from auth.synology_auth import SynologyAuth
+
+        url = "https://auth-legacy-unverified.example.test:5001"
+        try:
+            assert SynologyAuth(url, verify_ssl=False, manual_mode=False).verify_ssl is False
+        finally:
+            synology_auth._AUTH_REGISTRY.pop(url, None)
+
     def test_manual_mode_follows_the_process_wide_mode(self, broker_mode):
         from auth.synology_auth import SynologyAuth
 

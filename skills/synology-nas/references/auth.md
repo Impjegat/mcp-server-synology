@@ -86,7 +86,7 @@ Lives at `~/.config/synology-mcp/settings.json` (XDG standard) on the machine th
 
 Every connection is HTTPS-only regardless of port — there is no HTTP fallback. 5001 is DSM's default HTTPS port (and the default here when `port` is omitted); a custom port still connects over HTTPS. The `note` is for the user's reference — surface it when listing NAS units to a user, since human-readable notes ("primary", "backup") are easier to reason about than `nas1`/`nas2`.
 
-The same file has a `"server"` block for the server's own options: `verify_ssl` (`true`, `false`, or a CA bundle file path for a private CA), `restricted_mode` (default `true`), `max_file_content_size`, `session_timeout`, `log_level` and `debug` (and, in legacy mode, `auto_login`).
+The same file has a `"server"` block for the server's own options: `verify_ssl` (`true`, or a CA bundle file path for a private CA; legacy mode also accepts `false`, manual mode never does), `restricted_mode` (default `true`), `max_file_content_size`, `session_timeout`, `log_level` and `debug` (and, in legacy mode, `auto_login`).
 
 ## Gotchas
 

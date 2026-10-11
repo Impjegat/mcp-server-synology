@@ -45,8 +45,9 @@ services:
     user: "${BROKER_UID:?set BROKER_UID in broker.env}:${BROKER_GID:?set BROKER_GID in broker.env}"
     environment:
       XDG_CONFIG_HOME: /config
-      # `true`, `false`, or the path of a CA bundle under /config/synology-mcp for a NAS
-      # with a private certificate. Never `false` on a network you do not control.
+      # `true`, or the path of a CA bundle under /config/synology-mcp for a NAS with a
+      # private certificate. `false` is refused: the broker will not start without
+      # verifying the NAS's certificate, because the password travels over it.
       VERIFY_SSL: ${NAS_VERIFY_SSL:-true}
       # The broker applies restricted mode as well as each client's policy. Leave it on
       # unless a client is meant to have a tool that changes things.

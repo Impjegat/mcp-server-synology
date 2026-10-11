@@ -80,6 +80,35 @@ def _parse_verify_ssl(value: str) -> Any:
     return value.strip()
 
 
+_BROKER_TLS_HELP = (
+    "Set VERIFY_SSL (or server.verify_ssl in settings.json) to true, or to the path of the "
+    "CA bundle (a file, or a directory of certificates) that signed the NAS's certificate."
+)
+
+
+def _broker_tls_problem(value: Any) -> Optional[str]:
+    """Why `value`, the final VERIFY_SSL setting, cannot be used in manual
+    authentication, or None if it can. Never repeats the value.
+
+    Manual authentication sends the NAS password and one-time code over TLS, and
+    only a verified connection makes that safe, so the setting must be `true` or
+    the path of a CA bundle that exists. `false`, an empty string (which
+    `requests` reads as "do not verify") and anything that is not a boolean or a
+    string are refused; so is a path that is not there, which would otherwise
+    only fail at the first sign-in."""
+    if value is True:
+        return None
+    if isinstance(value, str) and value.strip():
+        path = value.strip()
+        if os.path.isfile(path) or os.path.isdir(path):
+            return None
+        return f"VERIFY_SSL / server.verify_ssl names a CA bundle that cannot be found. {_BROKER_TLS_HELP}"
+    return (
+        "Manual authentication verifies the NAS's TLS certificate, so verification may not be "
+        f"switched off or left empty. {_BROKER_TLS_HELP}"
+    )
+
+
 def _parse_restricted_mode(value: Any) -> bool:
     """Parse RESTRICTED_MODE's env-var or settings.json string form.
 
@@ -173,12 +202,26 @@ class SynologyConfig:
 
         self._load_env_settings()
         self._load_settings()
+        self._apply_final_tls_setting()
         if self.auth_mode == AUTH_MODE_BROKER:
             self._finish_broker_mode()
 
+    def _apply_final_tls_setting(self) -> None:
+        """Give every NAS entry the one final TLS setting.
+
+        `server.verify_ssl` in settings.json overrides VERIFY_SSL after each NAS
+        entry has been built from it. Left alone, the entries would keep the
+        earlier value: the services, which read `verify_ssl` from here, would
+        trust the configured CA bundle while the private login, which reads it
+        from the entry, would use ordinary system trust. There is no per-NAS TLS
+        setting, so this one is the only source."""
+        for entry in self.nas_configs.values():
+            entry["verify_ssl"] = self.verify_ssl
+
     def _finish_broker_mode(self) -> None:
-        """Reject stored credentials, and turn a bare SYNOLOGY_URL into the
-        single endpoint "default" so NAS discovery works without a password."""
+        """Reject stored credentials and unverified TLS, and turn a bare
+        SYNOLOGY_URL into the single endpoint "default" so NAS discovery works
+        without a password."""
         if self._broker_violations:
             raise ManualAuthConfigError(
                 "SYNOLOGY_AUTH_MODE=broker does not accept stored credentials, one-time "
@@ -186,6 +229,9 @@ class SynologyConfig:
                 + ", ".join(sorted(set(self._broker_violations)))
                 + "."
             )
+        tls_problem = _broker_tls_problem(self.verify_ssl)
+        if tls_problem:
+            raise ManualAuthConfigError(tls_problem)
         if not self.nas_configs and self.synology_url:
             self.nas_configs["default"] = {
                 "base_url": self.synology_url,
