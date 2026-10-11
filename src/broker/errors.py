@@ -19,6 +19,7 @@ SESSION_LOST_CODES = frozenset({106, 107, 119})
 AUTHENTICATION_REQUIRED = "AUTHENTICATION_REQUIRED"
 AUTHORIZATION_DENIED = "AUTHORIZATION_DENIED"
 REDIRECT_REFUSED = "REDIRECT_REFUSED"
+SESSION_RENEWED = "SESSION_RENEWED"
 
 _AUTHENTICATION_REQUIRED_MESSAGE = (
     f"{AUTHENTICATION_REQUIRED}: this NAS has no active session. Ask the user to sign in "
@@ -31,6 +32,11 @@ _AUTHENTICATION_REQUIRED_MESSAGE = (
 _REDIRECT_REFUSED_MESSAGE = (
     "The NAS answered with a redirect, so nothing more was sent. Check the NAS address "
     "and port in the broker's settings."
+)
+
+_SESSION_RENEWED_MESSAGE = (
+    "The NAS refused this request because the session had expired. The session has been "
+    "renewed; run it again if it is still wanted."
 )
 
 
@@ -59,6 +65,18 @@ class AuthorizationDenied(Exception):  # noqa: N818
 
     def __init__(self, message: Optional[str] = None):
         super().__init__(message or f"{AUTHORIZATION_DENIED}: this operation is not permitted.")
+
+
+class SessionRenewedNotRepeated(Exception):  # noqa: N818
+    """Legacy mode renewed a lost session from the stored login, but the request
+    that found it lost was a change, and a change is never repeated automatically:
+    DSM refused the first attempt, but the caller, not the server, decides whether
+    it is still wanted."""
+
+    code = SESSION_RENEWED
+
+    def __init__(self, message: Optional[str] = None):
+        super().__init__(message or _SESSION_RENEWED_MESSAGE)
 
 
 class RedirectRefused(Exception):  # noqa: N818

@@ -14,10 +14,15 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
-from broker.errors import AuthenticationRequired, AuthorizationDenied
+from broker.errors import AuthenticationRequired, AuthorizationDenied, RedirectRefused
 from broker.file_policy import FolderGuard
 from utils.redact import redact
-from utils.synology_api import raise_if_authentication_required, recover_session, refuse_redirect
+from utils.synology_api import (
+    raise_if_authentication_required,
+    raise_unless_read_only,
+    recover_session,
+    refuse_redirect,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -165,7 +170,8 @@ class SynologyFileStation:
         A lost session (DSM 106/107/119) is handled by `utils.synology_api`:
         manual mode raises `AuthenticationRequired`; legacy mode renews the
         session from its cached login once and repeats a read (`_retry` stops
-        it looping). A write is never repeated.
+        it looping). A change is never repeated, whatever its HTTP verb: it
+        raises `SessionRenewedNotRepeated` with the session already renewed.
 
         `deadline` is a `time.monotonic()` timestamp the request must not
         outlive. Without one the request is limited only by its own timeout
@@ -237,10 +243,15 @@ class SynologyFileStation:
             error_info = data.get("error", {})
 
             raise_if_authentication_required(error_code)
-            if _retry and not use_post:
+            if _retry:
                 recovered = recover_session(self.base_url, self.session_id, error_code)
                 if recovered:
                     self.session_id, self.syno_token = recovered
+                    # Only a read is repeated. Whether a request is one is decided by
+                    # its method, not by GET or POST: a rename and the start of a
+                    # delete or a move are GETs. A change stops here, with the
+                    # session already renewed for the caller's next try.
+                    raise_unless_read_only(method)
                     return self._make_request(
                         api, version, method, use_post, deadline=deadline, _retry=False, **params
                     )
@@ -776,6 +787,9 @@ class SynologyFileStation:
 
                     if not result.get("success"):
                         error_code = result.get("error", {}).get("code", "unknown")
+                        # A lost session is not an upload failure: in manual mode it
+                        # is `AuthenticationRequired`, as for every other request.
+                        raise_if_authentication_required(error_code)
                         raise Exception(f"Upload failed with error: {error_code}")
 
             return {
@@ -894,8 +908,9 @@ class SynologyFileStation:
             raise Exception(
                 "Delete operation timed out while looking up the path; nothing was deleted."
             ) from None
-        except AuthenticationRequired:
-            # Not a failure to classify the path: there is no session at all.
+        except (AuthenticationRequired, RedirectRefused):
+            # Not a failure to classify the path: there is no session at all, or the
+            # NAS is sending requests somewhere else. Neither is a reason to go on.
             raise
         except Exception:
             recursive = False  # Default to file behavior if can't determine

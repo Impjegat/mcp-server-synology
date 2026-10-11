@@ -44,6 +44,8 @@ If `synology_status` itself fails with a `BROKER_...` code, the adapter cannot r
 The server logs in automatically at startup for every NAS configured in `~/.config/synology-mcp/settings.json` (or the legacy `.env`). Sessions persist for the server's lifetime. So:
 
 - **Default state**: every configured NAS is already authenticated. You can call file/download/health tools immediately.
+- **An expired session is renewed for you, but only a read is repeated.** If a read finds the session gone it is retried once with the renewed one. If a change (a rename, delete, move, a new folder or download, pause, resume) finds it gone, it is *not* repeated: the call fails with "the session has been renewed; run it again if it is still wanted". Nothing was changed, so asking again is your decision (and, for something the user did not just ask for, theirs), not an automatic retry.
+- **After a timeout creating a download**, it is unknown whether the NAS created it. The message says so. Do not create it again: list the tasks first and check.
 - **If a tool returns an auth error**: call `synology_status` to see what's wrong. The session may have timed out or the credentials may be invalid.
 - **If status confirms no active session**: then — and only then — `synology_login` is the tool for it. Its `password` is a secret the user would have to type into this conversation, which is exactly what you should avoid: prefer asking the user to fix the server's configuration (or to move to manual authentication) over asking for a password here.
 

@@ -5,11 +5,46 @@ from typing import Any, Dict, Optional, Tuple
 
 import requests
 
-from broker.errors import AuthenticationRequired, RedirectRefused, is_session_lost
+from broker.errors import (
+    AuthenticationRequired,
+    RedirectRefused,
+    SessionRenewedNotRepeated,
+    is_session_lost,
+)
 from config import config
 from utils.redact import redact
 
 logger = logging.getLogger(__name__)
+
+# DSM methods that only read. After a lost session is renewed from the stored login
+# (legacy mode), a request is repeated only if its method is one of these. The HTTP
+# verb says nothing about it: some DSM changes are sent as GET (a rename, a folder
+# created, the start of a delete or a move) and some reads as POST (every container
+# call). A method not listed here is treated as a change and never repeated; the
+# cost of listing too little is that a read has to be asked for again.
+READ_ONLY_METHODS = frozenset(
+    {
+        "get",
+        "getconfig",
+        "getinfo",
+        "get_smart_info",
+        "info",
+        "list",
+        "list_by_user",
+        "list_share",
+        "load_info",
+        "search",
+        "status",
+        "tags",
+    }
+)
+
+
+def raise_unless_read_only(method: str) -> None:
+    """Called once a lost session has been renewed: let a read be repeated, and
+    stop a change with `SessionRenewedNotRepeated`."""
+    if method not in READ_ONLY_METHODS:
+        raise SessionRenewedNotRepeated()
 
 
 def refuse_redirect(response: Any) -> None:
@@ -146,6 +181,16 @@ class SynologyAPIClient:
                 if new_sid:
                     self.session_id = new_sid
                     self.syno_token = new_token
+                    if method not in READ_ONLY_METHODS:
+                        # The session is renewed for the next call, but a change is
+                        # not repeated on the strength of a guess about the verb.
+                        return {
+                            "success": False,
+                            "error": {
+                                "code": "session_renewed",
+                                "message": str(SessionRenewedNotRepeated()),
+                            },
+                        }
                     result = self._do_request(api, method, version, extra_params, use_post)
         return result
 

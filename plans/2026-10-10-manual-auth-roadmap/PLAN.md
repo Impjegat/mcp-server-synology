@@ -48,8 +48,8 @@ This roadmap splits that work into PRs. Each PR gets its own plan folder here, a
 |---|---|---|---|
 | 1 | [`2026-10-11-fix-nas-transport`](../2026-10-11-fix-nas-transport/PLAN.md) | R03 redirects forward credentials, R04 certificate verification can be disabled, R08 private login ignores the server-level CA | Merged ([#27](https://github.com/Impjegat/mcp-server-synology/pull/27)) |
 | 2 | [`2026-10-11-fix-private-login`](../2026-10-11-fix-private-login/PLAN.md) | R01 enrollment bypass, R05 cancelled login still installs a session | Merged ([#28](https://github.com/Impjegat/mcp-server-synology/pull/28)) |
-| 3 | [`2026-10-11-fix-folder-policy`](../2026-10-11-fix-folder-policy/PLAN.md) | R02 denied folder reachable through a link, R06 directory children unfiltered, R07 NFS discovery unscoped | Fixed in this branch, awaiting review |
-| 4 | `fix-grants-and-service-errors` | R12 client grants have no expiry, R09 download creation replayed, R10 expiry hidden by fallbacks, R11 legacy replay by HTTP verb | Open |
+| 3 | [`2026-10-11-fix-folder-policy`](../2026-10-11-fix-folder-policy/PLAN.md) | R02 denied folder reachable through a link, R06 directory children unfiltered, R07 NFS discovery unscoped | Merged ([#29](https://github.com/Impjegat/mcp-server-synology/pull/29)) |
+| 4 | [`2026-10-11-fix-grants-and-service-errors`](../2026-10-11-fix-grants-and-service-errors/PLAN.md) | R12 client grants have no expiry, R09 download creation replayed, R10 expiry hidden by fallbacks, R11 legacy replay by HTTP verb | Fixed in this branch, awaiting review |
 
 R12 was decided with the owner: grant expiry is **required**, at most a year ahead.
 
