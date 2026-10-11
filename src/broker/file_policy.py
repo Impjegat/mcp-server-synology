@@ -95,7 +95,9 @@ class FolderPolicy:
                     )
                 canonical_roots.append(root)
             self._roots[alias] = tuple(sorted(set(canonical_roots)))
-        self._deny = tuple(canonicalize(value).casefold() for value in deny)
+        # As written (to ask DSM about them) and folded (to compare lexically).
+        self._deny_paths = tuple(canonicalize(value) for value in deny)
+        self._deny = tuple(value.casefold() for value in self._deny_paths)
         self._clock = clock
         self._real_root_ttl = real_root_ttl
         self._real_roots: Dict[Tuple[str, str], Tuple[float, str]] = {}
@@ -153,6 +155,80 @@ class FolderPolicy:
             return False
         return any(_within(share, root) or _within(root, share) for root in self.roots(alias))
 
+    def share_in_scope(self, alias: str, share_path: str) -> bool:
+        """Whether a share is, or lies inside, an allowed root, so that everything
+        about it (not just its name) is the client's to see. `share_visible` is
+        wider: it also names a share that merely holds an allowed sub-folder, whose
+        other contents are not the client's."""
+        try:
+            share = canonicalize(share_path)
+        except AuthorizationDenied:
+            return False
+        if share == "/" or self.is_denied(share):
+            return False
+        return any(_within(share, root) for root in self.roots(alias))
+
+    def real_denied_locations(
+        self,
+        alias: str,
+        lookup: Optional[Callable[[str], Tuple[bool, Optional[str]]]],
+    ) -> Tuple[str, ...]:
+        """Where each folder the administrator denied really lives on the NAS.
+
+        `deny_paths` are share paths (`/docs/private`), while a target judged by
+        `FolderGuard.verify_real` is where DSM says it really is
+        (`/volume1/docs/private/x`). Compared as they stand, a link inside an allowed
+        root that leads into a denied folder, or a second door onto the same volume
+        path, would pass. So each denied folder is resolved into the same namespace
+        as the target.
+
+        `lookup(path)` asks DSM `(found, real_path)`. A denied folder that is found
+        is placed where DSM says it is (it may itself be a link); one that does not
+        exist is placed by its nearest existing parent, so a link made to where it
+        would be is not a way in once it exists. A folder that exists but whose
+        location DSM will not name, or any denial when there is no `lookup` at all,
+        refuses everything: a target cannot be shown to be outside what cannot be
+        located. A failed lookup raises. Nothing is remembered between requests (see
+        `_real_denied`), so `alias` only says whose denials these are."""
+        if not self._deny_paths:
+            return ()
+        if lookup is None:
+            raise AuthorizationDenied(_DENIED)
+        locations = []
+        for entry in self._deny_paths:
+            real = self._real_denied(entry, lookup)
+            if real is not None:
+                locations.append(real)
+        return tuple(locations)
+
+    @staticmethod
+    def _real_denied(
+        entry: str, lookup: Callable[[str], Tuple[bool, Optional[str]]]
+    ) -> Optional[str]:
+        # Never remembered, whether the folder exists or not. An allowed root is
+        # written by the administrator and its answer can safely live for a while;
+        # a denied folder may sit in a share other people change, and a swap (the
+        # folder replaced by a link, or moved) must be seen by the very next
+        # request, not after a timer. A listing or a search works it out once for
+        # all its entries, so what this costs is a request per denied folder per
+        # call, not per entry.
+        probe, tail = entry, []
+        for _ in range(16):
+            found, real = lookup(probe)
+            if found:
+                if not real:
+                    raise AuthorizationDenied(_DENIED)
+                location = canonicalize(real)
+                if not tail:
+                    return location
+                return posixpath.join(location, *reversed(tail))
+            parent = posixpath.dirname(probe)
+            if parent in (probe, "/"):
+                return None  # not even its share exists: there is nothing to protect
+            tail.append(posixpath.basename(probe))
+            probe = parent
+        raise AuthorizationDenied(_DENIED)  # too deep to resolve is not assumed safe
+
     def real_root(
         self, alias: str, root: str, resolve: Callable[[str], Optional[str]]
     ) -> Optional[str]:
@@ -195,18 +271,37 @@ class FolderGuard:
     def share_visible(self, share_path: str) -> bool:
         return self._policy.share_visible(self.alias, share_path)
 
+    def share_in_scope(self, share_path: str) -> bool:
+        return self._policy.share_in_scope(self.alias, share_path)
+
+    def denied_locations(
+        self, lookup: Optional[Callable[[str], Tuple[bool, Optional[str]]]]
+    ) -> Tuple[str, ...]:
+        """Where the administrator's denied folders really are (see
+        `FolderPolicy.real_denied_locations`). A listing or a search judges many
+        entries against the same denied folders, so it works this out once and
+        hands the answer to `verify_real` for each entry."""
+        return self._policy.real_denied_locations(self.alias, lookup)
+
     def verify_real(
         self,
         canonical: str,
         real_path: Optional[str],
         resolve_root_real: Callable[[str], Optional[str]],
+        lookup: Optional[Callable[[str], Tuple[bool, Optional[str]]]] = None,
+        denied: Optional[Tuple[str, ...]] = None,
     ) -> None:
         """Refuse unless DSM's resolved `real_path` for `canonical` is inside
-        the real location of the allowed root that contains it.
+        the real location of the allowed root that contains it, and is not inside
+        the real location of any folder the administrator denied.
 
-        `canonical` has already passed `check`. If either real location is
-        unknown the answer is refusal: a symbolic link cannot be shown to stay
-        inside the root, so it is not assumed to.
+        `canonical` has already passed `check`. If a real location is unknown the
+        answer is refusal: a symbolic link cannot be shown to stay inside the root
+        or outside a denied folder, so it is not assumed to. `lookup` asks DSM
+        `(found, real_path)` for a share path, to place the denied folders (see
+        `FolderPolicy.real_denied_locations`); without it, any denial refuses.
+        `denied` is that placement already worked out by `denied_locations`; given
+        (even empty, which means nothing is denied), nothing is looked up.
         """
         root = self._policy.root_for(self.alias, canonical)
         if root is None:
@@ -217,3 +312,9 @@ class FolderGuard:
         real = canonicalize(real_path)
         if not _within(real, canonicalize(root_real)) or self._policy.is_denied(real):
             raise AuthorizationDenied(_DENIED)
+        folded = real.casefold()
+        if denied is None:
+            denied = self._policy.real_denied_locations(self.alias, lookup)
+        for location in denied:
+            if _within(folded, location.casefold()):
+                raise AuthorizationDenied(_DENIED)

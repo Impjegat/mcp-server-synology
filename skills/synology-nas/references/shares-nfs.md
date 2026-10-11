@@ -12,6 +12,8 @@
 
 All accept `nas_name` / `base_url`.
 
+**Manual authentication:** `synology_nfs_list_shares` lists only the shares the client's folders reach. A share that merely holds one of those folders is named and nothing more, and every other share is absent, so a share missing from the list is not proof that it does not exist.
+
 **Restricted mode** (the default) offers only `synology_nfs_status` and `synology_nfs_list_shares`. `synology_create_share`, `synology_nfs_enable` and `synology_nfs_set_permission` are hidden until the user sets `RESTRICTED_MODE=false`.
 
 ## Shares vs. directories — the distinction

@@ -2,6 +2,7 @@
 
 import contextvars
 import json
+import logging
 import os
 import posixpath
 import re
@@ -17,6 +18,8 @@ from broker.errors import AuthenticationRequired, AuthorizationDenied
 from broker.file_policy import FolderGuard
 from utils.redact import redact
 from utils.synology_api import raise_if_authentication_required, recover_session, refuse_redirect
+
+logger = logging.getLogger(__name__)
 
 # Paths no path-taking method below may touch, read or write. See
 # _check_critical_path.
@@ -410,18 +413,35 @@ class SynologyFileStation:
         """List contents of a directory."""
         formatted_path = self._format_path(path)
         self._check_critical_path(formatted_path)
-        self._verify_location(formatted_path)
+        # Worked out once, here, for the folder and for every child below.
+        denied = self._denied_locations()
+        self._verify_location(formatted_path, denied)
 
         params: Dict[str, Any] = {"folder_path": formatted_path}
 
-        if additional_info:
+        additional_fields = ["time", "size", "owner", "perm"] if additional_info else []
+        if self.folder_guard is not None:
+            # Ask where each child really lives, so it can be judged below.
+            additional_fields.append("real_path")
+        if additional_fields:
             # DSM 7.3.2 silently drops the comma-string form; expects a JSON array.
             # Verified live: comma-string → no `additional` field in response;
             # JSON array → returns time/size/owner/perm as documented.
-            params["additional"] = json.dumps(["time", "size", "owner", "perm"])
+            params["additional"] = json.dumps(additional_fields)
 
         data = self._make_request("SYNO.FileStation.List", "2", "list", **params)
         files = data.get("files", [])
+        if self.folder_guard is not None:
+            # The folder asked for was checked above, but its children are not
+            # necessarily the client's: a denied name, a denied folder, a link
+            # leading out of the root or into a denied folder. Each is judged like
+            # a search hit, and one that cannot be shown to be allowed is omitted,
+            # with its metadata.
+            shown = [entry for entry in files if self._entry_allowed(entry, denied)]
+            if len(shown) != len(files):
+                # A count and nothing else: no name or path reaches the log.
+                logger.debug("A listing left out %d entries", len(files) - len(shown))
+            files = shown
 
         result = []
         for file_info in files:
@@ -555,7 +575,9 @@ class SynologyFileStation:
         """
         formatted_path = self._format_path(path)
         self._check_critical_path(formatted_path)
-        self._verify_location(formatted_path)
+        # Worked out once, here, for the folder and for every hit below.
+        denied = self._denied_locations()
+        self._verify_location(formatted_path, denied)
 
         # A wall-clock deadline, not a tally of time spent sleeping: each
         # request can itself take time a sleep counter never sees.
@@ -608,7 +630,7 @@ class SynologyFileStation:
                     f"{_RESULTS_TIMEOUT} seconds"
                 ) from None
 
-            files = [f for f in result_data.get("files", []) if self._entry_allowed(f)]
+            files = [f for f in result_data.get("files", []) if self._entry_allowed(f, denied)]
             return [
                 {
                     "name": file_info.get("name"),
@@ -985,11 +1007,24 @@ class SynologyFileStation:
         exist or DSM doesn't say."""
         return self._lookup_real_path(formatted_path)[1]
 
-    def _verify_location(self, formatted_path: str) -> None:
+    def _denied_locations(self) -> Optional[Tuple[str, ...]]:
+        """Where the administrator's denied folders really are, worked out once for
+        an operation that judges many entries (a listing, a search). A denied
+        folder that does not exist is placed by walking up to its nearest existing
+        parent, one request a level, and that answer is deliberately not
+        remembered between requests; so it must not be worked out again for every
+        entry. None without a folder policy."""
+        guard = self.folder_guard
+        return None if guard is None else guard.denied_locations(self._lookup_real_path)
+
+    def _verify_location(
+        self, formatted_path: str, denied: Optional[Tuple[str, ...]] = None
+    ) -> None:
         """Broker mode: refuse unless `formatted_path` really lies inside an
-        allowed root once symbolic links are resolved. For a path that does not
-        exist yet (something about to be created) the nearest existing parent
-        is judged instead. A no-op without a folder policy."""
+        allowed root once symbolic links are resolved, and not inside a denied
+        folder. For a path that does not exist yet (something about to be created)
+        the nearest existing parent is judged instead. A no-op without a folder
+        policy. `denied` is `_denied_locations()` when the caller already has it."""
         guard = self.folder_guard
         if guard is None:
             return
@@ -1003,14 +1038,27 @@ class SynologyFileStation:
             if found or parent in (probe, "/"):
                 break
             probe = parent
-        guard.verify_real(guard.check(probe), real, self._resolve_real_path)
+        guard.verify_real(
+            guard.check(probe),
+            real,
+            self._resolve_real_path,
+            self._lookup_real_path,
+            denied=denied,
+        )
 
-    def _entry_allowed(self, entry: Dict[str, Any]) -> bool:
-        """Whether a result entry (from a search) may be shown: inside an
-        allowed root both by name and by where DSM says it really is."""
+    def _entry_allowed(
+        self, entry: Dict[str, Any], denied: Optional[Tuple[str, ...]] = None
+    ) -> bool:
+        """Whether a result entry (from a search or a listing) may be shown: inside
+        an allowed root both by name and by where DSM says it really is, and not in
+        a denied folder either way. What cannot be shown to be allowed is omitted.
+        `denied` is `_denied_locations()`, which a caller judging many entries
+        works out once rather than once per entry."""
         guard = self.folder_guard
         if guard is None:
             return True
+        if not isinstance(entry, dict):
+            return False
         path = entry.get("path")
         if not path or not guard.allows(path):
             return False
@@ -1019,6 +1067,8 @@ class SynologyFileStation:
                 guard.check(path),
                 (entry.get("additional") or {}).get("real_path"),
                 self._resolve_real_path,
+                self._lookup_real_path,
+                denied=denied,
             )
         except AuthorizationDenied:
             return False

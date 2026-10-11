@@ -1643,7 +1643,44 @@ class SynologyMCPServer:
         base_url = self._get_base_url(arguments)
         nfs = self._get_nfs(base_url)
         result = getattr(nfs, method_name)()
+        if method_name == "list_shares":
+            # Share discovery names every share on the NAS and who may mount it.
+            # With a folder policy, a client sees only the shares its folders reach.
+            guard = self._folder_guard(base_url)
+            if guard is not None:
+                result = self._scope_nfs_shares(result, guard)
         return self._dsm_result(result)
+
+    @staticmethod
+    def _scope_nfs_shares(result: Any, guard: FolderGuard) -> Any:
+        """`result`, an NFS share discovery answer, limited to what `guard` allows.
+
+        A share inside an allowed folder is returned as DSM gave it. A share that
+        merely holds an allowed sub-folder is named and nothing more: its NFS
+        rules say who may mount all of it, which is not the client's to know. Every
+        other share, and any entry that cannot be judged, is left out, and `total`
+        counts what is returned. A failure from the NAS carries no share data and
+        is returned as it is; an answer whose shape is not understood is refused
+        rather than passed on unfiltered."""
+        if not isinstance(result, dict):
+            raise AuthorizationDenied()
+        if result.get("success") is False:
+            return result
+        data = result.get("data")
+        shares = data.get("shares") if isinstance(data, dict) else None
+        if not isinstance(shares, list):
+            raise AuthorizationDenied()
+        kept: list = []
+        for share in shares:
+            name = share.get("name") if isinstance(share, dict) else None
+            if not isinstance(name, str) or not name or "/" in name:
+                continue
+            path = "/" + name
+            if guard.share_in_scope(path):
+                kept.append(share)
+            elif guard.share_visible(path):
+                kept.append({"name": name})
+        return {**result, "data": {**data, "shares": kept, "total": len(kept)}}
 
     async def _handle_nfs_enable(self, arguments: dict) -> list[types.TextContent]:
         """Handle enabling/disabling NFS service."""
