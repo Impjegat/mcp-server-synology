@@ -366,17 +366,29 @@ class TestDeniedFoldersInThePhysicalNamespace:
         self._verify(policy, "/docs/a.txt", "/volume1/docs/a.txt", lookup)  # recovers at once
         assert asked == ["/docs/private", "/docs/private"]
 
-    def test_the_denied_locations_are_asked_for_once_and_remembered_briefly(self):
+    def test_a_denied_folder_is_never_remembered_between_requests(self):
+        """Unlike an allowed root, which the administrator writes, a denied folder may
+        sit in a share other people change: it can be replaced by a link, or moved,
+        at any moment. So it is asked about on every request, however long the
+        policy lets a root's answer live."""
         clock = FakeClock()
-        policy = self._denying(clock=clock, real_root_ttl=60)
+        policy = self._denying(clock=clock, real_root_ttl=300)
         lookup = self._dsm({"/docs/private": "/volume1/docs/private"})
         for _ in range(3):
             self._verify(policy, "/docs/a.txt", "/volume1/docs/a.txt", lookup)
-        assert lookup.asked == ["/docs/private"]
+        assert lookup.asked == ["/docs/private"] * 3
 
-        clock.advance(61)
-        self._verify(policy, "/docs/a.txt", "/volume1/docs/a.txt", lookup)
-        assert lookup.asked == ["/docs/private", "/docs/private"]
+    def test_a_denied_folder_replaced_by_a_link_is_seen_at_the_very_next_request(self):
+        policy = self._denying(real_root_ttl=300)
+        places = {"/docs/private": "/volume1/docs/private"}
+        lookup = self._dsm(places)
+        self._verify(policy, "/docs/x", "/volume1/docs/vault/x", lookup)  # nothing denied there
+
+        places["/docs/private"] = "/volume1/docs/vault"  # `private` now leads into the vault
+        with pytest.raises(AuthorizationDenied):
+            self._verify(policy, "/docs/x", "/volume1/docs/vault/x", lookup)
+        # and its old place is no longer what is denied
+        self._verify(policy, "/docs/y", "/volume1/docs/private/y", lookup)
 
     def test_a_folder_that_was_missing_is_asked_about_again_every_time(self):
         """Not remembered: it may be created, or replaced by a link, a moment later."""
@@ -568,6 +580,28 @@ class TestALinkIntoADeniedFolder:
         ]
         hits = guarded_station.search_files("/docs", "*.txt")
         assert [h["name"] for h in hits] == ["readme.txt"]
+
+    def test_an_entry_judged_on_its_own_still_places_the_denied_folders(self, guarded_station):
+        """A caller that has not worked the denied folders out first (a listing or a
+        search always has) gets the same answer, not a refusal of everything."""
+        good = _child("readme.txt", "/volume1/docs/readme.txt")
+        into_denied = _child("shortcut", "/volume1/docs/private", isdir=True)
+        assert guarded_station._entry_allowed(good) is True
+        assert guarded_station._entry_allowed(into_denied) is False
+
+    def test_a_denied_folder_replaced_by_a_link_is_seen_on_the_very_next_request(
+        self, guarded_station
+    ):
+        """No window in which a swap goes unnoticed: `/docs/vault` is fine until the
+        denied `/docs/private` is replaced by a link into it, and refused at once."""
+        fake = guarded_station.fake
+        fake.real_paths["/docs/vault"] = "/volume1/docs/vault"
+        fake.real_paths["/docs/vault/x.txt"] = "/volume1/docs/vault/x.txt"
+        assert guarded_station.get_file_info("/docs/vault/x.txt")["path"] == "/docs/vault/x.txt"
+
+        fake.real_paths["/docs/private"] = "/volume1/docs/vault"
+        with pytest.raises(AuthorizationDenied):
+            guarded_station.get_file_info("/docs/vault/x.txt")
 
     def test_the_denied_folder_itself_is_refused_directly_as_before(self, guarded_station):
         for path in ("/docs/private", "/docs/private/secret.txt"):

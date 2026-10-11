@@ -101,7 +101,6 @@ class FolderPolicy:
         self._clock = clock
         self._real_root_ttl = real_root_ttl
         self._real_roots: Dict[Tuple[str, str], Tuple[float, str]] = {}
-        self._real_denials: Dict[Tuple[str, str], Tuple[float, str]] = {}
         self._real_lock = threading.Lock()
 
     def aliases(self) -> Tuple[str, ...]:
@@ -189,26 +188,30 @@ class FolderPolicy:
         would be is not a way in once it exists. A folder that exists but whose
         location DSM will not name, or any denial when there is no `lookup` at all,
         refuses everything: a target cannot be shown to be outside what cannot be
-        located. A failed lookup raises, and is never remembered."""
+        located. A failed lookup raises. Nothing is remembered between requests (see
+        `_real_denied`), so `alias` only says whose denials these are."""
         if not self._deny_paths:
             return ()
         if lookup is None:
             raise AuthorizationDenied(_DENIED)
         locations = []
         for entry in self._deny_paths:
-            real = self._real_denied(alias, entry, lookup)
+            real = self._real_denied(entry, lookup)
             if real is not None:
                 locations.append(real)
         return tuple(locations)
 
+    @staticmethod
     def _real_denied(
-        self, alias: str, entry: str, lookup: Callable[[str], Tuple[bool, Optional[str]]]
+        entry: str, lookup: Callable[[str], Tuple[bool, Optional[str]]]
     ) -> Optional[str]:
-        key = (alias, entry)
-        with self._real_lock:
-            cached = self._real_denials.get(key)
-            if cached is not None and self._clock() - cached[0] < self._real_root_ttl:
-                return cached[1]
+        # Never remembered, whether the folder exists or not. An allowed root is
+        # written by the administrator and its answer can safely live for a while;
+        # a denied folder may sit in a share other people change, and a swap (the
+        # folder replaced by a link, or moved) must be seen by the very next
+        # request, not after a timer. A listing or a search works it out once for
+        # all its entries, so what this costs is a request per denied folder per
+        # call, not per entry.
         probe, tail = entry, []
         for _ in range(16):
             found, real = lookup(probe)
@@ -217,12 +220,6 @@ class FolderPolicy:
                     raise AuthorizationDenied(_DENIED)
                 location = canonicalize(real)
                 if not tail:
-                    # The folder itself exists, and this is DSM's answer for it.
-                    # Remembered briefly, like a root; an answer that was only
-                    # derived from a parent is not, because the folder may be
-                    # created, or replaced by a link, a moment later.
-                    with self._real_lock:
-                        self._real_denials[key] = (self._clock(), location)
                     return location
                 return posixpath.join(location, *reversed(tail))
             parent = posixpath.dirname(probe)
