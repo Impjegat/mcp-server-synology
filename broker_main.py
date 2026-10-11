@@ -22,9 +22,11 @@ plans/2026-10-06-manual-authentication/PLAN.md §3.1.
 """
 
 import argparse
+import datetime
 import ipaddress
 import os
 import sys
+import time
 
 DEFAULT_POLICY = os.path.join("~", ".config", "synology-mcp", "broker-policy.json")
 
@@ -92,6 +94,9 @@ def new_token() -> int:
     print(f"  {token}")
     print('Put only this digest in the policy file, under the client\'s "token_sha256":')
     print(f"  {digest}")
+    ends = datetime.date.today() + datetime.timedelta(days=365)
+    print('A grant also says when it ends, at most a year ahead, under the client\'s "expires":')
+    print(f'  "expires": "{ends.isoformat()}"')
     return 0
 
 
@@ -245,6 +250,10 @@ def serve(args: argparse.Namespace) -> int:
     except PolicyError as error:
         print(f"Policy error: {error}", file=sys.stderr)
         return 2
+    # A grant that has ended is refused, and one about to end is worth a word now
+    # rather than a client's first refusal. These name the client, never its token.
+    for note in policy.grant_warnings(time.time()):
+        logger.warning(note)
 
     allowed_hosts = list(args.allowed_host) or [f"127.0.0.1:{args.port}", f"localhost:{args.port}"]
     sessions = SessionManager(policy.session)

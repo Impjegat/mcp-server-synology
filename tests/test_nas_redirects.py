@@ -14,15 +14,17 @@ nothing here opens a socket.
 """
 
 import ast
-import io
 import json
 import re
 from pathlib import Path
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import urlsplit
 
 import pytest
 import requests
 import requests.adapters
+
+from tests.network_support import api_and_method as _api_and_method
+from tests.network_support import make_response as _response
 
 NAS_URL = "https://nas.example.test:5001"
 NAS_HOST = "nas.example.test"
@@ -33,32 +35,6 @@ SESSION_ID = "Dummy-Sid-7f3a"
 SYNO_TOKEN = "Dummy-SynoToken-1c8e"
 
 SRC = Path(__file__).resolve().parent.parent / "src"
-
-
-def _response(request, status, *, headers=None, body=b""):
-    response = requests.Response()
-    response.status_code = status
-    response.headers.update(headers or {})
-    response._content = body
-    response._content_consumed = True
-    response.url = request.url
-    response.request = request
-    response.raw = io.BytesIO(body)
-    return response
-
-
-def _api_and_method(request):
-    """The DSM `api` and `method` of a request, from its query, its form body or
-    its multipart body."""
-    fields = parse_qs(urlsplit(request.url).query)
-    body = request.body
-    text = body.decode("utf-8", "replace") if isinstance(body, bytes) else (body or "")
-    if 'name="api"' in text:
-        api = re.search(r'name="api"\r\n\r\n([^\r]*)', text)
-        method = re.search(r'name="method"\r\n\r\n([^\r]*)', text)
-        return (api.group(1) if api else "", method.group(1) if method else "")
-    fields.update(parse_qs(text))
-    return (fields.get("api", [""])[0], fields.get("method", [""])[0])
 
 
 class FakeNetwork:

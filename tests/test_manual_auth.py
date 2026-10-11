@@ -602,11 +602,14 @@ class TestLostSessionBecomesAuthenticationRequired:
             "filestation.synology_filestation.requests.post", return_value=_lost(119)
         ) as post:
             with patch("utils.synology_api._try_relogin", return_value=("SID2", "T2")) as relogin:
-                with pytest.raises(Exception, match="API error: 119"):
+                with pytest.raises(Exception, match="run it again"):
                     fs._make_request("SYNO.FileStation.Delete", "2", "start", use_post=True)
 
+        # Never repeated. The session is renewed, as it is for a read, so that the
+        # caller's own retry works, and the caller is told that is what happened.
         assert post.call_count == 1
-        relogin.assert_not_called()
+        relogin.assert_called_once()
+        assert fs.session_id == "SID2"
 
     def test_legacy_file_station_gives_up_after_one_renewal(self, monkeypatch):
         import utils.synology_api as api

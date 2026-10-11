@@ -1,6 +1,7 @@
 """The broker policy: strict parsing, hashed tokens, and a default tool set that
 cannot widen by accident. Everything uses dummy values."""
 
+import datetime
 import json
 
 import pytest
@@ -15,6 +16,7 @@ from broker.policy import (
     load_policy,
     parse_policy,
 )
+from tests.broker_support import future_expiry
 
 DIGEST = hash_token("token-one")
 OTHER_DIGEST = hash_token("token-two")
@@ -33,7 +35,7 @@ def _parse(document, known_tools):
 
 
 def _minimal(**client):
-    entry = {"token_sha256": DIGEST, "nas": ["nas1"], **client}
+    entry = {"token_sha256": DIGEST, "nas": ["nas1"], "expires": future_expiry(), **client}
     return {"clients": {"alice": entry}}
 
 
@@ -109,25 +111,23 @@ class TestParsing:
             _parse(document, known_tools)
 
     def test_a_client_name_must_be_plain(self, known_tools):
-        document = {"clients": {"bad name!": {"token_sha256": DIGEST, "nas": ["nas1"]}}}
+        entry = {"token_sha256": DIGEST, "nas": ["nas1"], "expires": future_expiry()}
+        document = {"clients": {"bad name!": entry}}
         with pytest.raises(PolicyError, match="invalid client name"):
             _parse(document, known_tools)
 
     @pytest.mark.parametrize("digest", ["short", "G" * 64, DIGEST.upper(), "x" * 80, None, 5])
     def test_a_token_digest_must_be_lowercase_sha256_hex(self, known_tools, digest):
-        document = {"clients": {"alice": {"token_sha256": digest, "nas": ["nas1"]}}}
+        entry = {"token_sha256": digest, "nas": ["nas1"], "expires": future_expiry()}
+        document = {"clients": {"alice": entry}}
         with pytest.raises(PolicyError, match="token_sha256") as error:
             _parse(document, known_tools)
         if isinstance(digest, str):
             assert digest not in str(error.value)
 
     def test_two_clients_cannot_share_a_token(self, known_tools):
-        document = {
-            "clients": {
-                "alice": {"token_sha256": DIGEST, "nas": ["nas1"]},
-                "bob": {"token_sha256": DIGEST, "nas": ["nas1"]},
-            }
-        }
+        entry = {"token_sha256": DIGEST, "nas": ["nas1"], "expires": future_expiry()}
+        document = {"clients": {"alice": dict(entry), "bob": dict(entry)}}
         with pytest.raises(PolicyError, match="already used by 'alice'"):
             _parse(document, known_tools)
 
@@ -140,6 +140,204 @@ class TestParsing:
         with pytest.raises(PolicyError, match="never belongs in this file") as error:
             _parse(document, known_tools)
         assert value not in str(error.value)
+
+
+NOW = datetime.datetime(2026, 10, 11, 12, 0, tzinfo=datetime.timezone.utc).timestamp()
+DAY = 86400
+
+
+def _at(days=0.0, seconds=0):
+    """An ISO datetime with a time zone, `days` after NOW."""
+    moment = datetime.datetime.fromtimestamp(NOW + days * DAY + seconds, datetime.timezone.utc)
+    return moment.isoformat()
+
+
+def _graded(known_tools, expires, now=NOW):
+    return parse_policy(_minimal(expires=expires), known_nas=NAS, known_tools=known_tools, now=now)
+
+
+class TestGrantExpiry:
+    """A client token is a grant that can call the broker's tools. It must say when
+    it ends, and the broker must stop honouring it then (implementation review
+    R12). Session deadlines are a different thing: they end a DSM session."""
+
+    def test_r12_a_grant_without_an_expiry_is_refused(self, known_tools):
+        document = _minimal()
+        del document["clients"]["alice"]["expires"]
+        with pytest.raises(PolicyError, match=r"clients\.alice\.expires: required"):
+            parse_policy(document, known_nas=NAS, known_tools=known_tools, now=NOW)
+
+    def test_the_message_says_how_to_fix_it(self, known_tools):
+        document = _minimal()
+        del document["clients"]["alice"]["expires"]
+        with pytest.raises(PolicyError) as error:
+            parse_policy(document, known_nas=NAS, known_tools=known_tools, now=NOW)
+        assert "at most a year" in str(error.value) and "2027-" in str(error.value)
+
+    def test_a_date_lasts_through_the_whole_of_that_day_in_utc(self, known_tools):
+        client = _graded(known_tools, "2027-06-30").clients["alice"]
+        start_of_next_day = datetime.datetime(2027, 7, 1, tzinfo=datetime.timezone.utc).timestamp()
+        assert client.expires_at == start_of_next_day
+
+    @pytest.mark.parametrize(
+        "text,expected",
+        [
+            ("2027-06-30T12:00:00Z", (2027, 6, 30, 12, 0)),
+            ("2027-06-30T12:00:00+00:00", (2027, 6, 30, 12, 0)),
+            ("2027-06-30T12:00:00+02:00", (2027, 6, 30, 10, 0)),
+            ("2027-06-30T12:00:00-05:00", (2027, 6, 30, 17, 0)),
+        ],
+    )
+    def test_a_datetime_with_a_time_zone_is_that_moment(self, known_tools, text, expected):
+        want = datetime.datetime(*expected, tzinfo=datetime.timezone.utc).timestamp()
+        assert _graded(known_tools, text).clients["alice"].expires_at == want
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "tomorrow",
+            "",
+            "2027-13-40",
+            "30/06/2027",
+            "2027-06-30T12:00:00",  # no time zone: ambiguous
+            "2027-06-30 12:00:00",
+            5,
+            1.5,
+            True,
+            None,
+            ["2027-06-30"],
+            {"date": "2027-06-30"},
+            "Dummy-Secret-Value-123",
+        ],
+    )
+    def test_r12_an_expiry_that_is_not_a_date_is_refused_without_being_echoed(
+        self, known_tools, value
+    ):
+        document = _minimal(expires=value)
+        with pytest.raises(PolicyError, match=r"clients\.alice\.expires") as error:
+            parse_policy(document, known_nas=NAS, known_tools=known_tools, now=NOW)
+        if isinstance(value, str) and value:
+            assert value not in str(error.value)
+
+    def test_r12_a_year_ahead_is_the_limit(self, known_tools):
+        assert _graded(known_tools, _at(days=366)).clients["alice"].expires_at == NOW + 366 * DAY
+        with pytest.raises(PolicyError, match="more than a year"):
+            _graded(known_tools, _at(days=366, seconds=1))
+        with pytest.raises(PolicyError, match="more than a year"):
+            _graded(known_tools, "2030-01-01")
+
+    def test_the_limit_is_judged_from_the_time_the_policy_is_loaded(self, known_tools):
+        later = NOW + 100 * DAY
+        _graded(known_tools, _at(days=450), now=later)  # 350 days from `later`
+        with pytest.raises(PolicyError, match="more than a year"):
+            _graded(known_tools, _at(days=450), now=NOW)
+
+    def test_a_grant_that_has_already_ended_does_not_stop_the_broker_loading(self, known_tools):
+        policy = _graded(known_tools, _at(days=-3))
+        assert policy.clients["alice"].expires_at < NOW
+
+    def test_every_client_needs_its_own_expiry(self, known_tools):
+        document = {
+            "clients": {
+                "alice": {"token_sha256": DIGEST, "nas": ["nas1"], "expires": _at(days=30)},
+                "bob": {"token_sha256": OTHER_DIGEST, "nas": ["nas1"]},
+            }
+        }
+        with pytest.raises(PolicyError, match=r"clients\.bob\.expires: required"):
+            parse_policy(document, known_nas=NAS, known_tools=known_tools, now=NOW)
+
+    # -- what the broker says at start-up ------------------------------------
+
+    def test_an_ended_grant_is_named_in_the_start_up_warnings(self, known_tools):
+        warnings = _graded(known_tools, _at(days=-3)).grant_warnings(NOW)
+        assert len(warnings) == 1
+        assert "alice" in warnings[0] and "ended" in warnings[0]
+
+    def test_a_grant_that_ends_soon_is_named_in_the_start_up_warnings(self, known_tools):
+        warnings = _graded(known_tools, _at(days=13)).grant_warnings(NOW)
+        assert len(warnings) == 1
+        assert "alice" in warnings[0] and "13" in warnings[0]
+
+    def test_a_grant_with_time_left_gives_no_warning(self, known_tools):
+        assert _graded(known_tools, _at(days=15)).grant_warnings(NOW) == []
+
+    def test_the_two_week_and_the_ended_boundaries(self, known_tools):
+        """Fourteen days out is the first day worth a word; a grant ending at this
+        very moment has ended, as the verifier (which refuses at that moment) agrees."""
+        assert "ends in 14 day(s)" in _graded(known_tools, _at(days=14)).grant_warnings(NOW)[0]
+        assert _graded(known_tools, _at(days=14, seconds=1)).grant_warnings(NOW) == []
+        now_exactly = _graded(known_tools, _at(days=0)).grant_warnings(NOW)
+        assert len(now_exactly) == 1 and "ended on" in now_exactly[0]
+
+    def test_the_warnings_name_the_client_and_never_the_token_or_its_digest(self, known_tools):
+        for days in (-3, 5):
+            for line in _graded(known_tools, _at(days=days)).grant_warnings(NOW):
+                assert DIGEST not in line and "token-one" not in line
+
+    # -- the verifier --------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_r12_a_grant_works_until_it_ends_and_not_after(self, known_tools):
+        policy = _graded(known_tools, _at(days=10))
+        now = [NOW]
+        verifier = PolicyTokenVerifier(policy, clock=lambda: now[0])
+
+        access = await verifier.verify_token("token-one")
+        assert access is not None and access.client_id == "alice"
+        assert access.expires_at == int(NOW + 10 * DAY)
+
+        now[0] = NOW + 10 * DAY - 1
+        assert await verifier.verify_token("token-one") is not None
+        now[0] = NOW + 10 * DAY  # the moment it ends
+        assert await verifier.verify_token("token-one") is None
+        now[0] = NOW + 11 * DAY
+        assert await verifier.verify_token("token-one") is None
+
+    @pytest.mark.asyncio
+    async def test_r12_a_grant_that_had_ended_before_the_broker_started_is_refused(
+        self, known_tools
+    ):
+        policy = _graded(known_tools, _at(days=-1))
+        verifier = PolicyTokenVerifier(policy, clock=lambda: NOW)
+        assert await verifier.verify_token("token-one") is None
+
+    @pytest.mark.asyncio
+    async def test_an_ended_grant_does_not_end_anyone_elses(self, known_tools):
+        document = {
+            "clients": {
+                "alice": {
+                    "token_sha256": hash_token("token-one"),
+                    "nas": ["nas1"],
+                    "expires": _at(days=-1),
+                },
+                "bob": {
+                    "token_sha256": hash_token("token-two"),
+                    "nas": ["nas1"],
+                    "expires": _at(days=30),
+                },
+            }
+        }
+        policy = parse_policy(document, known_nas=NAS, known_tools=known_tools, now=NOW)
+        verifier = PolicyTokenVerifier(policy, clock=lambda: NOW)
+        assert await verifier.verify_token("token-one") is None
+        assert (await verifier.verify_token("token-two")).client_id == "bob"
+
+    @pytest.mark.asyncio
+    async def test_a_grant_with_no_expiry_at_all_is_refused_rather_than_trusted(self):
+        """Only the policy parser makes grants, and it requires one; but a verifier
+        handed a client without one fails closed."""
+        from broker.policy import ClientPolicy, Policy
+
+        client = ClientPolicy("alice", hash_token("token-one"), frozenset({"nas1"}), DEFAULT_TOOLS)
+        verifier = PolicyTokenVerifier(Policy(clients={"alice": client}), clock=lambda: NOW)
+        assert await verifier.verify_token("token-one") is None
+
+    @pytest.mark.asyncio
+    async def test_the_rest_of_the_answer_is_unchanged(self, known_tools):
+        policy = _graded(known_tools, _at(days=10))
+        access = await PolicyTokenVerifier(policy, clock=lambda: NOW).verify_token("token-one")
+        assert access.scopes == [] and access.token.startswith("sha256:")
+        assert "token-one" not in access.token
 
 
 class TestDefaultScope:
@@ -214,8 +412,16 @@ class TestTokens:
         policy = _parse(
             {
                 "clients": {
-                    "alice": {"token_sha256": hash_token("token-one"), "nas": ["nas1"]},
-                    "bob": {"token_sha256": hash_token("token-two"), "nas": ["nas2"]},
+                    "alice": {
+                        "token_sha256": hash_token("token-one"),
+                        "nas": ["nas1"],
+                        "expires": future_expiry(),
+                    },
+                    "bob": {
+                        "token_sha256": hash_token("token-two"),
+                        "nas": ["nas2"],
+                        "expires": future_expiry(),
+                    },
                 }
             },
             known_tools,
@@ -228,7 +434,9 @@ class TestTokens:
         assert (alice.client_id, bob.client_id) == ("alice", "bob")
         assert "token-one" not in alice.token
         assert alice.token.startswith("sha256:")
-        assert alice.scopes == [] and alice.expires_at is None
+        assert alice.scopes == []
+        # The moment the grant ends, so the SDK's own bearer check refuses it then too.
+        assert isinstance(alice.expires_at, int) and alice.expires_at > 0
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("token", ["wrong", "", "token-one ", "TOKEN-ONE", DIGEST])

@@ -1,6 +1,7 @@
 """Helpers for building a broker in tests: a fake clock, a fake remote logout and
 a policy written from plain dictionaries. Nothing here touches a network."""
 
+import datetime
 import posixpath
 import sys
 import threading
@@ -10,6 +11,12 @@ BASE_URLS = {
     "nas1": "https://nas1.example.test:5001",
     "nas2": "https://nas2.example.test:5001",
 }
+
+
+def future_expiry(days: int = 200) -> str:
+    """A client grant's `expires` (an ISO date) comfortably inside the one-year
+    limit, whenever the tests happen to run."""
+    return (datetime.date.today() + datetime.timedelta(days=days)).isoformat()
 
 
 class FakeClock:
@@ -63,7 +70,11 @@ class Broker:
             entry = dict(entry)
             token = entry.pop("token", f"token-for-{name}")
             self.tokens[name] = token
-            policy_clients[name] = {"token_sha256": hash_token(token), **entry}
+            policy_clients[name] = {
+                "token_sha256": hash_token(token),
+                "expires": future_expiry(),
+                **entry,
+            }
         document: Dict[str, Any] = {"clients": policy_clients}
         if session:
             document["session"] = session

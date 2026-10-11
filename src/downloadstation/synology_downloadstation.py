@@ -6,17 +6,49 @@ from typing import Any, Dict, List, Optional
 
 import requests
 
-from broker.errors import AuthenticationRequired, RedirectRefused
+from broker.errors import AuthenticationRequired, RedirectRefused, SessionRenewedNotRepeated
 from broker.file_policy import FolderGuard
 from utils.redact import redact
-from utils.synology_api import raise_if_authentication_required, recover_session, refuse_redirect
+from utils.synology_api import (
+    raise_if_authentication_required,
+    raise_unless_read_only,
+    recover_session,
+    refuse_redirect,
+)
 
 logger = logging.getLogger(__name__)
 
 # Errors that must reach the caller as they are. The fallbacks below turn an
-# ordinary failure into a default answer; these two say something a default
-# would hide: the session is gone, or the NAS tried to send the request on.
-_PASS_THROUGH = (AuthenticationRequired, RedirectRefused)
+# ordinary failure into a default answer; these say something a default would
+# hide: the session is gone, the NAS tried to send the request on, or a lost
+# session was renewed but the change that found it lost was not repeated.
+_PASS_THROUGH = (AuthenticationRequired, RedirectRefused, SessionRenewedNotRepeated)
+
+# DSM's answers that say the API, the method or the version asked for is not
+# there (102, 103, 104). The NAS did nothing in answer to a request it could not
+# understand, so asking again in an older form cannot do anything twice. Any other
+# answer is not a reason to ask again.
+_UNSUPPORTED_CODES = frozenset({"102", "103", "104"})
+
+_UNCERTAIN = (
+    "It is unclear whether the download was created; check the task list before trying again."
+)
+
+
+class DownloadStationAPIError(Exception):
+    """DSM answered a request, and said no. `code` is its error code, as text.
+    The message is what it has always been."""
+
+    def __init__(self, code: Any, message: str):
+        super().__init__(message)
+        self.code = str(code)
+
+
+class DownloadStationNetworkError(Exception):
+    """A request may or may not have reached the NAS: a timeout, a lost connection,
+    an HTTP error from something in between, or an answer that was cut off or is not
+    DSM's. Nobody knows whether the NAS acted, so nothing that creates may be sent
+    again on the strength of one."""
 
 
 class SynologyDownloadStation:
@@ -95,7 +127,13 @@ class SynologyDownloadStation:
         A lost session (DSM 106/107/119) is handled by `utils.synology_api`:
         manual mode raises `AuthenticationRequired`; legacy mode renews the
         session from its cached login once and repeats a read (`_retry` stops it
-        looping). The one write (`create`) is never repeated.
+        looping). A change (a create, a delete, a pause, a resume) is never
+        repeated: it raises `SessionRenewedNotRepeated` with the session already
+        renewed.
+
+        A failure is a `DownloadStationAPIError` when DSM answered (with its code),
+        and a `DownloadStationNetworkError` when it is not known whether the
+        request arrived.
         """
         request_params = {
             "api": api,
@@ -147,13 +185,18 @@ class SynologyDownloadStation:
             if not data.get("success"):
                 error_code = data.get("error", {}).get("code", "unknown")
                 raise_if_authentication_required(error_code)
-                if _retry and method != "create":
+                if _retry:
                     recovered = recover_session(self.base_url, self.session_id, error_code)
                     if recovered:
                         self.session_id, self.syno_token = recovered
+                        # A read is asked again; a change stops here, with the
+                        # session already renewed for the caller's next try.
+                        raise_unless_read_only(method)
                         return self._make_request(api, version, method, _retry=False, **params)
                 error_msg = self._get_error_message(error_code)
-                raise Exception(f"Download Station API error {error_code}: {error_msg}")
+                raise DownloadStationAPIError(
+                    error_code, f"Download Station API error {error_code}: {error_msg}"
+                )
 
             return data.get("data", {})
 
@@ -162,7 +205,7 @@ class SynologyDownloadStation:
             # `_sid=<session_id>` on every GET call — redact before it
             # propagates to a caller. Backstop; the tool-response boundary
             # in mcp_server.py also redacts.
-            raise Exception(self._redact(f"Network error: {e}"))
+            raise DownloadStationNetworkError(self._redact(f"Network error: {e}"))
 
     def _redact(self, message: str) -> str:
         """Redact this instance's live secrets from an error message."""
@@ -239,18 +282,26 @@ class SynologyDownloadStation:
             data = self._make_request(self.task_api, self.task_version, "list", **params)
         except _PASS_THROUGH:
             raise
-        except Exception as e:
-            # If version 2 fails, try version 1
-            if "doesn't exist" in str(e) or "102" in str(e) or "104" in str(e):
-                logger.warning(f"{self.task_api} v{self.task_version} failed, trying v1")
-                try:
-                    basic_params = {"offset": offset, "limit": params["limit"]}
-                    data = self._make_request(self.task_api, "1", "list", **basic_params)
-                except Exception as e2:
-                    logger.warning(f"No task APIs available: {e2}")
-                    return {"total": 0, "offset": offset, "tasks": []}
-            else:
+        except DownloadStationAPIError as e:
+            # Only DSM saying the API, method or version is not there is a reason
+            # to try the older form. This used to be a search of the error text for
+            # "102" or "104", so a network error naming an address such as
+            # 10.0.0.102 started one.
+            if e.code not in _UNSUPPORTED_CODES:
                 raise
+            logger.warning(f"{self.task_api} v{self.task_version} failed, trying v1")
+            try:
+                basic_params = {"offset": offset, "limit": params["limit"]}
+                data = self._make_request(self.task_api, "1", "list", **basic_params)
+            except _PASS_THROUGH:
+                # Not "no task API here": there is no session, or the NAS redirected.
+                raise
+            except DownloadStationAPIError as e2:
+                if e2.code not in _UNSUPPORTED_CODES:
+                    raise
+                # Neither form exists on this NAS, so there is no task list to show.
+                logger.warning(f"No task APIs available: {e2}")
+                return {"total": 0, "offset": offset, "tasks": []}
 
         tasks = []
         for task in data.get("tasks", []):
@@ -393,32 +444,58 @@ class SynologyDownloadStation:
 
         except _PASS_THROUGH:
             raise
-        except Exception as e:
+        except DownloadStationNetworkError as e:
+            # The request may have reached the NAS and been acted on. Asking again,
+            # in this form or an older one, could create the download twice.
             logger.warning(self._redact(f"Create task failed: {e}"))
-
-            # Fallback: Try with version 1 if version 2 failed
-            if self.task_version != "1":
-                try:
-                    logger.info("Trying with DownloadStation2.Task v1")
-                    fallback_params = {"uri": uri, "destination": destination}
-                    if username:
-                        fallback_params["username"] = username
-                    if password:
-                        fallback_params["password"] = password
-
-                    data = self._make_request(self.task_api, "1", "create", **fallback_params)
-                    logger.info("Create successful with v1")
-                    return data
-                except Exception as e2:
-                    logger.warning(self._redact(f"v1 also failed: {e2}"))
-
-            # Enhanced error message
+            raise Exception(self._redact(f"Task creation failed: {e}. {_UNCERTAIN}"))
+        except DownloadStationAPIError as e:
+            logger.warning(self._redact(f"Create task failed: {e}"))
+            # Only an answer that says the API, method or version is not there is a
+            # reason to ask again in an older form: the NAS did nothing in answer to
+            # a request it could not understand. Any other refusal is final.
+            if e.code in _UNSUPPORTED_CODES and self.task_version != "1":
+                return self._create_task_older_form(uri, destination, username, password, e)
             raise Exception(
                 self._redact(
                     f"Task creation failed: {e}. Make sure the URL is valid and you have "
                     "permission to create downloads."
                 )
             )
+
+    def _create_task_older_form(
+        self,
+        uri: str,
+        destination: str,
+        username: Optional[str],
+        password: Optional[str],
+        first: Exception,
+    ) -> Dict[str, Any]:
+        """The one repeat of a create: in the older form, after DSM said the newer one
+        is not supported. It is never repeated again, whatever happens to it."""
+        logger.info("Trying with DownloadStation2.Task v1")
+        fallback_params = {"uri": uri, "destination": destination}
+        if username:
+            fallback_params["username"] = username
+        if password:
+            fallback_params["password"] = password
+        try:
+            data = self._make_request(self.task_api, "1", "create", **fallback_params)
+        except _PASS_THROUGH:
+            raise
+        except DownloadStationNetworkError as e:
+            logger.warning(self._redact(f"v1 also failed: {e}"))
+            raise Exception(self._redact(f"Task creation failed: {e}. {_UNCERTAIN}"))
+        except Exception as e:
+            logger.warning(self._redact(f"v1 also failed: {e}"))
+            raise Exception(
+                self._redact(
+                    f"Task creation failed: {first}; the older form failed too: {e}. "
+                    "Make sure the URL is valid and you have permission to create downloads."
+                )
+            )
+        logger.info("Create successful with v1")
+        return data
 
     def delete_tasks(self, task_ids: List[str], force_complete: bool = False) -> Dict[str, Any]:
         """Delete download tasks."""
@@ -463,6 +540,10 @@ class SynologyDownloadStation:
                     "speed_upload": total_up_speed,
                     "note": "Calculated from active tasks",
                 }
+            except _PASS_THROUGH:
+                # Zeroes are an answer about the NAS; a lost session or a redirect is
+                # not, and must not be reported as "no downloads running".
+                raise
             except Exception:
                 return {"speed_download": 0, "speed_upload": 0, "error": "Statistics not available"}
 

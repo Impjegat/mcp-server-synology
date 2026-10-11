@@ -6,6 +6,7 @@ environment that asks for legacy mode. It must come up in broker mode anyway,
 read neither, and answer an MCP client over real HTTP.
 """
 
+import datetime
 import json
 import os
 import re
@@ -22,6 +23,7 @@ from mcp.client.streamable_http import streamable_http_client
 
 import broker_main
 from broker.policy import hash_token
+from tests.broker_support import future_expiry
 
 ROOT = Path(__file__).resolve().parent.parent
 TOKEN = "smoke-token-value"
@@ -56,9 +58,13 @@ class TestNewToken:
         lines = [
             line.strip() for line in capsys.readouterr().out.splitlines() if line.startswith("  ")
         ]
-        token, digest = lines
+        token, digest, expires = lines
         assert digest == hash_token(token)
         assert len(token) >= 40
+        # A grant also needs an end date, so the command suggests a real one: a date
+        # the policy parser would accept, about a year ahead and not past the limit.
+        suggested = datetime.date.fromisoformat(json.loads("{" + expires + "}")["expires"])
+        assert 360 <= (suggested - datetime.date.today()).days <= 366
 
     def test_each_token_is_different(self, capsys):
         broker_main.main(["new-token"])
@@ -189,7 +195,7 @@ def _stop(process):
 def _policy_document(nas="default"):
     return {
         "clients": {
-            "smoke": {"token_sha256": hash_token(TOKEN), "nas": [nas]},
+            "smoke": {"token_sha256": hash_token(TOKEN), "nas": [nas], "expires": future_expiry()},
         }
     }
 
@@ -238,6 +244,48 @@ class TestRealStart:
         assert (refused.status_code, wrong.status_code) == (401, 401)
         # Neither the .env password nor a client token reached the log.
         assert DUMMY_PASSWORD not in output and TOKEN not in output
+
+    @pytest.mark.asyncio
+    async def test_a_grant_that_has_ended_is_named_at_start_up_and_refused_while_others_work(
+        self, tmp_path
+    ):
+        """Implementation review R12, against a real broker process."""
+        ended_token = "ended-client-token-0123456789abcdefghij0123456789"
+        yesterday = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=1)
+        soon = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=5)
+        document = _policy_document()
+        document["clients"]["ended"] = {
+            "token_sha256": hash_token(ended_token),
+            "nas": ["default"],
+            "expires": yesterday.isoformat(),
+        }
+        document["clients"]["soon"] = {
+            "token_sha256": hash_token("soon-client-token-0123456789abcdefghij012345"),
+            "nas": ["default"],
+            "expires": soon.isoformat(),
+        }
+        policy = _write_policy(tmp_path, document)
+        port = _free_port()
+        process = _start(tmp_path, policy, port, SYNOLOGY_URL="https://nas.example.test:5001")
+        try:
+            _wait_until_up(process, port)
+            url = f"http://127.0.0.1:{port}/mcp"
+            ended = httpx2.post(
+                url, json={}, headers={"Authorization": f"Bearer {ended_token}"}, timeout=5
+            )
+            live = httpx2.post(
+                url, json={}, headers={"Authorization": f"Bearer {TOKEN}"}, timeout=5
+            )
+        finally:
+            output = _stop(process)
+
+        assert ended.status_code == 401
+        assert live.status_code != 401  # the token is good; the empty body is what it objects to
+        assert "client 'ended' ended on" in output
+        assert "client 'soon' ends in 5 day(s)" in output
+        assert "client 'smoke'" not in output  # nothing to say about a grant with time left
+        for secret in (ended_token, hash_token(ended_token), TOKEN):
+            assert secret not in output
 
     def test_it_stops_on_a_policy_that_names_an_unknown_nas(self, tmp_path):
         policy = _write_policy(tmp_path, _policy_document(nas="elsewhere"))

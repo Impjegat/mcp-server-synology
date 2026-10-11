@@ -583,6 +583,7 @@ The docker-compose.yml automatically mounts your `~/.config/synology-mcp` direct
 - Default is `true` for convenience with settings.json
 - Credentials are stored securely in `~/.config/synology-mcp/settings.json` with 0600 permissions
 - If you prefer manual login, set `AUTO_LOGIN=false` and use the `synology_login` tool
+- When DSM says a session has expired, the legacy server logs in again with the stored credentials. A request that only **reads** is then repeated once; a request that **changes** something (a rename, a delete or move, a new folder, creating, pausing or resuming a download) is never repeated automatically, whatever HTTP verb it uses. It fails with "the session has been renewed; run it again if it is still wanted", and the next call works. After a timeout or a lost connection while creating a download, it is unknown whether the NAS created it, so it is not created again: the error says to check the task list. (Manual authentication never renews a session by itself.)
 
 **2FA / OTP Accounts (optional):**
 
