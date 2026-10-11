@@ -40,6 +40,19 @@ This roadmap splits that work into PRs. Each PR gets its own plan folder here, a
 | 5 | `tool-catalog-and-titles` | Tool catalog, titles, generated `docs/TOOL_CATALOG.md` | §9 |
 | 6 | `packaging-deploy-docs` | Docker targets, deploy template, config examples, docs, CI | §7.3 |
 
+## Remediation of the implementation review
+
+[`IMPLEMENTATION_REVIEW_2026-10-11.md`](IMPLEMENTATION_REVIEW_2026-10-11.md) found twelve problems in PRs 1 to 6 once they had merged, and says the new setup is not to be approved for a replacement NAS password until the applicable ones are fixed. The review is kept exactly as written; this table is where progress is tracked. Each finding was checked against the code before work began, and each fix starts from a test that reproduces the reviewer's check and fails on the unfixed code.
+
+| Fix PR | Folder | Findings | Status |
+|---|---|---|---|
+| 1 | [`2026-10-11-fix-nas-transport`](../2026-10-11-fix-nas-transport/PLAN.md) | R03 redirects forward credentials, R04 certificate verification can be disabled, R08 private login ignores the server-level CA | Fixed in this branch, awaiting review |
+| 2 | `fix-private-login` | R01 enrollment bypass, R05 cancelled login still installs a session | Open |
+| 3 | `fix-folder-policy` | R02 denied folder reachable through a link, R06 directory children unfiltered, R07 NFS discovery unscoped | Open |
+| 4 | `fix-grants-and-service-errors` | R12 client grants have no expiry, R09 download creation replayed, R10 expiry hidden by fallbacks, R11 legacy replay by HTTP verb | Open |
+
+R12 was decided with the owner: grant expiry is **required**, at most a year ahead.
+
 ## Done by the user (not by code)
 
 Choose and prove the host (§11 phase 1), deploy the broker and enroll the passkey, cut over the three clients, rotate the password and revoke old sessions, and enroll OTP (§8). The assistant must not see the new password or OTP.

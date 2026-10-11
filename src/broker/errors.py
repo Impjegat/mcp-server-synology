@@ -18,11 +18,19 @@ SESSION_LOST_CODES = frozenset({106, 107, 119})
 
 AUTHENTICATION_REQUIRED = "AUTHENTICATION_REQUIRED"
 AUTHORIZATION_DENIED = "AUTHORIZATION_DENIED"
+REDIRECT_REFUSED = "REDIRECT_REFUSED"
 
 _AUTHENTICATION_REQUIRED_MESSAGE = (
     f"{AUTHENTICATION_REQUIRED}: this NAS has no active session. Ask the user to sign in "
     "through the private login page. Never ask for, or accept, the NAS password or a "
     "verification code in chat or in a tool call."
+)
+
+# Fixed on purpose: where the NAS tried to send the request is not repeated, so
+# nothing it controls can reach a log line or a tool result.
+_REDIRECT_REFUSED_MESSAGE = (
+    "The NAS answered with a redirect, so nothing more was sent. Check the NAS address "
+    "and port in the broker's settings."
 )
 
 
@@ -51,3 +59,14 @@ class AuthorizationDenied(Exception):  # noqa: N818
 
     def __init__(self, message: Optional[str] = None):
         super().__init__(message or f"{AUTHORIZATION_DENIED}: this operation is not permitted.")
+
+
+class RedirectRefused(Exception):  # noqa: N818
+    """The NAS answered a request with a redirect. Following it would send the
+    request's body (a password and code, for a login) and its session headers to
+    whatever address the answer names, so the request ends here."""
+
+    code = REDIRECT_REFUSED
+
+    def __init__(self, message: Optional[str] = None):
+        super().__init__(message or _REDIRECT_REFUSED_MESSAGE)

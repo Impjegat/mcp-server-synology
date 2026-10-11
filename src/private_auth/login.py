@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, Optional
 
+from broker.errors import RedirectRefused
 from broker.runtime import BrokerRuntime
 from broker.sessions import PendingLogin
 from private_auth.security import RateLimiter
@@ -30,8 +31,15 @@ DEFAULT_DEADLINE_SECONDS = 25.0
 
 # Outcomes that show the NAS did not get a wrong credential, so they do not count
 # towards the attempt limit: asking for a code, an unreachable NAS, a certificate
-# we refused before sending anything.
-_NOT_COUNTED = {"403", "certificate_error", "connection_timeout", "connection_error", "timeout"}
+# we refused before sending anything, a redirect we refused to follow.
+_NOT_COUNTED = {
+    "403",
+    "certificate_error",
+    "connection_timeout",
+    "connection_error",
+    "timeout",
+    "redirect_refused",
+}
 
 _MESSAGES = {
     "400": "The NAS did not accept that account or password.",
@@ -45,6 +53,7 @@ _MESSAGES = {
     "409": "The account's password has expired. Change it in DSM first.",
     "410": "The account's password must be changed in DSM first.",
     "certificate_error": "The NAS's certificate could not be verified, so nothing was sent.",
+    "redirect_refused": str(RedirectRefused()),
     "connection_timeout": "The NAS could not be reached in time.",
     "connection_error": "The NAS could not be reached.",
     "timeout": "The NAS did not answer in time.",

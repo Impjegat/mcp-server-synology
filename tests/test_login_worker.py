@@ -74,10 +74,20 @@ class TestValidate:
             {"otp": 123456},
             {"verify_ssl": 5},
             {"verify_ssl": None},
+            # Disabled verification, in every shape that would switch it off.
+            {"verify_ssl": False},
+            {"verify_ssl": ""},
+            {"verify_ssl": "   "},
         ],
     )
     def test_a_bad_request_is_refused(self, change):
         assert validate(_payload(**change)) is None
+
+    def test_r04_a_request_that_leaves_verification_out_defaults_to_verifying(self):
+        """A request cannot reach DSM unverified by omission."""
+        payload = _payload()
+        del payload["verify_ssl"]
+        assert validate(payload)["verify_ssl"] is True
 
     @pytest.mark.parametrize("payload", [None, [], "text", 5])
     def test_a_request_that_is_not_an_object_is_refused(self, payload):
@@ -135,6 +145,17 @@ class TestRun:
             "ok": False,
             "code": "invalid_request",
         }
+        assert auth.calls == []
+
+    @pytest.mark.parametrize("verify", [False, "", "  "])
+    def test_r04_unverified_tls_never_reaches_dsm(self, verify):
+        """Not even the object that would make the request is built."""
+        auth = FakeAuth({"success": True, "data": {"sid": "S"}})
+        assert run(_payload(verify_ssl=verify), auth_factory=auth) == {
+            "ok": False,
+            "code": "invalid_request",
+        }
+        assert not hasattr(auth, "created")
         assert auth.calls == []
 
 

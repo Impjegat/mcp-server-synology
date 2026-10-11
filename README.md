@@ -576,6 +576,7 @@ The docker-compose.yml automatically mounts your `~/.config/synology-mcp` direct
 - **Prefer a CA bundle path instead of disabling verification**: if your NAS uses a self-signed certificate or a private/internal CA, set `VERIFY_SSL` to that CA's bundle file path (e.g. `VERIFY_SSL=/etc/ssl/certs/my-ca.pem`, or `"verify_ssl": "/etc/ssl/certs/my-ca.pem"` under `"server"` in `settings.json`) instead of `false` — this keeps verification on while trusting your specific CA. `REQUESTS_CA_BUNDLE` also works as a global override for the whole process.
 - On Windows, `requests` uses its own bundled CA store rather than the OS trust store, so a private CA must be supplied explicitly via one of the options above — adding it to Windows' certificate store alone is not enough.
 - Never disable SSL verification on untrusted networks
+- **Manual authentication never accepts `false`.** With `SYNOLOGY_AUTH_MODE=broker` the broker refuses to start when `VERIFY_SSL` / `server.verify_ssl` is `false`, empty or the path of a CA bundle that does not exist, because the NAS password and one-time code travel over that connection. It also refuses to follow a redirect from the NAS (every NAS request, in either mode, is sent without following redirects)
 - Note this is separate from the HTTPS-only transport requirement above — HTTPS is always required; `VERIFY_SSL` only controls whether the server's certificate is validated
 
 **Auto-Login (AUTO_LOGIN):**

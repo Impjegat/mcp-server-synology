@@ -187,6 +187,7 @@ class TestMessages:
             ("407", "blocked this address"),
             ("408", "password has expired"),
             ("certificate_error", "certificate could not be verified"),
+            ("redirect_refused", "answered with a redirect"),
             ("connection_timeout", "could not be reached"),
             ("connection_error", "could not be reached"),
             ("timeout", "did not answer in time"),
@@ -251,7 +252,15 @@ class TestAttemptLimit:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
-        "code", ["403", "certificate_error", "connection_error", "connection_timeout", "timeout"]
+        "code",
+        [
+            "403",
+            "certificate_error",
+            "connection_error",
+            "connection_timeout",
+            "timeout",
+            "redirect_refused",
+        ],
     )
     async def test_failures_that_did_not_burn_a_nas_attempt_are_not_counted(self, broker, code):
         service, runner = _service(broker, fail(code))

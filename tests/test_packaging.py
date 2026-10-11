@@ -567,6 +567,24 @@ class TestTheBrokerComposeTemplate:
             assert not re.search(r"(password|otp|token|secret|device|credential)", name, re.I), name
         assert environment["XDG_CONFIG_HOME"] == "/config"
 
+    def test_the_nas_certificate_is_verified_by_default_and_false_is_said_to_be_refused(self):
+        """Manual authentication refuses `false` (review R04); the template and the
+        documents beside it must not suggest otherwise."""
+        from config import _broker_tls_problem
+
+        environment = self._service()["environment"]
+        default = re.search(r"\$\{NAS_VERIFY_SSL:-([^}]*)\}", environment["VERIFY_SSL"]).group(1)
+        assert default == "true"
+        assert _broker_tls_problem(True) is None
+        assert _broker_tls_problem(False) is not None
+
+        compose = _read(COMPOSE)
+        assert "`false` is refused" in compose
+        assert "refused" in _read("deploy/broker/broker.env.example")
+        assert "refuses to start with `false`" in _read("docs/MANUAL_AUTHENTICATION.md")
+        # No line offers the three values as equals any more.
+        assert "`true`, `false`, or" not in compose
+
     def test_it_asks_for_tls_a_policy_and_the_private_login_with_flags_that_exist(self):
         command = self._service()["command"]
         assert command[0] == "serve"

@@ -8,8 +8,10 @@ from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Tupl
 
 import requests
 
-from config import config
+from broker.errors import RedirectRefused
+from config import ManualAuthConfigError, config
 from utils.redact import redact
+from utils.synology_api import refuse_redirect
 
 logger = logging.getLogger(__name__)
 
@@ -150,6 +152,16 @@ class SynologyAuth:
         self.manual_mode: bool = (
             config.auth_mode == "broker" if manual_mode is None else manual_mode
         )
+        if self.manual_mode and not (
+            verify_ssl is True or (isinstance(verify_ssl, str) and verify_ssl.strip())
+        ):
+            # The password and one-time code travel over this connection (and a
+            # session id over every later one): it must be verified. An empty
+            # string would also switch verification off, so it is refused too.
+            raise ManualAuthConfigError(
+                "Manual authentication requires a verified connection to the NAS: "
+                "verify_ssl must be true or the path of a CA bundle."
+            )
         self.current_session_id: Optional[str] = None
         # Mirrors what login_with_session uses by default; overwritten on every login.
         self.current_session_type: str = "webui"
@@ -277,9 +289,18 @@ class SynologyAuth:
                 # intermediate proxy's log, and in `requests`' own exception
                 # text if the request fails. `SYNO.API.Auth` accepts POST
                 # for `login` the same way it does for every other method.
+                #
+                # No redirects: the body is the password and the one-time
+                # code, and a followed redirect would send both to whatever
+                # address the answer names.
                 response = requests.post(
-                    login_url, data=payload, verify=self.verify_ssl, timeout=_AUTH_TIMEOUT
+                    login_url,
+                    data=payload,
+                    verify=self.verify_ssl,
+                    timeout=_AUTH_TIMEOUT,
+                    allow_redirects=False,
                 )
+                refuse_redirect(response)
                 response.raise_for_status()
                 result = response.json()
 
@@ -318,6 +339,11 @@ class SynologyAuth:
                     # exception, below) is worth retrying.
                     if error_code in _AUTH_OUTCOME_ERROR_CODES:
                         return result
+            except RedirectRefused as e:
+                # The address answers with a redirect whatever the API
+                # version, so another version would only meet it again.
+                last_exception = e
+                break
             except requests.exceptions.SSLError as e:
                 # A certificate problem is about the connection itself, not
                 # the API version being tried — every version would hit the
@@ -352,6 +378,11 @@ class SynologyAuth:
                 last_exception = e
                 continue
 
+        if isinstance(last_exception, RedirectRefused):
+            return {
+                "success": False,
+                "error": {"code": "redirect_refused", "message": str(last_exception)},
+            }
         if isinstance(last_exception, requests.exceptions.SSLError):
             return {
                 "success": False,
@@ -540,8 +571,13 @@ class SynologyAuth:
                 # string, visible in DSM's own access log and any
                 # intermediate proxy's log.
                 response = requests.post(
-                    logout_url, data=payload, verify=self.verify_ssl, timeout=_AUTH_TIMEOUT
+                    logout_url,
+                    data=payload,
+                    verify=self.verify_ssl,
+                    timeout=_AUTH_TIMEOUT,
+                    allow_redirects=False,
                 )
+                refuse_redirect(response)
                 response.raise_for_status()
                 result = response.json()
 
@@ -568,6 +604,13 @@ class SynologyAuth:
                     if error_code in [105, 106]:  # Invalid session or not logged in
                         break
 
+            except RedirectRefused as e:
+                # Every version goes to the same address; stop at the first.
+                last_error = {
+                    "success": False,
+                    "error": {"code": "redirect_refused", "message": str(e)},
+                }
+                break
             except requests.RequestException as e:
                 # `str(e)` on a RequestException can still embed request
                 # details (e.g. the resolved host on a connection failure);
