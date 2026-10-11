@@ -10,7 +10,8 @@
 # its own, and nothing about who a caller is lives in an MCP session id. (An
 # MCP transport session id is not a DSM session id and never leads to one.)
 
-from typing import Any, Optional, Sequence
+import time
+from typing import Any, Callable, Optional, Sequence
 
 import mcp.types as types
 from mcp.server import Server, ServerRequestContext
@@ -73,10 +74,12 @@ def create_broker_app(
     allowed_hosts: Sequence[str],
     allowed_origins: Sequence[str] = (),
     ready: Any = lambda: True,
+    clock: Callable[[], float] = time.time,
 ) -> Starlette:
     """The ASGI app. `allowed_hosts` and `allowed_origins` are required, not
     defaulted: DNS-rebinding protection is on, and only the names listed here
-    may be used to reach the broker."""
+    may be used to reach the broker. `clock` is what a client's grant expiry is
+    judged against, on every request."""
     if not allowed_hosts:
         raise ValueError("allowed_hosts must name how clients reach the broker")
 
@@ -109,7 +112,8 @@ def create_broker_app(
         ],
         middleware=[
             Middleware(
-                AuthenticationMiddleware, backend=BearerAuthBackend(PolicyTokenVerifier(policy))
+                AuthenticationMiddleware,
+                backend=BearerAuthBackend(PolicyTokenVerifier(policy, clock=clock)),
             ),
             Middleware(AuthContextMiddleware),
         ],

@@ -121,6 +121,82 @@ class TestWhoMayConnect:
             create_broker_app(broker.runtime, broker.policy, allowed_hosts=[])
 
 
+class TestAGrantThatEnds:
+    """A client token is honoured only until its grant ends, checked on every
+    request, so a grant that ends while a session is open is refused from then on
+    (implementation review R12)."""
+
+    @staticmethod
+    def _clock():
+        import time
+
+        now = [time.time()]
+        return now, lambda: now[0]
+
+    @pytest.mark.asyncio
+    async def test_r12_the_token_stops_working_the_moment_its_grant_ends(self, broker):
+        now, clock = self._clock()
+        ends = broker.policy.clients["alice"].expires_at
+        headers = {"Authorization": "Bearer alice-token-value"}
+        async with _running(_app(broker, clock=clock)) as transport:
+            async with httpx2.AsyncClient(
+                transport=transport, base_url=ORIGIN, headers=headers
+            ) as http:
+                before = await http.post("/mcp", json={})
+                now[0] = ends - 1
+                just_before = await http.post("/mcp", json={})
+                now[0] = ends
+                at_the_end = await http.post("/mcp", json={})
+                now[0] = ends + 86400
+                after = await http.post("/mcp", json={})
+
+        # Before it ends the token is accepted (the empty body is what is refused).
+        assert before.status_code != 401 and just_before.status_code != 401
+        assert at_the_end.status_code == 401 and after.status_code == 401
+        assert at_the_end.headers["www-authenticate"].startswith("Bearer")
+        assert "alice-token-value" not in at_the_end.text
+
+    @pytest.mark.asyncio
+    async def test_r12_a_session_that_is_open_when_the_grant_ends_is_refused_next(self, broker):
+        now, clock = self._clock()
+        async with _single(_app(broker, clock=clock), "alice-token-value") as session:
+            assert "list_shares" in {t.name for t in (await session.list_tools()).tools}
+            now[0] = broker.policy.clients["alice"].expires_at  # ends while it is open
+            with pytest.raises(Exception):
+                await session.list_tools()
+
+    @pytest.mark.asyncio
+    async def test_one_clients_grant_ending_does_not_end_anothers(self, broker):
+        now, clock = self._clock()
+        policy = broker.policy
+        now[0] = policy.clients["alice"].expires_at  # alice's has ended; bob's is the same date
+        async with _running(_app(broker, clock=clock)) as transport:
+            async with httpx2.AsyncClient(transport=transport, base_url=ORIGIN) as http:
+                alice = await http.post(
+                    "/mcp", json={}, headers={"Authorization": "Bearer alice-token-value"}
+                )
+        assert alice.status_code == 401
+
+    @pytest.mark.asyncio
+    async def test_the_default_clock_is_the_real_one(self, broker):
+        """With no clock given, a grant that really has ended is refused."""
+        import dataclasses
+        import time
+
+        from broker.policy import Policy
+
+        ended = dataclasses.replace(broker.policy.clients["alice"], expires_at=time.time() - 5)
+        policy = Policy(clients={"alice": ended}, session=broker.policy.session)
+        async with _running(
+            create_broker_app(broker.runtime, policy, allowed_hosts=["testserver"])
+        ) as transport:
+            async with httpx2.AsyncClient(transport=transport, base_url=ORIGIN) as http:
+                response = await http.post(
+                    "/mcp", json={}, headers={"Authorization": "Bearer alice-token-value"}
+                )
+        assert response.status_code == 401
+
+
 class TestHealthEndpoints:
     @pytest.mark.asyncio
     async def test_they_need_no_token_and_say_nothing_about_the_nas_or_sessions(self, broker):

@@ -20,6 +20,7 @@ from mcp.client import Client
 import tool_catalog
 from adapter.server import looks_like_credential
 from broker.policy import DEFAULT_TOOLS, NEVER_TOOLS, parse_policy
+from tests.broker_support import future_expiry
 from tool_catalog import CATALOG, CATEGORIES, NO_SIGN_IN_NEEDED, render_current, render_markdown
 
 DOC = Path(__file__).resolve().parent.parent / "docs" / "TOOL_CATALOG.md"
@@ -351,7 +352,11 @@ class TestTheDocumentIsCurrentAndTrue:
 
         # what a broker client with no `tools` entry is granted, from the policy parser
         policy = parse_policy(
-            {"clients": {"c": {"token_sha256": "a" * 64, "nas": ["nas1"]}}},
+            {
+                "clients": {
+                    "c": {"token_sha256": "a" * 64, "nas": ["nas1"], "expires": future_expiry()}
+                }
+            },
             known_nas={"nas1"},
             known_tools=set(CATALOG) - NEVER_TOOLS,
         )

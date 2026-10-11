@@ -10,6 +10,7 @@
   "clients": {
     "claude-code": {
       "token_sha256": "0000000000000000000000000000000000000000000000000000000000000001",
+      "expires": "2027-06-30",
       "nas": ["nas1"],
       "folders": {
         "nas1": ["/Shared/Documents", "/Shared/Photos"]
@@ -17,6 +18,7 @@
     },
     "claude-desktop": {
       "token_sha256": "0000000000000000000000000000000000000000000000000000000000000002",
+      "expires": "2027-06-30T12:00:00Z",
       "nas": ["nas1"],
       "tools": [
         "synology_status",

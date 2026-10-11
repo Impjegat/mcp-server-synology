@@ -14,6 +14,7 @@ The images themselves are built and run by tests/test_docker_images.py, which CI
 enables.
 """
 
+import datetime
 import json
 import os
 import re
@@ -654,15 +655,21 @@ class TestConfigurationExamples:
         import mcp_server
         from broker.policy import parse_policy
 
+        # Judged as of the day the example was written: its dates are fixed, so
+        # the test must not fail merely because time has passed.
+        written = datetime.datetime(2026, 10, 11, tzinfo=datetime.timezone.utc).timestamp()
         policy = parse_policy(
             _json("config/broker.example.json"),
             known_nas={"nas1"},
             known_tools=set(mcp_server.SynologyMCPServer()._tool_registry),
+            now=written,
         )
         assert len(policy.clients) == 2
         for client in policy.clients.values():
             # a digest no token can have: 63 leading zero hex digits
             assert client.token_sha256.startswith("0" * 63)
+            # every grant says when it ends, inside the one-year limit
+            assert written < client.expires_at <= written + 366 * 86400
         narrow = policy.clients["claude-desktop"]
         assert "list_shares" not in narrow.tools and "synology_health_summary" in narrow.tools
 
@@ -839,6 +846,17 @@ class TestDocuments:
             data = json.loads(block)
             if "broker_url" in data:
                 assert set(data) <= set(_KEYS), set(data) - set(_KEYS)
+
+    def test_the_guide_lists_every_client_setting_the_policy_parser_knows(self):
+        from broker.policy import _CLIENT_KEYS, _MAX_GRANT_SECONDS
+
+        guide = _read("docs/MANUAL_AUTHENTICATION.md")
+        for key in _CLIENT_KEYS:
+            assert f"`clients.<name>.{key}`" in guide, key
+        # "at most a year", and the section that says how to renew and revoke
+        assert _MAX_GRANT_SECONDS == 366 * 86400
+        assert "at most a year" in guide and "## Renewing or revoking a client" in guide
+        assert "[Renewing or revoking a client](#renewing-or-revoking-a-client)" in guide
 
     def test_the_guide_says_who_does_what_and_where_the_limits_are(self):
         guide = _read("docs/MANUAL_AUTHENTICATION.md")

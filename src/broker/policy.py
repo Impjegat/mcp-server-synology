@@ -11,15 +11,25 @@
 # token. A file that looks as if it contains a token, a password or anything
 # else unrecognised is rejected rather than half-read: a typo in a security
 # policy must fail closed.
+#
+# Each client's entry also says when its grant ends (`expires`, at most a year
+# ahead), and the broker stops honouring the token then. That is the lifetime
+# of the grant that may call the broker's tools. It is not a DSM session's
+# deadline, which is `session` below and which a renewal never extends: renewing
+# a grant means editing this file and restarting the broker, and a restart ends
+# every session, because they live only in memory.
 
+import datetime as _datetime
 import hashlib
 import hmac
 import json
+import math
 import re
 import secrets
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, FrozenSet, Iterable, List, Mapping, Optional, Tuple
+from typing import Any, Callable, Dict, FrozenSet, Iterable, List, Mapping, Optional, Tuple
 
 from mcp.server.auth.provider import AccessToken
 
@@ -90,7 +100,11 @@ _CLIENT_NAME = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 _DIGEST = re.compile(r"^[0-9a-f]{64}$")
 _ROOT_KEYS = {"clients", "session", "deny_paths"}
 _SESSION_KEYS = {"idle_seconds", "absolute_seconds", "pending_seconds"}
-_CLIENT_KEYS = {"token_sha256", "nas", "tools", "folders", "disconnect"}
+_CLIENT_KEYS = {"token_sha256", "nas", "tools", "folders", "disconnect", "expires"}
+# How far ahead a grant may end, and how soon before it ends the broker says so.
+_MAX_GRANT_SECONDS = 366 * 86400
+_WARN_SECONDS = 14 * 86400
+_DAY_ONLY = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 # Keys that suggest someone put a secret where a digest belongs.
 _SECRET_LOOKING = re.compile(r"(token|password|passwd|secret|otp|sid|cookie|session)", re.I)
 
@@ -113,6 +127,9 @@ class ClientPolicy:
     tools: FrozenSet[str]
     folders: Mapping[str, Tuple[str, ...]] = field(default_factory=dict)
     disconnect: bool = True
+    # When the grant ends, in epoch seconds (UTC). The policy parser always sets
+    # it; a grant without one is never honoured (`PolicyTokenVerifier`).
+    expires_at: Optional[float] = None
 
     def allowed_tools(self) -> FrozenSet[str]:
         """The tools this client may call, including disconnect if allowed."""
@@ -131,6 +148,30 @@ class Policy:
     def folder_policy_for(self, client: ClientPolicy) -> FolderPolicy:
         """The folder policy for one client: its roots plus the shared denials."""
         return FolderPolicy(dict(client.folders), deny=self.deny_paths)
+
+    def grant_warnings(self, now: float) -> List[str]:
+        """Start-up notes about grants that have ended or end within two weeks. They
+        name the client and the moment, never the token or its digest."""
+        notes = []
+        for client in self.clients.values():
+            if client.expires_at is None:
+                continue
+            left = client.expires_at - now
+            when = _datetime.datetime.fromtimestamp(
+                client.expires_at, _datetime.timezone.utc
+            ).strftime("%Y-%m-%d %H:%M UTC")
+            if left <= 0:
+                notes.append(
+                    f"The grant for client '{client.name}' ended on {when}: its token is "
+                    "refused until the policy carries a new expiry and the broker is restarted."
+                )
+            elif left <= _WARN_SECONDS:
+                days = math.ceil(left / 86400)
+                notes.append(
+                    f"The grant for client '{client.name}' ends in {days} day(s), on {when}: "
+                    "renew it in the policy before then."
+                )
+        return notes
 
 
 def _expect(condition: bool, message: str) -> None:
@@ -160,11 +201,67 @@ def _string_list(where: str, value: Any) -> List[str]:
     return list(value)
 
 
-def parse_policy(data: Any, *, known_nas: Iterable[str], known_tools: Iterable[str]) -> Policy:
+def _expiry_example(now: float) -> str:
+    """A date a good way inside the one-year limit, to show in a message."""
+    return (
+        _datetime.datetime.fromtimestamp(now + 300 * 86400, _datetime.timezone.utc)
+        .date()
+        .isoformat()
+    )
+
+
+def _parse_expiry(where: str, value: Any, now: float) -> float:
+    """When a client's grant ends, in epoch seconds (UTC).
+
+    A date (`2027-06-30`) lasts through the whole of that day in UTC; a datetime
+    must carry its time zone (`2027-06-30T12:00:00Z`), because one without is
+    ambiguous. The grant may end at most a year after `now`, the moment the
+    policy is loaded. A date already in the past is accepted (the client's token
+    is simply refused, and the start-up notes say so), so one forgotten renewal
+    does not stop the broker serving everyone else.
+
+    The messages never repeat what was written: a token pasted here by mistake
+    must not be echoed."""
+    hint = f'a date such as "{_expiry_example(now)}", or a datetime with a time zone'
+    if not isinstance(value, str) or not value.strip():
+        raise PolicyError(f"{where}.expires: must be {hint}")
+    text = value.strip()
+    try:
+        if _DAY_ONLY.match(text):
+            day = _datetime.date.fromisoformat(text)
+            ends = _datetime.datetime.combine(
+                day, _datetime.time(0), tzinfo=_datetime.timezone.utc
+            ) + _datetime.timedelta(days=1)
+        else:
+            ends = _datetime.datetime.fromisoformat(
+                text[:-1] + "+00:00" if text[-1] in "Zz" else text
+            )
+            if ends.tzinfo is None:
+                raise ValueError("no time zone")
+    except (ValueError, OverflowError):
+        raise PolicyError(f"{where}.expires: must be {hint}") from None
+    expires_at = ends.timestamp()
+    if expires_at > now + _MAX_GRANT_SECONDS:
+        raise PolicyError(
+            f"{where}.expires: is more than a year away; a grant may last at most a year, "
+            f"so pick {hint.split(', or')[0]} or sooner and renew it then"
+        )
+    return expires_at
+
+
+def parse_policy(
+    data: Any,
+    *,
+    known_nas: Iterable[str],
+    known_tools: Iterable[str],
+    now: Optional[float] = None,
+) -> Policy:
     """Validate and build a `Policy`. `known_nas` are the NAS aliases the broker
     has configured and `known_tools` the tools the server registers: a policy
     naming anything else is refused, so a misspelt alias or tool cannot quietly
-    grant or deny the wrong thing."""
+    grant or deny the wrong thing. `now` (epoch seconds, default the present) is
+    what each grant's `expires` is judged against."""
+    now = time.time() if now is None else now
     known_nas = set(known_nas)
     known_tools = set(known_tools)
     _expect(isinstance(data, dict), "the policy must be a JSON object")
@@ -250,6 +347,15 @@ def parse_policy(data: Any, *, known_nas: Iterable[str], known_tools: Iterable[s
         disconnect = entry.get("disconnect", True)
         _expect(isinstance(disconnect, bool), f"{where}.disconnect: must be true or false")
 
+        # Required, with no default: a grant that never ends is a decision to be
+        # made on purpose, not by leaving a line out.
+        if entry.get("expires") is None:
+            raise PolicyError(
+                f"{where}.expires: required. Say when this client's grant ends, at most a "
+                f'year ahead, as a date such as "{_expiry_example(now)}"'
+            )
+        expires_at = _parse_expiry(where, entry["expires"], now)
+
         clients[name] = ClientPolicy(
             name=name,
             token_sha256=digest,
@@ -257,6 +363,7 @@ def parse_policy(data: Any, *, known_nas: Iterable[str], known_tools: Iterable[s
             tools=frozenset(tools),
             folders=folders,
             disconnect=disconnect,
+            expires_at=expires_at,
         )
 
     policy = Policy(clients=clients, session=session, deny_paths=deny_paths)
@@ -270,8 +377,14 @@ def parse_policy(data: Any, *, known_nas: Iterable[str], known_tools: Iterable[s
     return policy
 
 
-def load_policy(path: Path, *, known_nas: Iterable[str], known_tools: Iterable[str]) -> Policy:
-    """Read and validate the policy file at `path`."""
+def load_policy(
+    path: Path,
+    *,
+    known_nas: Iterable[str],
+    known_tools: Iterable[str],
+    now: Optional[float] = None,
+) -> Policy:
+    """Read and validate the policy file at `path`. `now` is as for `parse_policy`."""
     try:
         data = json.loads(Path(path).read_text(encoding="utf-8"))
     except FileNotFoundError:
@@ -280,7 +393,7 @@ def load_policy(path: Path, *, known_nas: Iterable[str], known_tools: Iterable[s
         raise PolicyError(
             f"the policy file {path} cannot be read as JSON: {type(error).__name__}"
         ) from None
-    return parse_policy(data, known_nas=known_nas, known_tools=known_tools)
+    return parse_policy(data, known_nas=known_nas, known_tools=known_tools, now=now)
 
 
 def hash_token(token: str) -> str:
@@ -303,10 +416,16 @@ class PolicyTokenVerifier:
     was close. A token never leaves this method: the `AccessToken` it returns
     carries a short fingerprint in place of it, so it cannot reach a log line
     or a stored request.
+
+    A token is honoured only until its grant ends (`expires`, in the policy), and
+    never when the grant says nothing about it: the answer carries the moment it
+    ends, so the SDK's own bearer check refuses it then too. `clock` gives the
+    present in epoch seconds.
     """
 
-    def __init__(self, policy: Policy):
+    def __init__(self, policy: Policy, clock: Callable[[], float] = time.time):
         self._clients = tuple(policy.clients.values())
+        self._clock = clock
 
     async def verify_token(self, token: str) -> Optional[AccessToken]:
         digest = hash_token(token)
@@ -316,9 +435,14 @@ class PolicyTokenVerifier:
                 match = client
         if match is None:
             return None
+        # Judged after the comparison, which has visited every client, so how long
+        # a check takes does not say whether the digest matched an ended grant.
+        expires_at = match.expires_at
+        if expires_at is None or self._clock() >= expires_at:
+            return None
         return AccessToken(
             token=f"sha256:{digest[:12]}",
             client_id=match.name,
             scopes=[],
-            expires_at=None,
+            expires_at=int(expires_at),
         )

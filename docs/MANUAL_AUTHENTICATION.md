@@ -118,7 +118,7 @@ Make one token per application, so each can be revoked and scoped on its own:
 python broker_main.py new-token
 ```
 
-It prints the token, to hand to that application's adapter **once, over a private channel**, and its SHA-256 digest, which is all that goes in the broker's policy. The broker never stores a token.
+It prints the token, to hand to that application's adapter **once, over a private channel**, and its SHA-256 digest, which is all that goes in the broker's policy. The broker never stores a token. It also suggests an `expires` date a year ahead, because a token is a grant and every grant says when it ends (next step).
 
 ### 5. The policy
 
@@ -127,6 +127,7 @@ One file, read at start-up, never writable by the AI. See [`config/broker.exampl
 | Setting | Meaning |
 |---|---|
 | `clients.<name>.token_sha256` | The digest from step 4 |
+| `clients.<name>.expires` | **Required.** When this client's grant ends: a date (`2027-06-30`, good through the whole of that day, UTC) or a datetime with a time zone (`2027-06-30T12:00:00Z`), at most a year after the broker starts. From then its token is refused. See [Renewing or revoking a client](#renewing-or-revoking-a-client) |
 | `clients.<name>.nas` | The NAS units (names from `settings.json`) this client may use |
 | `clients.<name>.tools` | The tools it may call. Omit it for the default set: browsing, file reading and monitoring ([`TOOL_CATALOG.md`](TOOL_CATALOG.md), "On by default") |
 | `clients.<name>.folders` | Per NAS, the folders it may reach. Anything outside is refused, including through symbolic links. A folder listing or a search shows only what is inside, and the NFS share list only the shares these folders reach (a share that merely holds one of them appears by name alone, with none of its NFS rules) |
@@ -239,6 +240,16 @@ Restart the application. It should list the tools straight away, even before you
 
 **If you mistype.** Three wrong answers in five minutes lock that sign-in for ten, well inside what DSM's own auto-block tolerates, and a locked sign-in does not contact the NAS. Asking for a code, an unreachable NAS and a certificate problem do not count against you.
 
+## Renewing or revoking a client
+
+A client token is a grant to call the broker's tools, and a grant ends. This is separate from a NAS session, which ends on its own idle and absolute deadlines above; renewing a grant never extends a session.
+
+- **It ends by itself** at its `expires`, which is at most a year after the broker started. From then the token is refused: the broker answers 401 and the adapter reports `BROKER_UNAUTHORIZED`. It is checked on every request, so a grant that ends while a session is open is refused from the next call. At start-up the broker names, in its log, each grant that has ended or ends within two weeks (the client's name and the date, never the token).
+- **To renew**, change that client's `expires` in the policy file to a later date (at most a year ahead of the restart) and restart the broker. The token does not have to change. To rotate it as well, run `broker_main.py new-token`, replace the digest, and give the new token to that application's adapter.
+- **To revoke at once**, delete the client's entry (or replace its digest) and restart the broker.
+- **A restart ends every NAS session**, because they are held in memory only, so every client has to be signed in again afterwards. Plan renewals for when that does not matter.
+- **A year is the longest a grant can last**, so each client needs renewing at least yearly: three clients (Claude Code, Claude Desktop, Codex) means three dates. A grant that was forgotten is only that client's refusal; the broker still starts and serves the others.
+
 ## Turning on one-time codes (OTP)
 
 Enrolling a code changes your NAS account, so you do it yourself, privately, after the sign-in above works. The server can describe the steps but must never see the authenticator's seed or your recovery material.
@@ -279,7 +290,7 @@ What the AI reports, and what it means:
 | `BROKER_CERTIFICATE_ERROR` | The adapter does not trust the broker's certificate | Set `ca_file`, or fix the certificate's name |
 | `BROKER_TOKEN_MISSING` | No token was found | Check `token_file` or `token_env` |
 | `BROKER_TOKEN_INVALID` | The token is not shaped like one | It is too short, or has spaces or line breaks in it |
-| `BROKER_UNAUTHORIZED` | The broker does not accept this token | Is its digest in the policy? Was it rotated? |
+| `BROKER_UNAUTHORIZED` | The broker does not accept this token | Is its digest in the policy? Was it rotated? Has its grant ended (the broker's log names it at start-up)? |
 | `BROKER_REFUSED`, `BROKER_BUSY`, `BROKER_ERROR`, `BROKER_PROTOCOL_ERROR` | The broker refused, was busy, or answered unexpectedly | Look at the broker's log |
 
 Other things people hit:
