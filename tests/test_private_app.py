@@ -1185,3 +1185,79 @@ class TestChallengeRoutesAreThrottled:
             for _ in range(5):
                 await http.post("/auth/begin", headers=JSON_HEADERS, json={})
         assert len(calls) == 1
+
+
+def origin_a_browser_sends_with_a_same_origin_form_post(referrer_policy: str, origin: str) -> str:
+    """What `Origin` holds when a browser that follows the Fetch standard submits a
+    form (a navigation, not a CORS fetch) to the page's own origin over HTTPS.
+
+    The standard turns the header into the string "null" under a `no-referrer`
+    policy, and leaves it as the origin under every other policy here (a policy
+    that only withholds it on a downgrade or a cross-origin request has no effect
+    on a same-origin https post). Firefox does this; a script's `fetch()` is not
+    affected, because a CORS-mode request always carries its origin."""
+    return "null" if referrer_policy.strip().lower() == "no-referrer" else origin
+
+
+class TestAFormPostFromABrowserThatFollowsTheStandard:
+    """The sign-in page was refused in Firefox ("Forbidden") on every button: it
+    asked browsers to send no referrer, and Firefox then sends `Origin: null` with
+    each form post, which the Origin check rightly refuses. The passkey calls
+    worked, because they are fetches. These tests send the Origin a real browser
+    would send for the policy the page itself announces."""
+
+    @pytest.mark.asyncio
+    async def test_the_sign_in_button_works_with_the_origin_the_page_policy_produces(self, private):
+        async with private.client() as http:
+            await sign_in(http)
+            page = await http.get("/")
+            policy = page.headers["referrer-policy"]
+            origin = origin_a_browser_sends_with_a_same_origin_form_post(policy, ORIGIN)
+            response = await http.post(
+                "/pending/new",
+                headers={"Origin": origin},
+                data=form(csrf_of(page.text), client="alice", nas="nas1"),
+            )
+
+        assert response.status_code == 303, f"Origin {origin!r} under policy {policy!r}"
+        assert private.broker.sessions.pending("alice", "nas1") is not None
+
+    @pytest.mark.asyncio
+    async def test_the_password_form_works_too(self, private):
+        async with private.client() as http:
+            await sign_in(http)
+            location, _ = await start_pending(http)
+            page = await http.get(location)
+            policy = page.headers["referrer-policy"]
+            origin = origin_a_browser_sends_with_a_same_origin_form_post(policy, ORIGIN)
+            response = await http.post(
+                location,
+                headers={"Origin": origin},
+                data=form(csrf_of(page.text), password=PASSWORD),
+            )
+
+        assert response.status_code == 303, f"Origin {origin!r} under policy {policy!r}"
+
+    @pytest.mark.asyncio
+    async def test_a_null_origin_is_still_refused(self, private):
+        """The fix is in what the page asks of the browser, not in loosening the check:
+        a post whose Origin is "null" (a sandboxed frame, for one) is still refused."""
+        async with private.client() as http:
+            await sign_in(http)
+            page = await http.get("/")
+            response = await http.post(
+                "/pending/new",
+                headers={"Origin": "null"},
+                data=form(csrf_of(page.text), client="alice", nas="nas1"),
+            )
+
+        assert response.status_code == 403
+        assert private.broker.sessions.pending("alice", "nas1") is None
+
+    @pytest.mark.parametrize("policy", ["no-referrer", " No-Referrer "])
+    def test_the_rule_the_tests_rely_on_matches_the_standard(self, policy):
+        assert origin_a_browser_sends_with_a_same_origin_form_post(policy, ORIGIN) == "null"
+
+    @pytest.mark.parametrize("policy", ["same-origin", "strict-origin", "origin", "unsafe-url"])
+    def test_other_policies_keep_the_origin(self, policy):
+        assert origin_a_browser_sends_with_a_same_origin_form_post(policy, ORIGIN) == ORIGIN

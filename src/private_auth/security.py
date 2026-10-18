@@ -18,6 +18,12 @@ from typing import Callable, Deque, Dict, Iterable, Optional
 # Applied to every response from the private interface. Nothing on it loads
 # anything from another origin, and nothing on it should be cached, framed or
 # leak its address in a Referer.
+#
+# The referrer policy is `same-origin`, not `no-referrer`: nothing is sent to any
+# other origin either way, but under `no-referrer` a browser that follows the Fetch
+# standard (Firefox) puts `Origin: null` on every form post, and the Origin check
+# refuses it, so no button on the page worked. (A script's `fetch()` still carries
+# its origin, which is why the passkey calls were unaffected.)
 CONTENT_SECURITY_POLICY = (
     "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; "
     "connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"
@@ -29,7 +35,7 @@ SECURITY_HEADERS: Dict[str, str] = {
     "Content-Security-Policy": CONTENT_SECURITY_POLICY,
     "Cache-Control": "no-store",
     "Pragma": "no-cache",
-    "Referrer-Policy": "no-referrer",
+    "Referrer-Policy": "same-origin",
     "X-Content-Type-Options": "nosniff",
     "X-Frame-Options": "DENY",
     "Cross-Origin-Opener-Policy": "same-origin",
