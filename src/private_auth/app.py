@@ -64,7 +64,8 @@ _NOTICES = {
     ),
     "progress": (
         "A sign-in for this request is already in progress. This page updates by itself "
-        "and shows Connected when it finishes."
+        "and shows Connected when it finishes. If it does not connect, choose Continue "
+        "to try again."
     ),
     "withdrawn": (
         "That sign-in was cancelled or expired before it finished, so it was not used. "
