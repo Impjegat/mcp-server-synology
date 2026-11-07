@@ -883,11 +883,45 @@ class TestWithdrawnWhileSigningIn:
             runner.release.set()
             done = await asyncio.wait_for(first, 5)
 
-        assert second.status_code == 409 and "already in progress" in second.text
+        # A browser shows the answer to the *last* submission. If that were the login
+        # form again, a sign-in that worked would look as though nothing happened, so
+        # the second is sent back to the table (which shows the real state) instead.
+        assert second.status_code == 303 and second.headers["location"] == "/?m=progress"
         assert "another" not in text_of(second)
         assert len(runner.requests) == 1
         assert done.headers["location"] == "/?m=connected"
         assert broker.sessions.get("alice", "nas1", touch=False).session_id == "SID-FROM-WORKER"
+
+    @pytest.mark.asyncio
+    async def test_the_page_a_second_submission_lands_on_explains_and_then_updates_itself(
+        self, broker
+    ):
+        runner = PausedRunner()
+        private = Private(broker, runner, FakeOwner())
+        async with private.client() as http:
+            await sign_in(http)
+            location, token, first = await self._submitting(http, runner)
+            second = await asyncio.wait_for(
+                http.post(location, headers=JSON_HEADERS, data=form(token, password="another")), 5
+            )
+            while_running = await http.get(second.headers["location"])
+            runner.release.set()
+            await asyncio.wait_for(first, 5)
+            # What the page's own refresh asks for next, once the first has finished.
+            after = await http.get("/")
+
+        assert "already in progress" in while_running.text
+        assert '<meta http-equiv="refresh" content="3;url=/">' in while_running.text
+        assert "connected (idle limit" in after.text
+        assert "http-equiv" not in after.text  # it stops refreshing once it has caught up
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("notice", ["", "?m=connected", "?m=expired", "?m=cancelled"])
+    async def test_no_other_view_of_the_table_refreshes_itself(self, private, notice):
+        async with private.client() as http:
+            await sign_in(http)
+            page = await http.get("/" + notice)
+        assert "http-equiv" not in page.text
 
 
 class TestEnrollmentCannotBeBypassed:

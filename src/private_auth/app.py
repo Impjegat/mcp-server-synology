@@ -58,7 +58,14 @@ _NOTICES = {
     "connected": "Connected. The client can use the NAS now.",
     "disconnected": "Disconnected.",
     "cancelled": "Sign-in request cancelled.",
-    "expired": "That sign-in request has expired. Start a new one.",
+    "expired": (
+        "That sign-in request has expired or was already used. If you have just signed in, "
+        "the table below shows whether it worked."
+    ),
+    "progress": (
+        "A sign-in for this request is already in progress. This page updates by itself "
+        "and shows Connected when it finishes."
+    ),
     "withdrawn": (
         "That sign-in was cancelled or expired before it finished, so it was not used. "
         "Start a new one."
@@ -164,11 +171,15 @@ document.addEventListener('DOMContentLoaded',()=>{
 """
 
 
-def _page(title: str, body: str, status: int = 200) -> HTMLResponse:
+def _page(
+    title: str, body: str, status: int = 200, refresh_to: Optional[str] = None
+) -> HTMLResponse:
+    # `refresh_to` is a fixed path of ours, never a value taken from the request.
+    refresh = f'<meta http-equiv="refresh" content="3;url={refresh_to}">' if refresh_to else ""
     return HTMLResponse(
         '<!doctype html><html lang="en"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width,initial-scale=1">'
-        f'<title>{html.escape(title)}</title><link rel="stylesheet" href="/static/app.css">'
+        f'{refresh}<title>{html.escape(title)}</title><link rel="stylesheet" href="/static/app.css">'
         '<script src="/static/passkey.js" defer></script></head>'
         f"<body><h1>{html.escape(title)}</h1>{body}</body></html>",
         status_code=status,
@@ -371,7 +382,10 @@ class PrivateLoginApp:
             + "</tbody></table>"
             + f'<form method="post" action="/logout">{_hidden(session.csrf_token)}<p><button type="submit">End this session</button></p></form>'
         )
-        return _page("Synology broker", body)
+        # After a duplicate submission, look again in a moment: the first one is still
+        # running, and the table will say Connected once it has finished.
+        refresh_to = "/" if request.query_params.get("m") == "progress" else None
+        return _page("Synology broker", body, refresh_to=refresh_to)
 
     async def login_page(self, request: Request) -> Response:
         session, refusal = self._require_owner(request)
@@ -448,7 +462,13 @@ class PrivateLoginApp:
             # Cancelled, expired or disconnected while the worker ran: the page for
             # that request is gone, so go back to the start.
             return RedirectResponse("/?m=withdrawn", status_code=303)
-        status = {"locked": 429, "in_progress": 409}.get(outcome.code, 200)
+        if outcome.code == "in_progress":
+            # A second submission (a double click, or a password manager that submits
+            # as well) while the first is running. A browser shows the answer to the
+            # last submission, so re-showing the form here made a sign-in that had
+            # worked look as though nothing happened. Show the table instead.
+            return RedirectResponse("/?m=progress", status_code=303)
+        status = {"locked": 429}.get(outcome.code, 200)
         return self._render_login(request_id, session, (outcome.message, True), status=status)
 
     async def _pair_action(self, request: Request, action: str) -> Response:
