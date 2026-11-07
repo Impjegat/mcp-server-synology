@@ -343,7 +343,17 @@ class PrivateLoginApp:
                 '<p id="msg" class="note error" role="status" hidden></p>',
             )
 
-        notice = _NOTICES.get(request.query_params.get("m", ""))
+        progress = request.query_params.get("m") == "progress"
+        running = progress and any(
+            self.runtime.sessions.attempt_running(client.name, nas)
+            for client in self.runtime.policy.clients.values()
+            for nas in client.nas
+        )
+        # "In progress" is only worth saying while one is: afterwards the table itself
+        # shows the result, and a notice asked for by hand has nothing to report.
+        notice = (
+            None if progress and not running else _NOTICES.get(request.query_params.get("m", ""))
+        )
         rows = []
         for client in self.runtime.policy.clients.values():
             status = self.runtime.sessions.status(client.name)
@@ -383,10 +393,10 @@ class PrivateLoginApp:
             + "</tbody></table>"
             + f'<form method="post" action="/logout">{_hidden(session.csrf_token)}<p><button type="submit">End this session</button></p></form>'
         )
-        # After a duplicate submission, look again in a moment: the first one is still
-        # running, and the table will say Connected once it has finished.
-        refresh_to = "/" if request.query_params.get("m") == "progress" else None
-        return _page("Synology broker", body, refresh_to=refresh_to)
+        # After a duplicate submission, look again in a moment for as long as the first
+        # one is running; the table says Connected once it has finished, and then the
+        # refreshing stops because there is nothing left to wait for.
+        return _page("Synology broker", body, refresh_to="/?m=progress" if running else None)
 
     async def login_page(self, request: Request) -> Response:
         session, refusal = self._require_owner(request)

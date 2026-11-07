@@ -905,15 +905,26 @@ class TestWithdrawnWhileSigningIn:
                 http.post(location, headers=JSON_HEADERS, data=form(token, password="another")), 5
             )
             while_running = await http.get(second.headers["location"])
+            # What the page's own refresh asks for next, with the sign-in STILL running
+            # (a slow NAS, a code to check): it must keep looking, not stop after one hop.
+            again = await http.get("/?m=progress")
             runner.release.set()
             await asyncio.wait_for(first, 5)
-            # What the page's own refresh asks for next, once the first has finished.
-            after = await http.get("/")
+            after = await http.get("/?m=progress")
 
-        assert "already in progress" in while_running.text
-        assert '<meta http-equiv="refresh" content="3;url=/">' in while_running.text
+        keep_looking = '<meta http-equiv="refresh" content="3;url=/?m=progress">'
+        assert "already in progress" in while_running.text and keep_looking in while_running.text
+        assert keep_looking in again.text
+        # Once it has finished the table shows the result, with nothing left to wait for.
         assert "connected (idle limit" in after.text
-        assert "http-equiv" not in after.text  # it stops refreshing once it has caught up
+        assert "http-equiv" not in after.text and "already in progress" not in after.text
+
+    @pytest.mark.asyncio
+    async def test_asking_for_the_progress_view_by_hand_changes_nothing(self, private):
+        async with private.client() as http:
+            await sign_in(http)
+            page = await http.get("/?m=progress")
+        assert "http-equiv" not in page.text and "already in progress" not in page.text
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("notice", ["", "?m=connected", "?m=expired", "?m=cancelled"])
