@@ -163,7 +163,9 @@ def test_constant_time_equal():
 class TestHeaders:
     def test_every_protection_is_present(self):
         assert SECURITY_HEADERS["Cache-Control"] == "no-store"
-        assert SECURITY_HEADERS["Referrer-Policy"] == "no-referrer"
+        # Not "no-referrer": that makes Firefox send `Origin: null` with every form post
+        # (see TestAFormPostFromABrowserThatFollowsTheStandard in test_private_app.py).
+        assert SECURITY_HEADERS["Referrer-Policy"] == "same-origin"
         assert SECURITY_HEADERS["X-Content-Type-Options"] == "nosniff"
         assert SECURITY_HEADERS["X-Frame-Options"] == "DENY"
         assert SECURITY_HEADERS["Content-Security-Policy"] == CONTENT_SECURITY_POLICY

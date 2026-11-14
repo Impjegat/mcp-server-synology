@@ -348,6 +348,12 @@ class SessionManager:
                     return ATTEMPT_STARTED, LoginAttempt(pending, attempt_id)
             return ATTEMPT_EXPIRED, None
 
+    def attempt_running(self, owner: str, nas: str) -> bool:
+        """Whether a sign-in (a worker) is running for this client and NAS now."""
+        with self._lock:
+            self._expire_locked(self._clock())
+            return (owner, nas) in self._attempts
+
     def release_attempt(self, attempt: LoginAttempt) -> None:
         """Let go of a claim that did not end in a session, so the owner can try
         again. Releases only this attempt's own claim: an old attempt that was
