@@ -32,9 +32,12 @@ pub struct Inner {
     pub starting_since: Option<Instant>,
     /// Consecutive failed health checks while running.
     pub misses: u32,
-    /// The broker answers, but only if its certificate is not checked: Windows (and the
-    /// `ca_file`, if any) does not trust the CA that signed it.
+    /// The broker answers, but only if its certificate is not checked: neither Windows
+    /// nor the `ca_file`, if any, trusts the CA that signed it.
     pub cert_untrusted: bool,
+    /// Windows' own trust store accepts the broker's certificate. A window (a browser
+    /// engine) needs this to offer a passkey; the `ca_file` does not count for it.
+    pub windows_trusts: bool,
 }
 
 pub struct AppState {
@@ -42,8 +45,11 @@ pub struct AppState {
     /// Set when the settings file is unusable: the app then refuses to start a broker.
     pub config_error: Option<String>,
     pub inner: Mutex<Inner>,
-    /// Checks the broker's certificate. The only client that fetches anything but `/healthz`.
+    /// Checks the broker's certificate against Windows' store and the `ca_file`. The only
+    /// client that fetches anything but `/healthz`.
     pub client: reqwest::Client,
+    /// Checks it against Windows' store alone: what a window would see.
+    pub system_client: reqwest::Client,
     /// Used only to find out whether the broker is up when `client` could not verify its
     /// certificate, so the window can say "running, but not trusted" instead of "down".
     /// It reads `/healthz` and nothing else, and what it reads decides only a message.
@@ -62,8 +68,11 @@ pub struct Status {
     pub start_command: String,
     pub broker_url: String,
     pub config_error: Option<String>,
-    /// Running, but Windows does not trust the broker's certificate.
+    /// Running, but nothing trusts the broker's certificate (not even the `ca_file`).
     pub cert_untrusted: bool,
+    /// Running, but Windows does not trust the certificate, so a window cannot do
+    /// passkeys. True too when only the `ca_file` makes it verify.
+    pub window_untrusted: bool,
 }
 
 impl AppState {
@@ -71,12 +80,14 @@ impl AppState {
         config: Config,
         config_error: Option<String>,
         client: reqwest::Client,
+        system_client: reqwest::Client,
         diagnostic_client: reqwest::Client,
     ) -> Self {
         AppState {
             config,
             config_error,
             client,
+            system_client,
             diagnostic_client,
             inner: Mutex::new(Inner {
                 phase: Phase::Stopped,
@@ -87,6 +98,7 @@ impl AppState {
                 starting_since: None,
                 misses: 0,
                 cert_untrusted: false,
+                windows_trusts: false,
             }),
         }
     }
@@ -103,6 +115,7 @@ impl AppState {
             broker_url: self.config.broker_url.clone(),
             config_error: self.config_error.clone(),
             cert_untrusted: inner.phase == Phase::Running && inner.cert_untrusted,
+            window_untrusted: inner.phase == Phase::Running && !inner.windows_trusts,
         }
     }
 }

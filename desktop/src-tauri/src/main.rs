@@ -89,6 +89,8 @@ fn main() {
         None => None,
     };
     let client = http_client(ca, true);
+    // What a window sees: Windows' own store, without the `ca_file`.
+    let system_client = http_client(None, true);
     // Only for telling "down" from "up, but its certificate is not trusted" (see
     // `monitor::probe`): it reads /healthz and nothing else.
     let diagnostic_client = http_client(None, false);
@@ -96,7 +98,7 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| show_main(app)))
         .plugin(tauri_plugin_notification::init())
-        .manage(AppState::new(config, config_error, client, diagnostic_client))
+        .manage(AppState::new(config, config_error, client, system_client, diagnostic_client))
         .invoke_handler(tauri::generate_handler![
             commands::get_status,
             commands::start_broker,

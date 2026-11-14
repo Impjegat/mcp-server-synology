@@ -45,7 +45,7 @@ Optional, `synology-broker-app.json` beside the `.exe`. Everything has a default
 The broker serves HTTPS with a certificate from a private CA, which Windows does not know. Two things follow:
 
 - **The app's own checks** (is the broker up, and does anything need you) verify that certificate. Without `ca_file` it cannot, so the window says *Running, but Windows does not trust its certificate* and the tray cannot read alerts. With `ca_file` set it verifies against that CA, and only for these checks: nothing is added to Windows.
-- **The app's window** is a Chromium engine, and a browser engine refuses to offer a passkey on a site with a certificate error. So for passkeys in the window, Windows itself must trust the CA. Until it does, **Open broker** opens your default browser instead, where you have already dealt with that (and where a password manager's passkey works). **Open in browser** does the same on purpose.
+- **The app's window** is a Chromium engine, and a browser engine refuses to offer a passkey on a site with a certificate error. So for passkeys in the window, Windows itself must trust the CA: the `ca_file` does not count for that, because the window cannot use it. Until Windows trusts it, **Open broker** opens your default browser instead (the window says so), where you have already dealt with that (and where a password manager's passkey works). **Open in browser** does the same on purpose.
 
 If you want the window to work, trust the CA for your account only (a Windows security dialog asks you to confirm):
 

@@ -52,13 +52,17 @@ function render(status) {
   els.stop.disabled = Boolean(status.external);
   els.externalNote.hidden = !status.external;
 
-  const untrusted = running && Boolean(status.cert_untrusted);
-  els.certNote.hidden = !untrusted;
-  els.certNote.textContent = untrusted
-    ? 'The broker is running, but Windows does not trust its certificate, so a window here cannot use passkeys and ' +
-      'the tray cannot read its alerts. Buttons open your browser instead. To fix it, set "ca_file" in ' +
+  const noneTrust = running && Boolean(status.cert_untrusted);
+  const windowOnly = running && !noneTrust && Boolean(status.window_untrusted);
+  els.certNote.hidden = !(noneTrust || windowOnly);
+  els.certNote.textContent = noneTrust
+    ? 'The broker is running, but its certificate is not trusted, so the tray cannot read its alerts and a window ' +
+      'here cannot use passkeys. Buttons open your browser instead. To fix it, set "ca_file" in ' +
       'synology-broker-app.json to the CA certificate that signed it (see the README).'
-    : '';
+    : windowOnly
+      ? 'Windows does not trust the broker\'s certificate (only the ca_file does), so a window here cannot use ' +
+        'passkeys. The buttons open your browser instead. See the README to trust the CA for a window.'
+      : '';
 
   setMessage(status.message, status.phase === 'error');
 }

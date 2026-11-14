@@ -170,13 +170,13 @@ pub fn open_in_browser(app: &AppHandle, path: &str) -> Result<(), String> {
 /// no capability: it cannot call anything in this app, and it cannot leave the
 /// broker's address.
 ///
-/// If Windows does not trust the broker's certificate, a browser engine refuses
-/// passkeys on the page (WebAuthn is not offered on a site with a certificate
-/// error), so the page opens in the default browser instead, where the person has
-/// already dealt with that.
+/// If Windows' own store does not trust the broker's certificate (the `ca_file` does
+/// not count: a window cannot use it), a browser engine refuses passkeys on the page
+/// (WebAuthn is not offered on a site with a certificate error), so the page opens in
+/// the default browser instead, where the person has already dealt with that.
 pub async fn open(app: &AppHandle, path: &str) -> Result<(), String> {
     let target = broker_page(app, path)?;
-    if app.state::<AppState>().status().cert_untrusted {
+    if app.state::<AppState>().status().window_untrusted {
         return open_in_browser(app, path);
     }
     let origin = target.origin();

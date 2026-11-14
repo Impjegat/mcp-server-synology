@@ -30,8 +30,9 @@ pub fn spawn(app: AppHandle) {
 /// What a look at the broker found.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Probe {
-    /// Answers, and its certificate is trusted.
-    Trusted,
+    /// Answers, and its certificate verifies (against Windows' store, or the `ca_file`).
+    /// `windows` is whether Windows' store alone accepts it, which is what a window sees.
+    Trusted { windows: bool },
     /// Answers, but only when its certificate is not checked.
     Untrusted,
     Down,
@@ -44,7 +45,11 @@ async fn healthy(client: &reqwest::Client, base: &str) -> bool {
 
 async fn probe(state: &AppState) -> Probe {
     if healthy(&state.client, &state.config.broker_url).await {
-        Probe::Trusted
+        // Without a `ca_file` the two clients check the same thing. With one, the
+        // `ca_file` may be what makes it verify, and a window has only Windows' store.
+        let windows = state.config.ca_file.is_none()
+            || healthy(&state.system_client, &state.config.broker_url).await;
+        Probe::Trusted { windows }
     } else if healthy(&state.diagnostic_client, &state.config.broker_url).await {
         Probe::Untrusted
     } else {
@@ -67,12 +72,17 @@ async fn tick(app: &AppHandle) -> Duration {
     let found = probe(&state).await;
     let up = found != Probe::Down;
     // The counts are only read over a connection whose certificate was verified.
-    let attention = if found == Probe::Trusted { fetch_attention(&state).await } else { None };
+    let attention = if matches!(found, Probe::Trusted { .. }) {
+        fetch_attention(&state).await
+    } else {
+        None
+    };
 
     let mut alerts = Vec::new();
     let (phase, snapshot) = {
         let mut inner = state.inner.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         inner.cert_untrusted = found == Probe::Untrusted;
+        inner.windows_trusts = matches!(found, Probe::Trusted { windows: true });
         if found == Probe::Untrusted {
             // Nothing to read counts from: the last ones would be stale.
             inner.attention = None;
