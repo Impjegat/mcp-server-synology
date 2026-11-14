@@ -563,3 +563,61 @@ class TestLevel:
         assert reply.status_code == 200
         assert reply.json() == {"status": "ok", "level": PRIVATE_PAGE_LEVEL}
         assert isinstance(PRIVATE_PAGE_LEVEL, int) and PRIVATE_PAGE_LEVEL >= 1
+
+    def test_the_level_is_pinned_to_what_the_page_serves(self, world):
+        """The level is raised by hand, and a forgotten raise would leave the desktop app
+        unable to tell a broker that has a page from one that does not.
+
+        So what the page serves is written down per level. When this fails, the page has
+        gained or lost a route: decide whether the desktop app needs to tell the
+        difference (if so, raise `PRIVATE_PAGE_LEVEL`, and `REQUIRED_LEVEL` in
+        `desktop/src-tauri/src/state.rs` once the app depends on it), then record the
+        routes under the level they belong to."""
+        served = {
+            f"{method} {route.path}"
+            for route in world.app.routes
+            for method in sorted(route.methods - {"HEAD"})
+        }
+        assert PRIVATE_PAGE_LEVEL in ROUTES_AT_LEVEL, "record the routes of the new level"
+        assert served == ROUTES_AT_LEVEL[PRIVATE_PAGE_LEVEL]
+
+
+ROUTES_AT_LEVEL = {
+    1: {
+        "GET /",
+        "GET /healthz",
+        "GET /attention",
+        "GET /api/state",
+        "GET /log",
+        "GET /api/log",
+        "GET /login-all",
+        "POST /login-all",
+        "POST /api/login-all/step",
+        "GET /login/{request_id}",
+        "POST /login/{request_id}",
+        "POST /pending/new",
+        "POST /pending/cancel",
+        "POST /disconnect",
+        "POST /disconnect-all",
+        "POST /logout",
+        "GET /settings",
+        "POST /settings",
+        "POST /api/settings/begin",
+        "POST /api/settings/commit",
+        "POST /api/passkeys/begin",
+        "POST /api/passkeys/confirm",
+        "POST /api/passkeys/finish",
+        "POST /auth/begin",
+        "POST /auth/finish",
+        "GET /enroll",
+        "POST /enroll/begin",
+        "POST /enroll/finish",
+        "GET /static/app.css",
+        "GET /static/passkey.js",
+        "GET /static/dashboard.js",
+        "GET /static/log.js",
+        "GET /static/login_all.js",
+        "GET /static/settings.js",
+        "GET /static/passkeys.js",
+    },
+}

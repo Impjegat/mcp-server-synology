@@ -112,6 +112,28 @@ test('the app does not need a newer broker than this repository has', () => {
   );
 });
 
+test('every page the app opens or reads is one the broker in this repository serves', () => {
+  const read = (file) => fs.readFileSync(path.join(ROOT, file), 'utf8');
+  const pages = read('src-tauri/src/commands.rs').match(/^const PAGES: \[&str; \d+\] = \[([^\]]+)\];$/m);
+  assert.ok(pages, 'the list of pages the app opens was not found in commands.rs');
+  const opened = [...pages[1].matchAll(/"([^"]+)"/g)].map((match) => match[1]);
+  assert.deepEqual(opened, ['/', '/login-all', '/log', '/settings']);
+
+  // The two endpoints the monitor reads, each of which it must really ask for.
+  const monitor = read('src-tauri/src/monitor.rs');
+  const readByMonitor = ['/healthz', '/attention'];
+  for (const endpoint of readByMonitor) {
+    assert.match(monitor, new RegExp(`format!\\("\\{[a-z]*\\}${endpoint}"`), `${endpoint} is not read by monitor.rs`);
+  }
+
+  const broker = read('../src/private_auth/app.py');
+  for (const page of [...opened, ...readByMonitor]) {
+    const route = `Route("${page}", self.`;
+    const line = broker.split(/\r?\n/).find((text) => text.includes(route) && text.includes('methods=["GET"]'));
+    assert.ok(line, `the broker has no GET route for ${page}`);
+  }
+});
+
 test('the guide says both switches exist only in debug builds', () => {
   const readme = fs.readFileSync(path.join(ROOT, 'README.md'), 'utf8');
   for (const { variable } of uses()) assert.ok(readme.includes(variable), `${variable} is not documented`);
