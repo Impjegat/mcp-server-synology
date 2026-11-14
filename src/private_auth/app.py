@@ -103,6 +103,14 @@ def _span(seconds: Optional[int]) -> str:
     return f"{hours // 24} days"
 
 
+def _number_text(value: float) -> str:
+    """`value` for a number field: as many decimals as it needs, up to six, and no more.
+    A value that is shown and saved back untouched must come back as the same number of
+    seconds: six decimals of an hour is under two milliseconds, and `%g` (six significant
+    figures) is not that precise for a value like 167.99972 hours."""
+    return f"{value:.6f}".rstrip("0").rstrip(".")
+
+
 def _grant_text(left: Optional[int], ends_at: Optional[float]) -> str:
     if left is None or ends_at is None:
         return ""
@@ -644,6 +652,9 @@ class PrivateLoginApp:
             secure=self.secure_cookies,
             samesite="strict",
             path="/",
+            # Fixed when the cookie is issued: if the owner later changes the limit in
+            # Settings, a cookie already in the browser keeps the old lifetime. Harmless,
+            # because the server's own check (`OwnerSessions`) is the one that decides.
             max_age=int(self.sessions.absolute_seconds),
         )
 
@@ -909,8 +920,12 @@ class PrivateLoginApp:
         return _page("Log", body, scripts=("log.js",), nav=True)
 
     async def api_log(self, request: Request) -> Response:
-        if self._owner(request, touch=False) is None or self.log_buffer is None:
+        if self._owner(request, touch=False) is None:
             return PlainTextResponse("Sign in first", status_code=401)
+        if self.log_buffer is None:
+            # Signed in, but there is no log to show: not a sign-in problem, so not 401
+            # (the page's script sends a 401 back to the sign-in page).
+            return PlainTextResponse("This broker keeps no log", status_code=404)
         return JSONResponse({"lines": self.log_buffer.lines()})
 
     # -- sign in several clients at once -------------------------------------
@@ -1032,7 +1047,7 @@ class PrivateLoginApp:
             return (
                 f'<label for="{field}">{html.escape(label)}</label>'
                 f'<input id="{field}" type="number" min="0" step="{step}" '
-                f'data-field="{field}" value="{view[field]:g}">'
+                f'data-field="{field}" value="{_number_text(view[field])}">'
             )
 
         parts = [
@@ -1112,7 +1127,11 @@ class PrivateLoginApp:
         )
 
     async def settings_commit(self, request: Request) -> Response:
-        """Apply the change the passkey just confirmed."""
+        """Apply the change the passkey just confirmed.
+
+        A confirmation that fails counts against the same per-address limit as a failed
+        passkey sign-in (`auth_limiter`), on purpose: it is the same proof, and the same
+        address trying it."""
         _, data, refusal = await self._authorized_json(request)
         if refusal is not None:
             return refusal

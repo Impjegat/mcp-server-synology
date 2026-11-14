@@ -12,15 +12,29 @@ from typing import Deque, List
 
 # Requests a page or the desktop app makes by itself, every few seconds. They
 # would push everything worth reading out of the buffer.
-_ROUTINE_PATHS = ("/attention", "/api/state", "/healthz", "/readyz", "/static/")
+_ROUTINE_PATHS = frozenset({"/attention", "/api/state", "/healthz", "/readyz"})
+_ROUTINE_PREFIXES = ("/static/",)
+
+
+def _is_routine(request_target: str) -> bool:
+    """Whether a request target (a path, with or without a query string) is one of
+    the routine ones. Only the path counts: a query string, or text elsewhere in the
+    log line, that merely contains one of these names does not make a request routine."""
+    path = request_target.split("?", 1)[0]
+    return path in _ROUTINE_PATHS or path.startswith(_ROUTINE_PREFIXES)
 
 
 class _SkipRoutineRequests(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
         if record.name != "uvicorn.access":
             return True
-        message = record.getMessage()
-        return not any(path in message for path in _ROUTINE_PATHS)
+        # uvicorn logs (client address, method, request target, HTTP version, status).
+        # A line in any other shape is kept: a log meant for diagnosing problems should
+        # err towards showing too much.
+        args = record.args
+        if isinstance(args, tuple) and len(args) == 5 and isinstance(args[2], str):
+            return not _is_routine(args[2])
+        return True
 
 
 class RingLogHandler(logging.Handler):

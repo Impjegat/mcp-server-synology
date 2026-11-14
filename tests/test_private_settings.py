@@ -149,7 +149,7 @@ class TestPage:
             await sign_in(http)
             page = (await http.get("/settings")).text
 
-        assert 'data-field="idle_minutes" value="1.66667"' in page
+        assert 'data-field="idle_minutes" value="1.666667"' in page
         assert 'data-field="owner_idle_minutes" value="10"' in page
         assert 'data-field="owner_absolute_hours" value="1"' in page
         assert page.count("<fieldset") == 2
@@ -443,3 +443,44 @@ class TestCommit:
             await save(http, await csrf(http), {"clients": {"alice": {"write": True}}})
         assert rig.broker.runtime.policy.clients["alice"].token_sha256 == digest
         assert rig.broker.sessions.get("alice", "nas1", touch=False) is not None
+
+
+class TestNumberFields:
+    """A value that is shown and saved back untouched must be the same value."""
+
+    @pytest.mark.parametrize(
+        "value, text",
+        [(10.0, "10"), (0.5, "0.5"), (0.125, "0.125"), (1234567.0, "1234567"), (0.0, "0")],
+    )
+    def test_the_text_is_as_short_as_it_can_be_without_losing_anything(self, value, text):
+        from private_auth.app import _number_text
+
+        assert _number_text(value) == text
+
+    @pytest.mark.parametrize("unit", [60, 3600])
+    def test_every_whole_number_of_seconds_comes_back_as_itself(self, unit):
+        from private_auth.app import _number_text
+
+        for seconds in list(range(1, 400)) + [28799, 28800, 28801, 86399, 604799, 604800]:
+            shown = _number_text(seconds / unit)
+            assert round(float(shown) * unit) == seconds, (seconds, shown)
+
+    @pytest.mark.asyncio
+    async def test_a_value_the_page_shows_and_sends_back_changes_nothing(
+        self, monkeypatch, tmp_path
+    ):
+        # 604799 s is 167.999722 hours: more than six significant figures to show.
+        odd = Broker(
+            monkeypatch,
+            CLIENTS,
+            session={"idle_seconds": 900, "absolute_seconds": 604799, "pending_seconds": 50},
+        )
+        rig = Rig(odd, tmp_path)
+        async with rig.client() as http:
+            await sign_in(http)
+            page = (await http.get("/settings")).text
+            shown = re.search(r'data-field="absolute_hours" value="([^"]+)"', page).group(1)
+            begun = await begin(
+                http, await csrf(http), {"session": {"absolute_hours": float(shown)}}
+            )
+        assert begun.json() == {"ok": True, "changes": []}

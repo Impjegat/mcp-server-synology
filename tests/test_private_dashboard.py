@@ -95,6 +95,24 @@ class TestAttention:
         assert response.headers["cache-control"] == "no-store"
 
     @pytest.mark.asyncio
+    async def test_a_wrong_host_name_is_refused_so_a_rebound_page_cannot_read_it(self, private):
+        async with private.client() as http:
+            rebound = await http.get("/attention", headers={"Host": "rebound.example"})
+            right = await http.get("/attention", headers={"Host": "private.test"})
+        assert rebound.status_code == 400 and "waiting" not in rebound.text
+        assert right.status_code == 200
+
+    @pytest.mark.asyncio
+    async def test_it_carries_the_security_headers_and_no_cross_origin_permission(self, private):
+        from private_auth.security import SECURITY_HEADERS
+
+        async with private.client() as http:
+            response = await http.get("/attention", headers={"Origin": "https://evil.example"})
+        for name, value in SECURITY_HEADERS.items():
+            assert response.headers.get(name) == value, name
+        assert not any(h.lower().startswith("access-control-") for h in response.headers)
+
+    @pytest.mark.asyncio
     async def test_grants_that_end_within_two_weeks_are_counted(self, broker):
         import time
 
@@ -412,18 +430,51 @@ class TestLogBuffer:
             logger.info("line %d", number)
         assert [line.split()[-1] for line in handler.lines()] == ["2", "3", "4"]
 
-    def test_requests_the_app_makes_by_itself_are_left_out(self):
+    @staticmethod
+    def _access_lines(*targets):
+        """What the ring buffer keeps of uvicorn access lines for these request targets,
+        logged the way uvicorn logs them: (client, method, target, HTTP version, status)."""
         handler = RingLogHandler()
         logger = logging.getLogger("uvicorn.access")
         logger.addHandler(handler)
         logger.setLevel(logging.INFO)
         try:
-            logger.info('127.0.0.1 - "GET /attention HTTP/1.1" 200')
-            logger.info('127.0.0.1 - "GET /api/state HTTP/1.1" 200')
-            logger.info('127.0.0.1 - "POST /disconnect HTTP/1.1" 303')
+            for client, target in targets:
+                logger.info('%s - "%s %s HTTP/%s" %d', client, "GET", target, "1.1", 200)
         finally:
             logger.removeHandler(handler)
-        assert len(handler.lines()) == 1 and "/disconnect" in handler.lines()[0]
+        return handler.lines()
+
+    def test_requests_the_app_makes_by_itself_are_left_out(self):
+        kept = self._access_lines(
+            ("127.0.0.1:50001", "/attention"),
+            ("127.0.0.1:50001", "/api/state"),
+            ("127.0.0.1:50001", "/api/state?x=1"),
+            ("127.0.0.1:50001", "/healthz"),
+            ("127.0.0.1:50001", "/static/app.css"),
+            ("127.0.0.1:50001", "/disconnect"),
+        )
+        assert len(kept) == 1 and "/disconnect" in kept[0]
+
+    def test_only_the_path_decides_not_a_query_string_or_the_rest_of_the_line(self):
+        kept = self._access_lines(
+            ("127.0.0.1:50001", "/disconnect?next=/healthz"),
+            ("127.0.0.1:50001", "/login/abc?from=/static/x"),
+            ("127.0.0.1:50001", "/attention-ish"),
+            ("127.0.0.1:50001", "/staticky/app.css"),
+        )
+        assert len(kept) == 4
+
+    def test_a_line_in_a_shape_that_is_not_uvicorns_is_kept(self):
+        handler = RingLogHandler()
+        logger = logging.getLogger("uvicorn.access")
+        logger.addHandler(handler)
+        logger.setLevel(logging.INFO)
+        try:
+            logger.info('127.0.0.1 - "GET /attention HTTP/1.1" 200')  # a finished string
+        finally:
+            logger.removeHandler(handler)
+        assert len(handler.lines()) == 1
 
     def test_it_takes_the_format_and_the_redaction_of_the_handlers_already_there(self):
         class Mask(logging.Filter):
@@ -498,4 +549,9 @@ class TestLogPage:
             page = (await http.get("/log")).text
             api = await http.get("/api/log")
 
-        assert "keeps no log" in page and api.status_code == 401
+        assert "keeps no log" in page and api.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_with_no_buffer_the_api_still_asks_for_a_sign_in_first(self, private):
+        async with private.client() as http:
+            assert (await http.get("/api/log")).status_code == 401
