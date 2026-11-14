@@ -1349,7 +1349,14 @@ class PrivateLoginApp:
 
     async def passkeys_finish(self, request: Request) -> Response:
         """Store the passkey the device has just created, if it answers the challenge
-        that `passkeys_confirm` handed out."""
+        that `passkeys_confirm` handed out.
+
+        There is no limiter here, on purpose. A request gets this far only with the
+        owner's session and CSRF token, and does anything only with a `state` that
+        `passkeys_confirm` gave out after a good passkey check. That state is single-use
+        and short-lived: a request without one costs a dictionary lookup, and one with
+        one can be made exactly once. The two steps before this one are the ones that
+        are limited (`begin_limiter`, `auth_limiter`)."""
         _, data, refusal = await self._authorized_json(request)
         if refusal is not None:
             return refusal
@@ -1360,7 +1367,19 @@ class PrivateLoginApp:
             or not isinstance(credential, dict)
             or not self.owner.finish_enrollment(state, credential, label)
         ):
-            return JSONResponse({"ok": False, "message": "The new passkey was not added."}, 400)
+            # Which cause it was is not said (the owner's side answers yes or no, here
+            # as everywhere), so the message names the ordinary ones: the challenge ran
+            # out of time, or a newer addition (in another tab, say) replaced this one.
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "message": (
+                        "The new passkey was not added. The request ran out of time, or "
+                        "another one was started after it. Press Add a passkey to start again."
+                    ),
+                },
+                400,
+            )
         logger.info("The owner added a passkey")
         return JSONResponse({"ok": True, "label": label})
 

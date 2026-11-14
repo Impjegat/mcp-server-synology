@@ -446,6 +446,10 @@ class TestTheNewPasskey:
 
         assert (stale.status_code, good.status_code) == (400, 200)
         assert world.labels() == ["password manager", "Windows Hello"]
+        # The one that lost (two tabs, say) is told what may have happened and what to do.
+        message = stale.json()["message"]
+        assert "another one was started after it" in message
+        assert "Press Add a passkey to start again" in message
 
     @pytest.mark.asyncio
     async def test_a_code_from_the_host_that_was_still_open_stops_working(self, world, caplog):

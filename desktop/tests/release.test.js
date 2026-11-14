@@ -93,6 +93,25 @@ test('a release build signs in to Windows, with no other way to start a process'
   assert.match(lines[release], /let result = signed_in\(&mut command, &mut info\);/);
 });
 
+// The broker says how new its private page is (PRIVATE_PAGE_LEVEL) and the app says how
+// new it needs it to be (REQUIRED_LEVEL). They are two numbers in two languages, kept in
+// step by hand: raising the app's without the broker's would make the app call every
+// broker "older", this repository's own included, and offer an update that cannot help.
+test('the app does not need a newer broker than this repository has', () => {
+  const number = (file, pattern) => {
+    const match = fs.readFileSync(path.join(ROOT, file), 'utf8').match(pattern);
+    assert.ok(match, `${pattern} was not found in ${file}`);
+    return Number(match[1]);
+  };
+  const required = number('src-tauri/src/state.rs', /^pub const REQUIRED_LEVEL: u32 = (\d+);$/m);
+  const provided = number('../src/private_auth/app.py', /^PRIVATE_PAGE_LEVEL = (\d+)\r?$/m);
+  assert.ok(required >= 1 && provided >= 1);
+  assert.ok(
+    required <= provided,
+    `the app needs level ${required}, but the broker in this repository reports ${provided}`,
+  );
+});
+
 test('the guide says both switches exist only in debug builds', () => {
   const readme = fs.readFileSync(path.join(ROOT, 'README.md'), 'utf8');
   for (const { variable } of uses()) assert.ok(readme.includes(variable), `${variable} is not documented`);
