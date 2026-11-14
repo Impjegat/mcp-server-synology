@@ -74,7 +74,7 @@ The broker says how new it is (`level` in `/healthz`). When that is less than th
 git -C <broker_checkout> fetch origin <commit>   and then   git -C <broker_checkout> checkout --detach <commit>
 ```
 
-`<commit>` is the exact commit this app was built from, compiled into the `.exe`; nothing else is fetched and no branch is followed. If a step fails, the window says which (not downloaded: is the PC online, is Git installed for that account; not switched to: the folder has changes of its own), nothing is half-applied, and the next start is a plain one with the broker that is there.
+`<commit>` is the exact commit this app was built from, compiled into the `.exe`; nothing else is fetched and no branch is followed. If a step fails, the window says which (not downloaded: the PC is offline, Git is not installed for that account, or the app was built from a commit that is not on GitHub; not switched to: the folder has changes of its own), nothing is half-applied, and the next start is a plain one with the broker that is there.
 
 What it needs, and does not do:
 

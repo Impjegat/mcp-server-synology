@@ -1,8 +1,9 @@
 # Desktop app, second round: lean window, pages in the app, update, trust
 
-Status: implemented on branch `desktop-app/round-2`
+Status: Shipped — PR #37
+GitHub PR: [Impjegat/mcp-server-synology#37](https://github.com/Impjegat/mcp-server-synology/pull/37)
 Initiated: 2026-11-14
-Follows: [`2026-11-14-desktop-app`](../shipped/2026-11-14-desktop-app/PLAN.md) (merged as #34 to #36)
+Follows: [`2026-11-14-desktop-app`](../2026-11-14-desktop-app/PLAN.md) (merged as #34 to #36)
 
 ## Why
 
@@ -66,7 +67,7 @@ The first real use of the app showed that it did not do its main job:
 
 ## Left for the owner (cannot be done from here)
 
-1. Push this branch, so the commit the app is built from exists on GitHub; then run the app and press **Update Broker** with the broker account's password. This is the first run of the update under the real account.
-2. Press **Trust certificate** and answer Windows' dialog.
-3. Sign in with the passkey in the app's window. If Windows does not offer it: from the usual browser, Settings, **Add a passkey**, choose Windows Hello.
+1. Run the app and press **Update Broker** with the broker account's password. This is the first run of the update under the real account. It needs the commit the app was built from to be on GitHub: a first try before the branch was pushed failed with "could not be downloaded", and that message now names this cause too.
+2. Press **Trust certificate** and answer Windows' dialog. (Done on the first real run: the broker's page then opened in the app's window.)
+3. Sign in with the passkey in the app's window. If Windows does not offer it, or offers it and then fails: from the usual browser, Settings, **Add a passkey**, choose Windows Hello. On the first real run Windows offered the password manager's passkey and then failed in its own verification step for that provider, before anything reached the app (`PerformPluginUv`, "Key does not exist", in the `Microsoft-Windows-WebAuthN/Operational` log).
 4. Sign in all, change a setting, read the log, close with the X.

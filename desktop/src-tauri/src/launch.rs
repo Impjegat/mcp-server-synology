@@ -120,8 +120,12 @@ pub fn update_command_line(git: &str, checkout: &str, commit: &str) -> Result<St
 /// What a non-zero exit of the update line means, in words.
 pub fn explain_update(code: u32) -> String {
     match code {
-        FETCH_FAILED => "The update could not be downloaded. Check that this PC is online and that \
-                         Git is installed for the broker's account."
+        // Git's own words are not seen here, so the three things it can mean are all
+        // said. The last is the one a person cannot check for themselves: an app built
+        // from a commit that was never pushed has nothing to fetch.
+        FETCH_FAILED => "The update could not be downloaded. Either this PC is offline, Git is \
+                         not installed for the broker's account, or this version of the app \
+                         is not on GitHub yet."
             .to_string(),
         SWITCH_FAILED => "The update was downloaded but could not be switched to. The broker's \
                           folder may hold changes of its own."
@@ -506,6 +510,10 @@ mod tests {
     #[test]
     fn a_failed_update_is_explained_in_words() {
         assert!(explain_update(21).contains("could not be downloaded"));
+        // Each of the three causes is named, the unpushed build among them.
+        for cause in ["offline", "Git is not installed", "not on GitHub yet"] {
+            assert!(explain_update(21).contains(cause), "{cause} is not mentioned");
+        }
         assert!(explain_update(22).contains("could not be switched to"));
         assert!(explain_update(7).contains("error code 7"));
     }
