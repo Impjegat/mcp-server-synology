@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Synology Broker</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <header>
+    <h1>Synology broker</h1>
+    <span id="pill" class="pill stopped">Stopped</span>
+  </header>
+
+  <p id="message" class="message" hidden></p>
+  <p id="config-error" class="message error" hidden></p>
+
+  <section id="start-panel">
+    <p class="muted">Starts <code id="command"></code> as <strong id="account"></strong>. The password is used once and not kept.</p>
+    <form id="start-form" autocomplete="off">
+      <label for="password">Windows password for that account</label>
+      <input id="password" type="password" autocomplete="off" spellcheck="false">
+      <button id="start" type="submit">Start broker</button>
+    </form>
+  </section>
+
+  <section id="running-panel" hidden>
+    <p id="counts" class="muted"></p>
+    <div class="buttons">
+      <button id="open" class="primary">Open broker</button>
+      <button id="login-all">Sign in all clients</button>
+      <button id="log">Log</button>
+      <button id="stop" class="danger">Stop broker</button>
+    </div>
+    <p id="external-note" class="muted" hidden>This broker was started outside the app, so the app cannot stop it.</p>
+  </section>
+
+  <footer>
+    <button id="quit" class="link">Quit</button>
+    <span class="muted">Closing this window keeps the app in the tray.</span>
+  </footer>
+</body>
+</html>

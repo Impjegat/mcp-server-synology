@@ -1,0 +1,27 @@
+:root{color-scheme:light dark;--bg:#fff;--fg:#1b1f23;--muted:#57606a;--line:#d0d7de;--panel:#f6f8fa;--accent:#0969da;--ok:#1a7f37;--warn:#9a6700;--bad:#cf222e}
+@media (prefers-color-scheme:dark){:root{--bg:#0d1117;--fg:#e6edf3;--muted:#8b949e;--line:#30363d;--panel:#161b22;--accent:#58a6ff;--ok:#3fb950;--warn:#d29922;--bad:#f85149}}
+*{box-sizing:border-box}
+body{margin:0;padding:1.2rem 1.4rem;font:15px/1.5 system-ui,"Segoe UI",sans-serif;background:var(--bg);color:var(--fg)}
+header{display:flex;align-items:center;justify-content:space-between;margin-bottom:1rem}
+h1{font-size:1.25rem;margin:0}
+.pill{padding:.15rem .7rem;border-radius:999px;font-size:.8rem;font-weight:600;border:1px solid var(--line);background:var(--panel)}
+.pill.running{color:var(--ok);border-color:var(--ok)}
+.pill.starting{color:var(--warn);border-color:var(--warn)}
+.pill.error{color:var(--bad);border-color:var(--bad)}
+.pill.attention{color:var(--warn);border-color:var(--warn)}
+.message{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:.6rem .8rem}
+.message.error{border-color:var(--bad);color:var(--bad)}
+.muted{color:var(--muted);font-size:.9rem}
+code{font-size:.85rem;word-break:break-all}
+label{display:block;margin:.9rem 0 .25rem;font-weight:600}
+input{width:100%;padding:.5rem;font:inherit;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--fg)}
+button{font:inherit;padding:.5rem 1rem;border:1px solid var(--line);border-radius:6px;background:var(--panel);color:var(--fg);cursor:pointer}
+button:hover:not(:disabled){border-color:var(--accent)}
+button:disabled{opacity:.55;cursor:default}
+button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+button.danger{color:var(--bad)}
+button.link{border:0;background:none;color:var(--accent);padding:0}
+#start{margin-top:1rem;width:100%}
+.buttons{display:grid;grid-template-columns:1fr 1fr;gap:.6rem;margin-top:.8rem}
+footer{position:fixed;left:1.4rem;right:1.4rem;bottom:1rem;display:flex;gap:1rem;align-items:baseline}
+[hidden]{display:none!important}

@@ -1,0 +1,14 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "What the local control window may do. The broker's page is a remote origin in its own window and gets none of this.",
+  "windows": ["main"],
+  "permissions": [
+    "core:event:default",
+    "allow-get-status",
+    "allow-start-broker",
+    "allow-stop-broker",
+    "allow-open-broker",
+    "allow-quit-app"
+  ]
+}
