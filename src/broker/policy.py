@@ -104,6 +104,9 @@ _CLIENT_KEYS = {"token_sha256", "nas", "tools", "folders", "disconnect", "expire
 # How far ahead a grant may end, and how soon before it ends the broker says so.
 _MAX_GRANT_SECONDS = 366 * 86400
 _WARN_SECONDS = 14 * 86400
+# The same warning period, for the private interface's dashboard and its count of
+# grants that need renewing.
+GRANT_WARN_SECONDS = _WARN_SECONDS
 # The earliest end a grant may name: the start of the year 2000, UTC. Before 1970 a
 # moment is a negative timestamp, which not every platform can turn back into a
 # date (Windows raises), and start-up names each ended grant by its date. A date

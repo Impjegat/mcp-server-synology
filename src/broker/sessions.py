@@ -249,6 +249,25 @@ class SessionManager:
                 }
             return view
 
+    def counts(self, ending_within: int) -> Dict[str, int]:
+        """How many sign-ins are waiting, how many sessions are live, and how many
+        of those reach their absolute deadline within `ending_within` seconds.
+        Numbers only: no client, NAS or session is named. The idle deadline is not
+        counted as "ending": a session nobody is using runs it down all the time."""
+        with self._lock:
+            now = self._clock()
+            self._expire_locked(now)
+            ending = sum(
+                1
+                for record in self._sessions.values()
+                if self._policy.absolute_seconds - (now - record.created_at) <= ending_within
+            )
+            return {
+                "waiting": len(self._pending),
+                "connected": len(self._sessions),
+                "sessions_ending_soon": ending,
+            }
+
     def iter_secrets(self) -> Iterator[str]:
         """Every live session id and SynoToken, for the redaction filter."""
         with self._lock:

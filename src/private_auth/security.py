@@ -187,7 +187,10 @@ class OwnerSessions:
             self._sessions[self._key(token)] = session
         return token, session
 
-    def get(self, token: Optional[str]) -> Optional[OwnerSession]:
+    def get(self, token: Optional[str], *, touch: bool = True) -> Optional[OwnerSession]:
+        """The live session for this cookie value. A request the person made passes
+        `touch=True`, which moves the idle deadline; a page refreshing its own
+        figures passes False, so an open window cannot keep a session alive."""
         if not token:
             return None
         key = self._key(token)
@@ -199,6 +202,8 @@ class OwnerSessions:
             if now - session.created_at >= self._absolute or now - session.last_seen >= self._idle:
                 del self._sessions[key]
                 return None
+            if not touch:
+                return session
             session = OwnerSession(session.csrf_token, session.created_at, now)
             self._sessions[key] = session
             return session

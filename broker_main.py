@@ -151,11 +151,11 @@ def _private_settings(args: argparse.Namespace):
     }
 
 
-def _start_private_login(runtime, private, logger):
+def _start_private_login(runtime, private, logger, log_buffer=None):
     """Run the private login on its own port, in a background thread, and return
     `(server, thread)`. Its sessions, passkeys and attempt limits live only in
     this process; it shares nothing with the MCP listener but the broker's own
-    session manager."""
+    session manager. `log_buffer` is the in-memory log the owner may read there."""
     import threading
 
     import uvicorn
@@ -174,6 +174,7 @@ def _start_private_login(runtime, private, logger):
         allowed_origins=[private["origin"]],
         allowed_hosts=private["allowed_hosts"],
         secure_cookies=private["secure_cookies"],
+        log_buffer=log_buffer,
     )
     server = uvicorn.Server(
         uvicorn.Config(
@@ -233,6 +234,11 @@ def serve(args: argparse.Namespace) -> int:
     import main as entry
 
     entry.setup_logging(config.log_level)
+    # The owner can read the recent log on the private page, so the broker needs no
+    # terminal window. In memory only, redacted like every other handler.
+    from private_auth.logbuffer import attach as attach_log_buffer
+
+    log_buffer = attach_log_buffer()
     logger = logging.getLogger("synology-broker")
 
     errors = config.validate_config()
@@ -259,7 +265,7 @@ def serve(args: argparse.Namespace) -> int:
     sessions = SessionManager(policy.session)
     runtime = BrokerRuntime(policy, sessions, config.nas_configs, verify_ssl=config.verify_ssl)
     app = create_broker_app(runtime, policy, allowed_hosts=allowed_hosts)
-    private_server = _start_private_login(runtime, private, logger) if private else None
+    private_server = _start_private_login(runtime, private, logger, log_buffer) if private else None
     if private is None:
         logger.warning(
             "No private login is configured (no --private-origin): sessions cannot be signed in "
