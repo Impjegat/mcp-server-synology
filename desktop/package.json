@@ -1,0 +1,14 @@
+{
+  "name": "synology-broker-desktop",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Portable desktop shell for the Synology MCP broker: starts it, shows its private login, and tells you when a client is waiting.",
+  "scripts": {
+    "tauri": "tauri",
+    "dev": "tauri dev",
+    "build": "tauri build --no-bundle"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2"
+  }
+}

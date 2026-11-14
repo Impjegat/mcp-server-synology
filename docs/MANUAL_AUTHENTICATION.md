@@ -133,11 +133,12 @@ One file, read at start-up, never writable by the AI. See [`config/broker.exampl
 | `clients.<name>.folders` | Per NAS, the folders it may reach. Anything outside is refused, including through symbolic links. A folder listing or a search shows only what is inside, and the NFS share list only the shares these folders reach (a share that merely holds one of them appears by name alone, with none of its NFS rules) |
 | `clients.<name>.disconnect` | Whether it may end a session (default `true`) |
 | `deny_paths` | Folders refused for every client, however they are reached: a symbolic link, or a second share onto the same place, that leads into one is refused too |
-| `session` | `idle_seconds` (default 900), `absolute_seconds` (default 28800, never extended by use) and `pending_seconds` (default 300) |
+| `session` | `idle_seconds` (default 900), `absolute_seconds` (default 28800, never extended by use) and `pending_seconds` (default 300) for the NAS sessions; `owner_idle_seconds` (default 600) and `owner_absolute_seconds` (default 3600, at most 24 hours) for your own sign-in to the private page. The [settings page](#changing-settings-from-the-private-page) edits all but `pending_seconds` |
+| `restricted_mode` | `true` or `false`. When present it decides whether restricted mode applies, in place of `settings.json`. The settings page's write switch sets it |
 
 Two things worth knowing:
 
-- The broker applies **restricted mode as well as the policy**. To give a client a tool that changes things you need both the tool in its entry and `RESTRICTED_MODE=false` on the broker. Restricted mode is the better default.
+- The broker applies **restricted mode as well as the policy**. To give a client a tool that changes things, the tool must be in its entry and restricted mode must be off: `RESTRICTED_MODE=false` or `"restricted_mode": false` in `settings.json`, or `"restricted_mode": false` in the policy, which wins when it is present. The settings page's write switch edits the entry and the policy's value together, so a grant made there works without a second file. Restricted mode is the better default.
 - `synology_login` can never be granted, and the account, group and permission tools are off by default.
 - Folders are judged twice: by the path that was asked for, and by where DSM says it really is. A denied folder is placed the same way, so a link into it is refused. Where DSM will not say where something is (a folder it will not locate, or an entry in a listing with no real location), the answer is no: that entry is left out, and if it is a denied folder that cannot be located, nothing is served until it can be. DSM's answer for an allowed root is remembered for five minutes, so a root moved or replaced by a link takes up to that long to be seen; a denied folder is asked about on every request, so a swap there is seen at once.
 
@@ -239,6 +240,25 @@ Restart the application. It should list the tools straight away, even before you
 **How long it lasts.** A session ends after 15 minutes without use or 8 hours in all, whichever comes first (the policy can change both; use never extends the 8 hours). Restarting the AI application does not extend it and does not end it. The page's **Disconnect** button, or the `synology_logout` tool if the client may use it, ends it at once and logs out of the NAS. Either also withdraws a sign-in that is still being made, and so does cancelling the request from the front page, or letting it expire: a password you have just submitted cannot complete a connection you have just ended, and a session the NAS opened for it is logged out again, never used. Submit once; a second submit while the first is still running is told to wait.
 
 **If you mistype.** Three wrong answers in five minutes lock that sign-in for ten, well inside what DSM's own auto-block tolerates, and a locked sign-in does not contact the NAS. Asking for a code, an unreachable NAS and a certificate problem do not count against you.
+
+### More on the private page
+
+Beyond signing in one client at a time, the page (and the [desktop app](../desktop/README.md), which shows it in a window of its own) has:
+
+- **Sign in all** (`/login-all`): tick the clients, check the account, tool count and folders of each, type the password once, and it signs them in one after the other. It stops at the first failure, so a typo costs one attempt on one client and not one on every client. If the NAS refuses a code that was already used, it asks for the next one and carries on with the rest. Nothing is stored: the password is only in the page's field, is sent with each step and is cleared when the run ends.
+- **Dashboard** (`/`): each client's state, how long its session has left, when its grant ends (flagged in the last two weeks), and **Disconnect all**. Its figures refresh by themselves without keeping your own sign-in alive.
+- **Log** (`/log`): the broker's recent log lines, kept in memory only and redacted like the rest, so the broker needs no terminal window.
+- **`/attention`**: four numbers and nothing else, with no sign-in needed, so a tray icon can notify you after your page session has ended: sign-ins waiting, sessions live, sessions about to reach their absolute limit, and grants that have ended or end within two weeks. It names no client, NAS or session. It sits behind the same Host check as every route on the private port, so a web page cannot read it by rebinding a name to the port, and it carries no cross-origin permission. It does tell any program on this computer that can reach the port that a session is live, so keep the private port on loopback (the default, when neither `--host` nor `--private-host` says otherwise) or reachable only from your own devices.
+
+## Changing settings from the private page
+
+`/settings` changes three things, and only these: **how long sessions last** (your own sign-in to the page, and the NAS sessions the broker holds), **which folders each client may reach**, and **whether each client may change files** (create, rename and move) and, as a separate switch, **delete them**. Everything else in the policy (who the clients are, their token digests, which NAS they use, when their grants end, `deny_paths`, any tool outside the file-changing set) is carried over exactly.
+
+A save is two steps. The page first says what it would change, then asks for **your passkey again**, bound to exactly that change; only the passkey's answer lets the broker apply it. A wrong, cancelled, expired or replayed passkey changes nothing. The new policy is checked by the same parser that reads it at start-up before anything is written, written to a temporary file and moved into place in one step, and the old file is kept beside it as `broker-policy.json.previous`. A file edited by hand between the two steps is not overwritten.
+
+It takes effect at once, with no restart: each client's tools and folders are the new ones on its next call, and clients stay connected, because a NAS session is not an authorization (that is judged on every call). Changing a session limit applies to sessions already open: shortening can end one immediately, and lengthening lets one run longer than it was promised. **A write grant works only inside the client's folders**, because every file-changing tool goes through the same folder checks as reading; with no folders, nothing can be created.
+
+The policy file must be writable by the broker's own account. The container template mounts the configuration directory read-only (`:ro`), and then the page says the policy is read-only and offers no save; remove `:ro` from that mount if you want to use the page there, and accept that the broker can then rewrite its own policy. Client tokens and grants are never changed from the page, so adding or revoking a client, and renewing a grant, stay file edits and a restart.
 
 ## Renewing or revoking a client
 

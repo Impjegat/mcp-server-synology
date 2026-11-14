@@ -151,11 +151,12 @@ def _private_settings(args: argparse.Namespace):
     }
 
 
-def _start_private_login(runtime, private, logger):
+def _start_private_login(runtime, private, logger, log_buffer=None, settings=None):
     """Run the private login on its own port, in a background thread, and return
     `(server, thread)`. Its sessions, passkeys and attempt limits live only in
     this process; it shares nothing with the MCP listener but the broker's own
-    session manager."""
+    session manager. `log_buffer` is the in-memory log the owner may read there,
+    and `settings` what the owner may change there after a fresh passkey check."""
     import threading
 
     import uvicorn
@@ -174,6 +175,8 @@ def _start_private_login(runtime, private, logger):
         allowed_origins=[private["origin"]],
         allowed_hosts=private["allowed_hosts"],
         secure_cookies=private["secure_cookies"],
+        log_buffer=log_buffer,
+        settings=settings,
     )
     server = uvicorn.Server(
         uvicorn.Config(
@@ -233,6 +236,11 @@ def serve(args: argparse.Namespace) -> int:
     import main as entry
 
     entry.setup_logging(config.log_level)
+    # The owner can read the recent log on the private page, so the broker needs no
+    # terminal window. In memory only, redacted like every other handler.
+    from private_auth.logbuffer import attach as attach_log_buffer
+
+    log_buffer = attach_log_buffer()
     logger = logging.getLogger("synology-broker")
 
     errors = config.validate_config()
@@ -240,16 +248,22 @@ def serve(args: argparse.Namespace) -> int:
         print("Configuration errors: " + "; ".join(errors), file=sys.stderr)
         return 2
 
-    known_tools = set(SynologyMCPServer()._tool_registry)
+    registry = SynologyMCPServer()
+    known_tools = set(registry._tool_registry)
+    policy_path = os.path.expanduser(args.policy)
     try:
         policy = load_policy(
-            os.path.expanduser(args.policy),
+            policy_path,
             known_nas=config.get_nas_names(),
             known_tools=known_tools,
         )
     except PolicyError as error:
         print(f"Policy error: {error}", file=sys.stderr)
         return 2
+    # The policy may say whether restricted mode applies (the private page's write
+    # switches write it); when it does not, settings.json or RESTRICTED_MODE decide.
+    if policy.restricted_mode is not None:
+        config.restricted_mode = policy.restricted_mode
     # A grant that has ended is refused, and one about to end is worth a word now
     # rather than a client's first refusal. These name the client, never its token.
     for note in policy.grant_warnings(time.time()):
@@ -257,9 +271,25 @@ def serve(args: argparse.Namespace) -> int:
 
     allowed_hosts = list(args.allowed_host) or [f"127.0.0.1:{args.port}", f"localhost:{args.port}"]
     sessions = SessionManager(policy.session)
-    runtime = BrokerRuntime(policy, sessions, config.nas_configs, verify_ssl=config.verify_ssl)
+    runtime = BrokerRuntime(
+        policy,
+        sessions,
+        config.nas_configs,
+        verify_ssl=config.verify_ssl,
+        restricted_mode_setter=lambda value: setattr(config, "restricted_mode", value),
+    )
     app = create_broker_app(runtime, policy, allowed_hosts=allowed_hosts)
-    private_server = _start_private_login(runtime, private, logger) if private else None
+    from broker.policy_store import PolicyStore
+    from private_auth.settings import SettingsService
+
+    settings = SettingsService(
+        PolicyStore(policy_path, known_nas=config.get_nas_names(), known_tools=known_tools),
+        runtime,
+        registry._is_tool_allowed,
+    )
+    private_server = (
+        _start_private_login(runtime, private, logger, log_buffer, settings) if private else None
+    )
     if private is None:
         logger.warning(
             "No private login is configured (no --private-origin): sessions cannot be signed in "

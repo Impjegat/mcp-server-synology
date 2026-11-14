@@ -532,9 +532,11 @@ def render_markdown(
         "so they are off in restricted mode.",
         "- **A broker client** gets the tools in its policy entry (`tools`), or the default set "
         "marked below if it has none. A tool must be allowed by *both* the policy and the "
-        "broker's restricted mode: to give a client a tool that changes things, the broker needs "
-        "`RESTRICTED_MODE=false` as well as the tool in that client's entry. `synology_login` "
-        "can never be granted.",
+        "broker's restricted mode: to give a client a tool that changes things, restricted mode "
+        "must be off as well as the tool in that client's entry. It is off when "
+        '`RESTRICTED_MODE=false`, or when the policy says `"restricted_mode": false`, which '
+        "wins when present; the private page's write switch sets both together. "
+        "`synology_login` can never be granted.",
         "",
     ]
 

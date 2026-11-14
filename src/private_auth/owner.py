@@ -32,6 +32,10 @@ DEFAULT_CODE_MINUTES = 10
 # kind, so each may be redeemed only for its own purpose.
 _PURPOSE_SIGN_IN = "sign-in"
 _PURPOSE_ENROLL = "enroll"
+# A fresh passkey check for one particular change to the broker's settings. Its
+# challenge is bound to the digest of that change, and it cannot be redeemed as a
+# sign-in (or the other way round).
+_PURPOSE_CONFIRM = "confirm"
 
 
 def _b64(data: bytes) -> str:
@@ -311,8 +315,9 @@ class PasskeyOwnerAuth:
 
     # -- authenticating the owner -------------------------------------------
 
-    def begin_authentication(self) -> Optional[Tuple[str, Dict[str, Any]]]:
-        """Options for the browser to sign, or None if no passkey is enrolled."""
+    def _begin_assertion(
+        self, purpose: str, binding: str = ""
+    ) -> Optional[Tuple[str, Dict[str, Any]]]:
         from webauthn import generate_authentication_options, options_to_json
         from webauthn.helpers.structs import (
             PublicKeyCredentialDescriptor,
@@ -329,17 +334,36 @@ class PasskeyOwnerAuth:
             ],
             user_verification=UserVerificationRequirement.REQUIRED,
         )
-        return self._remember(options.challenge, _PURPOSE_SIGN_IN), json.loads(
+        return self._remember(options.challenge, purpose, binding), json.loads(
             options_to_json(options)
         )
 
+    def begin_authentication(self) -> Optional[Tuple[str, Dict[str, Any]]]:
+        """Options for the browser to sign, or None if no passkey is enrolled."""
+        return self._begin_assertion(_PURPOSE_SIGN_IN)
+
     def finish_authentication(self, state: str, credential: Dict[str, Any]) -> bool:
+        taken = self._take(state, _PURPOSE_SIGN_IN)
+        return taken is not None and self._verify_assertion(taken[0], credential)
+
+    def begin_confirmation(self, binding: str) -> Optional[Tuple[str, Dict[str, Any]]]:
+        """Options for a fresh passkey check that confirms one change, named by
+        `binding` (the digest of that change). The owner is already signed in; this
+        proves they are still the one at the device, and that it is this change they
+        approved."""
+        return self._begin_assertion(_PURPOSE_CONFIRM, binding)
+
+    def finish_confirmation(self, state: str, credential: Dict[str, Any]) -> Optional[str]:
+        """The binding the confirmation was begun with, if the passkey check passed;
+        None otherwise. A challenge is single-use and is spent even when it fails."""
+        taken = self._take(state, _PURPOSE_CONFIRM)
+        if taken is None or not self._verify_assertion(taken[0], credential):
+            return None
+        return taken[1]
+
+    def _verify_assertion(self, challenge: bytes, credential: Dict[str, Any]) -> bool:
         from webauthn import verify_authentication_response
 
-        taken = self._take(state, _PURPOSE_SIGN_IN)
-        if taken is None:
-            return False
-        challenge, _ = taken
         try:
             raw_id = _unb64(str(credential.get("rawId") or credential.get("id")))
             stored = next((c for c in self._store.credentials() if c.credential_id == raw_id), None)
