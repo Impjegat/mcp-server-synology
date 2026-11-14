@@ -64,7 +64,14 @@ fn load_ca(path: &str) -> Result<(reqwest::Certificate, Vec<u8>), String> {
     let bytes = std::fs::read(&path)
         .map_err(|error| format!("ca_file: cannot read {}: {error}", path.display()))?;
     let not_one = || format!("ca_file: {} is not a certificate (PEM or DER)", path.display());
-    let der = trust::certificate_der(&bytes).ok_or_else(not_one)?;
+    let der = trust::ca_file_der(&bytes).map_err(|error| match error {
+        trust::CaFileError::NotACertificate => not_one(),
+        trust::CaFileError::MoreThanOne => format!(
+            "ca_file: {} holds more than one certificate. It must hold only the CA \
+             certificate that signed the broker's.",
+            path.display()
+        ),
+    })?;
     let certificate = reqwest::Certificate::from_der(&der).map_err(|_| not_one())?;
     Ok((certificate, der))
 }

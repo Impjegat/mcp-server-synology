@@ -97,7 +97,20 @@ test('until Windows trusts the certificate no page opens, and Trust is offered',
   const [notice] = View.notices(s, '');
   assert.equal(notice.id, 'trust');
   assert.equal(notice.kind, 'warn');
-  assert.deepEqual(notice.action, { label: 'Trust certificate', command: 'trust_certificate' });
+  assert.equal(notice.action.label, 'Trust certificate');
+  assert.equal(notice.action.command, 'trust_certificate');
+});
+
+test('hovering over Trust certificate says what it does, and for which sites', () => {
+  const [notice] = View.notices(running({ window_untrusted: true, can_trust: true }), '');
+  assert.match(notice.action.hint, /trusted roots of your Windows account/);
+  assert.match(notice.action.hint, /any certificate that CA signs, for any site/);
+  assert.match(notice.action.hint, /Windows asks you to confirm/);
+  // It is a hover, not more text on the page.
+  assert.doesNotMatch(notice.text, /any site/);
+  // The update button needs no such warning.
+  const [update] = View.notices(running({ outdated: true, can_update: true }), '');
+  assert.equal(update.action.hint, undefined);
 });
 
 test('a certificate nothing vouches for is explained and cannot be trusted from here', () => {

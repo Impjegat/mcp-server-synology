@@ -60,6 +60,12 @@
     };
   }
 
+  // What pressing Trust certificate does, for whoever hovers over it. Windows says the
+  // same in its own dialog before anything is added; this is so the button is not a
+  // surprise.
+  const TRUST_HINT = 'Adds the broker\'s CA certificate to the trusted roots of your Windows account. ' +
+    'Windows will then trust any certificate that CA signs, for any site. Windows asks you to confirm first.';
+
   /**
    * Every notice a status calls for, newest cause last. `localError` is a refusal from
    * the last thing the person pressed. A notice with an `action` gets a button that
@@ -83,7 +89,7 @@
         id: 'trust',
         kind: 'warn',
         text: 'Windows does not trust the broker\'s certificate yet, so its pages cannot open here.',
-        action: s.can_trust ? { label: 'Trust certificate', command: 'trust_certificate' } : null,
+        action: s.can_trust ? { label: 'Trust certificate', command: 'trust_certificate', hint: TRUST_HINT } : null,
       });
     }
     if (running && s.outdated) {

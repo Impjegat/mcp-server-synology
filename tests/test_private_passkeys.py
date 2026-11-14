@@ -225,14 +225,17 @@ class TestWhoMayStartIt:
             stranger = SoftwareAuthenticator(RP_ID, ORIGIN)
             # They cannot answer the check...
             refused = await confirm(http, token, begun["state"], {"id": "x", "rawId": "x"})
-            # ...and cannot skip it either.
+            # ...and cannot skip it either: a check that was begun and never answered
+            # (a fresh one, not the one the failed try has just spent) finishes nothing.
+            unanswered = (await begin(http, token)).json()
             skipped = await finish(
-                http, token, begun["state"], stranger.create(_registration(world))
+                http, token, unanswered["state"], stranger.create(_registration(world))
             )
 
         assert refused.status_code == 401
         assert skipped.status_code == 400
         assert world.labels() == ["password manager"]
+        assert world.store.enrollment_open() is False
 
     @pytest.mark.asyncio
     async def test_asking_over_and_over_is_slowed_down(self, world):
@@ -333,6 +336,49 @@ class TestTheConfirmation:
 
 
 class TestTheNewPasskey:
+    @pytest.mark.asyncio
+    async def test_only_the_state_the_confirmation_handed_out_can_finish(self, world):
+        """A state made for anything else stores nothing, even fresh and unspent, and
+        even with a well-formed new passkey answering its own challenge: one from a
+        settings confirmation, from a sign-in, or from an addition that was begun but
+        not yet confirmed."""
+        newcomer = SoftwareAuthenticator(RP_ID, ORIGIN)
+        async with world.client() as http:
+            await sign_in(http, world.first)
+            token = await token_of(http)
+
+            replies = {}
+            for name, begun in (
+                ("a settings confirmation", world.owner.begin_confirmation("a" * 64)),
+                ("a sign-in", world.owner.begin_authentication()),
+            ):
+                state, options = begun
+                answer = newcomer.create(dict(_registration(world), challenge=options["challenge"]))
+                replies[name] = await finish(http, token, state, answer)
+                # Nor does it work at the code-based endpoint, which needs no session.
+                replies[name + ", at /enroll/finish"] = await http.post(
+                    "/enroll/finish",
+                    headers=HEADERS,
+                    json={"state": state, "credential": answer, "label": "x"},
+                )
+
+            unconfirmed = (await begin(http, token)).json()
+            answer = newcomer.create(
+                dict(_registration(world), challenge=unconfirmed["options"]["challenge"])
+            )
+            replies["an unconfirmed addition"] = await finish(
+                http, token, unconfirmed["state"], answer
+            )
+
+        assert {name: reply.status_code for name, reply in replies.items()} == {
+            "a settings confirmation": 400,
+            "a settings confirmation, at /enroll/finish": 403,
+            "a sign-in": 400,
+            "a sign-in, at /enroll/finish": 403,
+            "an unconfirmed addition": 400,
+        }
+        assert world.labels() == ["password manager"]
+
     @pytest.mark.asyncio
     async def test_it_must_answer_the_challenge_that_was_handed_out(self, world):
         async with world.client() as http:

@@ -70,6 +70,7 @@ function renderNotices() {
       act.type = 'button';
       act.className = 'action';
       act.textContent = notice.action.label;
+      act.title = notice.action.hint || '';
       act.disabled = busy.has(notice.action.command);
       act.addEventListener('click', () => call(notice.action.command));
       card.append(act);

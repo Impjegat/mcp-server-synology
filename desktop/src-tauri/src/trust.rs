@@ -21,6 +21,28 @@ pub fn certificate_der(bytes: &[u8]) -> Option<Vec<u8>> {
         .ok()
 }
 
+/// Why a `ca_file` cannot be used.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaFileError {
+    NotACertificate,
+    MoreThanOne,
+}
+
+/// The one certificate a `ca_file` holds, as DER.
+///
+/// A file with several certificates (a bundle) is refused, not read in part. Windows'
+/// PEM reader takes the first and says nothing of the rest, and this certificate is
+/// what "Trust certificate" offers to Windows: which one that is must never be an
+/// accident of the order of a file.
+pub fn ca_file_der(bytes: &[u8]) -> Result<Vec<u8>, CaFileError> {
+    const BEGIN: &[u8] = b"-----BEGIN CERTIFICATE-----";
+    let certificates = bytes.windows(BEGIN.len()).filter(|window| *window == BEGIN).count();
+    if certificates > 1 {
+        return Err(CaFileError::MoreThanOne);
+    }
+    certificate_der(bytes).ok_or(CaFileError::NotACertificate)
+}
+
 /// Whether there is something to trust and a point in doing it: the broker is running,
 /// the `ca_file` is what makes its certificate verify (so this is the right CA), and
 /// Windows itself does not accept it yet.
@@ -108,6 +130,25 @@ hKmLz8cm2GUCIQDiyVbTFCsCb3jvTAaiFZEhBL4rOXiRKqAUx2276KZj5A==
             certificate_der(b"-----BEGIN CERTIFICATE-----\nbm90IGEgY2VydA==\n-----END CERTIFICATE-----\n"),
             None
         );
+    }
+
+    #[test]
+    fn a_ca_file_holds_exactly_one_certificate() {
+        let der = certificate_der(PEM.as_bytes()).unwrap();
+        assert_eq!(ca_file_der(PEM.as_bytes()), Ok(der.clone()));
+        assert_eq!(ca_file_der(&der), Ok(der.clone()));
+        // Text around the certificate, as some tools write, does not make it a bundle.
+        let annotated = format!("subject=CN=test\n{PEM}\n# end\n");
+        assert_eq!(ca_file_der(annotated.as_bytes()), Ok(der));
+
+        // A bundle is refused whole, whichever certificate comes first in it.
+        let bundle = format!("{PEM}{PEM}");
+        assert_eq!(ca_file_der(bundle.as_bytes()), Err(CaFileError::MoreThanOne));
+        let three = format!("{PEM}\n{PEM}\n{PEM}");
+        assert_eq!(ca_file_der(three.as_bytes()), Err(CaFileError::MoreThanOne));
+
+        assert_eq!(ca_file_der(b""), Err(CaFileError::NotACertificate));
+        assert_eq!(ca_file_der(b"not a certificate"), Err(CaFileError::NotACertificate));
     }
 
     #[test]
