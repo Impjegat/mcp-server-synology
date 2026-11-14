@@ -34,7 +34,7 @@ Everything in `shipped/` is implemented and pushed. In date order:
 
 **Follow-up review (2026-09-30)**
 
-- [`followup-review-fixes`](shipped/2026-09-30-followup-review-fixes/PLAN.md) — validation errors no longer echo credentials, honest health summary, request-level time budgets
+- [`followup-review-fixes`](shipped/2026-09-30-followup-review-fixes/PLAN.md) — validation errors no longer echo credentials, honest health summary, request-level time budgets. The review it answers is kept beside it: [`REVIEW_FOLLOWUP_2026-09-29.md`](shipped/2026-09-30-followup-review-fixes/REVIEW_FOLLOWUP_2026-09-29.md). Its one further finding, JSON-escaped credentials slipping past the redactor, was fixed afterwards on `main` (`d8bfd5a`).
 
 **Manual authentication (2026-10-06 to 2026-10-11)** — the NAS password and one-time code never pass through an AI client. [`2026-10-06-manual-authentication`](shipped/2026-10-06-manual-authentication/PLAN.md) is the design; [`2026-10-10-manual-auth-roadmap`](shipped/2026-10-10-manual-auth-roadmap/PLAN.md) splits it into six PRs, and tracks the fixes that followed an independent review of them ([`IMPLEMENTATION_REVIEW_2026-10-11.md`](shipped/2026-10-10-manual-auth-roadmap/IMPLEMENTATION_REVIEW_2026-10-11.md)):
 
