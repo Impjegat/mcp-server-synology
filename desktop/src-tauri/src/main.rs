@@ -67,7 +67,7 @@ fn load_ca(path: &str) -> Result<(reqwest::Certificate, Vec<u8>), String> {
     let der = trust::ca_file_der(&bytes).map_err(|error| match error {
         trust::CaFileError::NotACertificate => not_one(),
         trust::CaFileError::MoreThanOne => format!(
-            "ca_file: {} holds more than one certificate. It must hold only the CA \
+            "ca_file: {} holds more than one certificate or key. It must hold only the CA \
              certificate that signed the broker's.",
             path.display()
         ),

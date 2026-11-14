@@ -17,6 +17,7 @@ import base64
 import hashlib
 import hmac
 import json
+import logging
 import os
 import secrets
 import tempfile
@@ -25,6 +26,9 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
+
+# The private page's own log, so what is said here is read where its lines are.
+logger = logging.getLogger("synology-private-login")
 
 STATE_TTL_SECONDS = 120
 MAX_OUTSTANDING_CHALLENGES = 256
@@ -445,7 +449,14 @@ class PasskeyOwnerAuth:
         host command printed, say) is replaced and no longer works."""
         if not self._store.credentials():
             return None
+        replaced = self._store.enrollment_open()
         code = self._store.new_enrollment_code(minutes=ADD_PASSKEY_MINUTES, allow_additional=True)
+        if replaced:
+            # Someone who printed a code on the host and finds it refused can see why.
+            logger.info(
+                "An enrollment code that was still unused was replaced: "
+                "a passkey is being added from the private page"
+            )
         return self.begin_enrollment(code)
 
     def finish_enrollment(

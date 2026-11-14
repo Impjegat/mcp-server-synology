@@ -30,17 +30,37 @@ pub enum CaFileError {
 
 /// The one certificate a `ca_file` holds, as DER.
 ///
-/// A file with several certificates (a bundle) is refused, not read in part. Windows'
-/// PEM reader takes the first and says nothing of the rest, and this certificate is
-/// what "Trust certificate" offers to Windows: which one that is must never be an
-/// accident of the order of a file.
+/// A file with more than one PEM block is refused, not read in part, whatever the
+/// blocks are (certificates under any label, or a key). Windows' PEM reader takes the
+/// first block it finds and says nothing of the rest, and this certificate is what
+/// "Trust certificate" offers to Windows: which one that is must never be an accident
+/// of the order of a file. So the single block is found here, it must be labelled as a
+/// certificate, and only that block is handed on to be decoded.
 pub fn ca_file_der(bytes: &[u8]) -> Result<Vec<u8>, CaFileError> {
-    const BEGIN: &[u8] = b"-----BEGIN CERTIFICATE-----";
-    let certificates = bytes.windows(BEGIN.len()).filter(|window| *window == BEGIN).count();
-    if certificates > 1 {
+    const BEGIN: &str = "-----BEGIN ";
+    const DASHES: &str = "-----";
+    let blocks = bytes.windows(BEGIN.len()).filter(|window| *window == BEGIN.as_bytes()).count();
+    if blocks == 0 {
+        // Not PEM at all: the file is the certificate itself (DER), or it is nothing.
+        return certificate_der(bytes).ok_or(CaFileError::NotACertificate);
+    }
+    if blocks > 1 {
         return Err(CaFileError::MoreThanOne);
     }
-    certificate_der(bytes).ok_or(CaFileError::NotACertificate)
+    let block = || -> Option<String> {
+        let text = std::str::from_utf8(bytes).ok()?;
+        let after_begin = &text[text.find(BEGIN)? + BEGIN.len()..];
+        let (label, rest) = after_begin.split_once(DASHES)?;
+        // `TRUSTED CERTIFICATE` is not one of these: it carries more than a certificate.
+        if label != "CERTIFICATE" && label != "X509 CERTIFICATE" {
+            return None;
+        }
+        let (body, _) = rest.split_once(&format!("-----END {label}-----"))?;
+        Some(format!("-----BEGIN CERTIFICATE-----{body}-----END CERTIFICATE-----\n"))
+    };
+    block()
+        .and_then(|block| certificate_der(block.as_bytes()))
+        .ok_or(CaFileError::NotACertificate)
 }
 
 /// Whether there is something to trust and a point in doing it: the broker is running,
@@ -149,6 +169,56 @@ hKmLz8cm2GUCIQDiyVbTFCsCb3jvTAaiFZEhBL4rOXiRKqAUx2276KZj5A==
 
         assert_eq!(ca_file_der(b""), Err(CaFileError::NotACertificate));
         assert_eq!(ca_file_der(b"not a certificate"), Err(CaFileError::NotACertificate));
+    }
+
+    /// The same certificate under another PEM label.
+    fn relabelled(label: &str) -> String {
+        PEM.replace("BEGIN CERTIFICATE", &format!("BEGIN {label}"))
+            .replace("END CERTIFICATE", &format!("END {label}"))
+    }
+
+    #[test]
+    fn a_second_block_of_any_kind_makes_the_file_a_bundle() {
+        const KEY: &str = "-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----\n";
+        let seconds = [
+            relabelled("TRUSTED CERTIFICATE"),
+            relabelled("X509 CERTIFICATE"),
+            KEY.to_string(),
+            "-----BEGIN EC PARAMETERS-----\nBggqhkjOPQMBBw==\n-----END EC PARAMETERS-----\n".to_string(),
+        ];
+        for second in seconds {
+            // Whichever comes first: the reader would take the first and stay silent.
+            for file in [format!("{PEM}{second}"), format!("{second}{PEM}")] {
+                assert_eq!(
+                    ca_file_der(file.as_bytes()),
+                    Err(CaFileError::MoreThanOne),
+                    "accepted:\n{file}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_one_block_must_be_labelled_a_certificate_and_be_whole() {
+        let der = certificate_der(PEM.as_bytes()).unwrap();
+        // An older label for the same thing is read as what it is.
+        assert_eq!(ca_file_der(relabelled("X509 CERTIFICATE").as_bytes()), Ok(der));
+        // A certificate with trust settings attached, a key, or anything else, is not.
+        for label in ["TRUSTED CERTIFICATE", "PRIVATE KEY", "CERTIFICATE REQUEST", "certificate", ""] {
+            assert_eq!(
+                ca_file_der(relabelled(label).as_bytes()),
+                Err(CaFileError::NotACertificate),
+                "label {label:?}"
+            );
+        }
+        // A block that never ends, or ends as something else.
+        let cut = &PEM[..PEM.find("-----END").unwrap()];
+        assert_eq!(ca_file_der(cut.as_bytes()), Err(CaFileError::NotACertificate));
+        let mismatched = PEM.replace("END CERTIFICATE", "END X509 CERTIFICATE");
+        assert_eq!(ca_file_der(mismatched.as_bytes()), Err(CaFileError::NotACertificate));
+        // A certificate label around something that is not one.
+        let hollow = "-----BEGIN CERTIFICATE-----\nbm90IGEgY2VydA==\n-----END CERTIFICATE-----\n";
+        assert_eq!(ca_file_der(hollow.as_bytes()), Err(CaFileError::NotACertificate));
     }
 
     #[test]

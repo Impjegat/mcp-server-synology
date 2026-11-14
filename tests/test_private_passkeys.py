@@ -448,15 +448,32 @@ class TestTheNewPasskey:
         assert world.labels() == ["password manager", "Windows Hello"]
 
     @pytest.mark.asyncio
-    async def test_a_code_from_the_host_that_was_still_open_stops_working(self, world):
+    async def test_a_code_from_the_host_that_was_still_open_stops_working(self, world, caplog):
         host_code = world.store.new_enrollment_code(allow_additional=True)
-        async with world.client() as http:
-            await sign_in(http, world.first)
-            token = await token_of(http)
-            await confirmed(http, world, token)
-            reply = await http.post("/enroll/begin", headers=HEADERS, json={"code": host_code})
+        with caplog.at_level(logging.DEBUG):
+            async with world.client() as http:
+                await sign_in(http, world.first)
+                token = await token_of(http)
+                await confirmed(http, world, token)
+                reply = await http.post("/enroll/begin", headers=HEADERS, json={"code": host_code})
 
         assert reply.status_code == 403
+        # And the log says why, for whoever printed that code and finds it refused...
+        assert "An enrollment code that was still unused was replaced" in caplog.text
+        # ...without the code itself.
+        assert host_code not in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_an_addition_that_replaces_nothing_does_not_say_it_did(self, world, caplog):
+        with caplog.at_level(logging.DEBUG):
+            async with world.client() as http:
+                await sign_in(http, world.first)
+                token = await token_of(http)
+                make = await confirmed(http, world, token)
+                await finish(http, token, make["state"], world.second.create(make["options"]))
+
+        assert "was replaced" not in caplog.text
+        assert world.labels() == ["password manager", "Windows Hello"]
 
     @pytest.mark.asyncio
     async def test_the_addition_is_logged_without_its_name(self, world, caplog):
