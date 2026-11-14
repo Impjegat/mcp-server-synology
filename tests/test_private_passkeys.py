@@ -160,6 +160,8 @@ class TestAddingAPasskey:
 
         assert signed_out.status_code == 303
         assert "<h2>Passkeys</h2>" in page
+        # It says what else adding one does: an unused code from the host is replaced.
+        assert "code from the broker host that has not been used yet stops working" in page
         assert re.search(r"<li>password manager \(added \d{4}-\d\d-\d\d\)</li>", page)
         assert '<button id="add-passkey" type="submit">Add a passkey</button>' in page
         assert '<script src="/static/passkeys.js" defer></script>' in page
@@ -485,6 +487,22 @@ class TestNames:
             (["a"], "passkey"),
             ("line\nbreak\tand\x00nul", "linebreakandnul"),
             ("x" * 200, "x" * 64),
+            # Characters that could make a name read as something else are dropped:
+            # bidirectional overrides, isolates and marks...
+            ("\u202eevil\u202c", "evil"),
+            ("\u2066a\u2069\u2067b\u2069", "ab"),
+            ("a\u200eb\u200fc", "abc"),
+            # ...zero-width characters, the no-break space, separators, the soft hyphen...
+            ("a\u200bb\u200dc\ufeffd", "abcd"),
+            ("na\xa0me", "name"),
+            ("a\u2028b\u2029c", "abc"),
+            ("pass\xadkey", "passkey"),
+            # ...tag and private-use characters. A name made only of these is no name.
+            ("a\U000e0041b\ue000c", "abc"),
+            ("\u202e\u200b\u2066", "passkey"),
+            # Letters of any script, and their combining marks, are kept.
+            ("e\u0301t\xe9", "e\u0301t\xe9"),
+            ("\u05e9\u05dc\u05d5\u05dd", "\u05e9\u05dc\u05d5\u05dd"),
             ("x" * 63 + " y", "x" * 63),
         ],
     )

@@ -93,6 +93,18 @@ pub fn commit_ok(commit: &str) -> bool {
 /// commit from the checkout's own `origin`, then switch to it. Nothing else is fetched
 /// or run, and each of the three values is refused unless it is plainly what it should
 /// be, because this line runs as the broker's account.
+///
+/// It goes through `cmd.exe` so that both steps run under one sign-in and git is found
+/// the way that account finds it. What keeps that safe:
+/// - `/d` skips any AutoRun command, and `/s` makes cmd drop only the outermost pair of
+///   quotes and take the rest as written;
+/// - the two paths are always inside quotes, where `& | < > ^ ( ) ; , =` and spaces are
+///   ordinary characters;
+/// - the characters that are not ordinary even inside quotes are refused outright by
+///   `plain_path`: a quote (which would end the quoting), `%` and `!` (which expand
+///   variables there), and control characters. `& | < > ^` are refused too, though
+///   quotes already disarm them;
+/// - the commit is forty hexadecimal digits and nothing else.
 pub fn update_command_line(git: &str, checkout: &str, commit: &str) -> Result<String, String> {
     if !commit_ok(commit) {
         return Err("This build of the app does not know which broker version to fetch.".to_string());
@@ -498,6 +510,7 @@ mod tests {
             "C:\\a&b",
             "C:\\a|b",
             "C:\\a>b",
+            "C:\\a<b",
             "C:\\a^b",
             "C:\\a!b",
             "C:\\a\nb",
@@ -505,6 +518,22 @@ mod tests {
             assert!(update_command_line("git", checkout, COMMIT).is_err(), "checkout {checkout:?}");
         }
         assert!(update_command_line("git\" & calc & \"", good, COMMIT).is_err());
+    }
+
+    #[test]
+    fn git_is_a_full_path_to_the_machine_wide_install_or_the_bare_name() {
+        // A full path leaves nothing to a search. The bare name is the fallback, and is
+        // looked up by cmd.exe running as the broker's account: in the folder it starts
+        // in (Windows' own, which only administrators can write) and then on that
+        // account's path, never on the path of whoever runs this app.
+        let git = find_git();
+        assert!(plain_path(&git));
+        if git != "git" {
+            let path = Path::new(&git);
+            assert!(path.is_absolute(), "{git} is not a full path");
+            assert!(path.is_file(), "{git} does not exist");
+            assert!(path.ends_with(Path::new("Git").join("cmd").join("git.exe")), "{git}");
+        }
     }
 
     #[test]
@@ -563,6 +592,11 @@ mod tests {
         /// An `origin` with two commits and a checkout of it sitting at the first one,
         /// in a folder whose name has a space in it.
         fn scene(name: &str) -> Option<(Scratch, PathBuf, String, String)> {
+            scene_in(name, "check out")
+        }
+
+        /// The same, with the checkout in a folder called `folder`.
+        fn scene_in(name: &str, folder: &str) -> Option<(Scratch, PathBuf, String, String)> {
             if Command::new(find_git()).arg("--version").output().is_err() {
                 eprintln!("git is not installed: skipped");
                 return None;
@@ -575,8 +609,8 @@ mod tests {
             git(&origin, &["init", "--quiet"]);
             let first = commit(&origin, "first");
             let second = commit(&origin, "second");
-            let checkout = root.join("check out");
-            git(&root, &["clone", "--quiet", "origin", "check out"]);
+            let checkout = root.join(folder);
+            git(&root, &["clone", "--quiet", "origin", folder]);
             git(&checkout, &["checkout", "--quiet", "--detach", &first]);
             Some((Scratch(root), checkout, first, second))
         }
@@ -598,6 +632,34 @@ mod tests {
             // Doing it again changes nothing and is not an error.
             assert_eq!(run(&line), 0);
             assert_eq!(git(&checkout, &["rev-parse", "HEAD"]), second);
+        }
+
+        /// Every character a Windows folder name may hold that means something to
+        /// cmd.exe outside quotes, and that `plain_path` lets through. None of them may
+        /// change what runs: the folder is still one folder, and nothing else happens.
+        #[test]
+        fn a_folder_name_full_of_punctuation_is_still_one_folder() {
+            let folder = "check (out) 1;2,3=4 it's `x` #$@+-[]{}~";
+            assert!(plain_path(folder));
+            let Some((scratch, checkout, first, second)) = scene_in("punctuation", folder) else {
+                return;
+            };
+            assert_eq!(git(&checkout, &["rev-parse", "HEAD"]), first);
+            let listing = |dir: &Path| -> Vec<std::ffi::OsString> {
+                let mut names: Vec<_> =
+                    std::fs::read_dir(dir).unwrap().flatten().map(|entry| entry.file_name()).collect();
+                names.sort();
+                names
+            };
+            let before = listing(&scratch.0);
+
+            let line = update_command_line(&find_git(), checkout.to_str().unwrap(), &second).unwrap();
+            assert_eq!(run(&line), 0);
+            assert_eq!(git(&checkout, &["rev-parse", "HEAD"]), second);
+            assert_eq!(std::fs::read_to_string(checkout.join("broker.txt")).unwrap(), "second");
+            // Nothing was made beside it by a piece of the name being read as a command
+            // or as a redirection.
+            assert_eq!(listing(&scratch.0), before);
         }
 
         #[test]

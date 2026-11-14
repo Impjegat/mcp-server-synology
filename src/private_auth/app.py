@@ -529,7 +529,13 @@ def _notice(text: str, error: bool = False) -> str:
 
 def _passkey_label(value: Any) -> str:
     """The name the owner gave a new passkey, made safe to store and to show: printable
-    characters only, at most 64 of them, and never empty."""
+    characters only, at most 64 of them, and never empty.
+
+    `str.isprintable` is false for every control, format, private-use and unassigned
+    character and for every separator but the plain space. So the characters that could
+    make a name read as something else are dropped as well: the bidirectional overrides,
+    isolates and marks, zero-width characters, the no-break space and the line
+    separators. Letters of any script and their combining marks are kept."""
     text = value if isinstance(value, str) else ""
     text = "".join(c for c in text if c.isprintable()).strip()[:64].strip()
     return text or "passkey"
@@ -1221,7 +1227,8 @@ class PrivateLoginApp:
             "<h2>Passkeys</h2>"
             + _notice(
                 "These sign you in to this page. Adding one asks for a passkey you already "
-                "have, then lets your device create the new one."
+                "have, then lets your device create the new one. A one-time code from the "
+                "broker host that has not been used yet stops working when you add one here."
             )
             + f'<ul id="passkey-list">{items}</ul>'
             f'<form id="passkeys" method="post" action="/settings">{_hidden(session.csrf_token)}'

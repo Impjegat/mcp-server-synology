@@ -114,7 +114,7 @@ Needs Rust (`rustup`, stable MSVC), the Visual Studio *C++ build tools*, Node an
 ```bash
 npm install
 npx tauri build --no-bundle      # synology-broker.exe in src-tauri/target/release/
-node --test tests/view.test.js   # what the window shows for each status
+node --test tests/view.test.js tests/release.test.js   # what the window shows; the release guard
 cd src-tauri && cargo test       # config, alerts, launch and update lines, trust, levels
 ```
 
@@ -126,7 +126,7 @@ A **debug** build (`npx tauri build --debug --no-bundle`) has two switches that 
 desktop/
   ui/         the control window (plain HTML, CSS and JS; no framework, no build step):
               view.js decides what to show for a status, app.js puts it on the page
-  tests/      view.test.js (node --test)
+  tests/      view.test.js and release.test.js (node --test; both also run in CI)
   src-tauri/
     src/      main.rs (windows, close), commands.rs, launch.rs (CreateProcessWithLogonW,
               the update line), trust.rs (Windows' certificate store), monitor.rs (health,
