@@ -499,6 +499,29 @@ class TestCommit:
         after = broker.runtime.executor_for("alice")
         assert after is not before and "create_file" in after._allowed_tools
 
+    @pytest.mark.asyncio
+    async def test_giving_one_client_write_access_leaves_another_clients_tools_alone(
+        self, service, broker
+    ):
+        """Restricted mode is one switch for the whole broker, so granting write to one
+        client turns it off for all; each client's own tool list is what still decides."""
+        config = sys.modules["mcp_server"].config
+        broker.runtime._set_restricted_mode = lambda value: setattr(
+            config, "restricted_mode", value
+        )
+        alice_before = {t.name for t in await broker.runtime.list_tools("alice")}
+
+        commit(service, {"clients": {"bob": {"write": True}}})
+
+        assert config.restricted_mode is False  # the switch really did flip
+        alice_after = {t.name for t in await broker.runtime.list_tools("alice")}
+        bob_after = {t.name for t in await broker.runtime.list_tools("bob")}
+        assert alice_after == alice_before and not alice_after & WRITE_TOOLS
+        assert WRITE_TOOLS <= bob_after
+        # ...and the tool is refused for a client whose list does not name it.
+        result = await broker.runtime.call_tool("alice", "create_file", {"path": "/docs/x"})
+        assert result.is_error and "not permitted" in result.content[0].text
+
     def test_signed_in_sessions_are_kept(self, service, broker):
         broker.sign_in("alice", "nas1")
         commit(service, {"clients": {"alice": {"folders": {"nas1": ["/photos"]}}}})
@@ -517,6 +540,10 @@ class TestCommit:
         service.commit(prepared.digest)
         with pytest.raises(SettingsError, match="expired"):
             service.commit(prepared.digest)
+
+    def test_the_expiry_message_mentions_another_open_page_replacing_it(self, service):
+        with pytest.raises(SettingsError, match="another open Settings page"):
+            service.commit("0" * 64)
 
     def test_a_digest_that_was_never_prepared_is_refused(self, service, broker):
         before = broker.runtime.policy

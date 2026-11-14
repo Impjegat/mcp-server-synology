@@ -186,6 +186,38 @@ class TestApiState:
         assert "Synology broker" in page
 
 
+class TestIdleTextStaysCurrent:
+    @pytest.mark.asyncio
+    async def test_the_state_text_comes_with_the_figures_and_follows_the_idle_clock(self, private):
+        private.broker.sign_in("alice", "nas1")  # idle limit 100 s in this fixture
+        async with private.client() as http:
+            await sign_in(http)
+            page = (await http.get("/")).text
+            first = (await http.get("/api/state")).json()["rows"][0]
+            private.broker.clock.advance(50)  # half the idle limit used up
+            second = (await http.get("/api/state")).json()["rows"][0]
+
+        assert "<td>connected (idle limit in about 1 min)</td>" in page
+        assert first["state_text"] == "connected (idle limit in about 1 min)"
+        assert second["state_text"] == "connected (idle limit in about 0 min)"
+
+    @pytest.mark.asyncio
+    async def test_the_other_states_have_their_sentences_too(self, private):
+        private.broker.sessions.begin_pending("bob", "nas1")
+        async with private.client() as http:
+            await sign_in(http)
+            rows = (await http.get("/api/state")).json()["rows"]
+        texts = {(r["client"], r["nas"]): r["state_text"] for r in rows}
+        assert texts[("alice", "nas1")] == "not connected"
+        assert texts[("bob", "nas1")] == "waiting for you to sign in"
+
+    @pytest.mark.asyncio
+    async def test_the_script_rewrites_the_state_cell_with_the_other_clocks(self, private):
+        async with private.client() as http:
+            script = (await http.get("/static/dashboard.js")).text
+        assert "row.state_text" in script and "previousElementSibling" in script
+
+
 class TestDashboardAdditions:
     @pytest.mark.asyncio
     async def test_disconnect_all_is_offered_only_when_something_is_connected(self, private):
@@ -400,6 +432,32 @@ class TestSignInAllStep:
         assert private.runner.requests == []
 
     @pytest.mark.asyncio
+    async def test_calls_in_quick_succession_from_one_address_are_slowed_down(self, private):
+        async with private.client() as http:
+            await sign_in(http)
+            token = await csrf(http)
+            replies = [await step(http, token, password="") for _ in range(40)]
+
+        statuses = [r.status_code for r in replies]
+        assert statuses[0] == 400 and 429 in statuses
+        limited = next(r for r in replies if r.status_code == 429).json()
+        assert limited["ok"] is False and limited["code"] == "rate_limited"
+        assert "minute" in limited["message"] and PASSWORD not in limited["message"]
+        assert private.runner.requests == []
+
+    @pytest.mark.asyncio
+    async def test_a_normal_run_is_nowhere_near_the_limit(self, private):
+        async with private.client() as http:
+            await sign_in(http)
+            token = await csrf(http)
+            outcomes = [
+                (await step(http, token, client=c, nas=n)).status_code
+                for c, n in (("alice", "nas1"), ("bob", "nas1"), ("bob", "nas2"))
+                for _ in range(3)  # even with a few retries each
+            ]
+        assert 429 not in outcomes
+
+    @pytest.mark.asyncio
     async def test_an_mcp_clients_token_cannot_use_it(self, private):
         async with private.client() as http:
             response = await http.post(
@@ -464,6 +522,43 @@ class TestLogBuffer:
             ("127.0.0.1:50001", "/staticky/app.css"),
         )
         assert len(kept) == 4
+
+    def test_a_sign_in_request_id_is_not_kept_in_the_buffer(self):
+        class Plain(logging.Handler):
+            """What another handler (the terminal's, say) sees: the original record."""
+
+            def __init__(self):
+                super().__init__()
+                self.messages = []
+
+            def emit(self, record):
+                self.messages.append(record.getMessage())
+
+        ring, plain = RingLogHandler(), Plain()
+        logger = logging.getLogger("uvicorn.access")
+        logger.addHandler(ring)
+        logger.addHandler(plain)
+        logger.setLevel(logging.INFO)
+        fmt = '%s - "%s %s HTTP/%s" %d'
+        try:
+            logger.info(fmt, "127.0.0.1:5", "GET", "/login/SECRET-ID_1?x=2", "1.1", 200)
+            logger.info(fmt, "127.0.0.1:5", "POST", "/login/SECRET-ID_1", "1.1", 303)
+        finally:
+            logger.removeHandler(ring)
+            logger.removeHandler(plain)
+
+        assert len(ring.lines()) == 2
+        for line in ring.lines():
+            assert "SECRET-ID_1" not in line and "/login/***" in line
+        assert "/login/***?x=2" in ring.lines()[0]
+        # The record itself was not changed: the other handler still has the real one.
+        assert len(plain.messages) == 2
+        assert all("SECRET-ID_1" in message for message in plain.messages)
+
+    def test_other_paths_that_start_alike_are_left_as_they_are(self):
+        kept = self._access_lines(("127.0.0.1:5", "/loginx/abc"), ("127.0.0.1:5", "/login-all"))
+        assert any("/loginx/abc" in line for line in kept)
+        assert any("/login-all" in line for line in kept)
 
     def test_a_line_in_a_shape_that_is_not_uvicorns_is_kept(self):
         handler = RingLogHandler()

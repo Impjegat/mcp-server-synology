@@ -33,13 +33,20 @@ The broker runs as its own account so that nothing running as the user (where AI
 - **The policy carries `restricted_mode`**, instead of the page also editing `settings.json`: one file, validated by one parser.
 - **Two owner-session keys** (idle and absolute), mirroring the NAS session pair, rather than one.
 - **"Write access" means file changes only** (create, rename, move), with delete separate. Containers, downloads, sharing and accounts are not offered by the page.
+- **A `ca_file` setting, and the browser as a fallback** (not in the first draft; see "Found on the first real run").
 - **Stop is a hard stop for now.** A broker ended from outside cannot log its NAS sessions out. Follow-up: a graceful stop (an owner-gated `/shutdown`, triggered from the app's window when an owner session is open, with the hard stop as the fallback).
+
+## Found on the first real run
+
+The broker's certificate comes from a private CA that Windows does not trust (the user's browser trusts it by other means). The app's strict health check therefore failed against a broker that was running, and reported "did not answer within 60 seconds". Also, a browser engine refuses passkeys on a site with a certificate error, so the app's own window could never have offered one.
+
+What changed: a `ca_file` setting (the CA's public certificate, used for the app's own checks only; nothing is added to Windows), a distinct "running, but the certificate is not trusted" state, and a default-browser fallback (**Open in browser**). The window opens only when Windows' own store trusts the certificate, since the `ca_file` does not count for a window. The optional per-user trust import (`certutil -user -addstore Root`) is described in `desktop/README.md` with the reason the CA's private key matters.
 
 ## Checked, and not yet
 
-Checked: the full Python suite (`pytest`, 1769 passed) and lint; `cargo test` (alert rules, config, launch parsing) and `clippy`; the release build; the app starts, hides to the tray on close, and its control window talks to the Rust side (status, validation, refusals, CSP) driven over the DevTools protocol.
+Checked: the Python suite (1912 passed) and lint; `cargo test` and `clippy`; the release build, which runs, hides to the tray and keeps its data beside itself; the control window driven over the DevTools protocol (IPC, validation, refusals, CSP); certificate handling against a fake broker on a throwaway CA (no `ca_file`, the right one, a missing one). On the real machine with the **old** broker: started as the broker account, verified through the `ca_file`, and **Open in browser** with the 1Password passkey signed in.
 
-Not yet, because they need the real broker account, certificate and passkey (all the user's): starting the broker as its own account and whether Windows lets the app end it; the passkey inside the app's window; whether DSM accepts one code for several sign-ins; the remote page being refused the app's commands (defended in depth, not exercised).
+Not yet, because they need the real broker, its host and the user's passkey: any of the new broker pages against the real broker (it still ran the old code); whether Windows lets the app end the broker it started; whether DSM accepts one verification code for several sign-ins; the passkey inside the app's own window (needs Windows to trust the CA); the remote page being refused the app's commands (defended in depth, not exercised).
 
 ## Things only the user does
 
