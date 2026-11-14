@@ -11,6 +11,7 @@ h1{font-size:1.25rem;margin:0}
 .pill.attention{color:var(--warn);border-color:var(--warn)}
 .message{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:.6rem .8rem}
 .message.error{border-color:var(--bad);color:var(--bad)}
+.message.warn{border-color:var(--warn);color:var(--warn)}
 .muted{color:var(--muted);font-size:.9rem}
 code{font-size:.85rem;word-break:break-all}
 label{display:block;margin:.9rem 0 .25rem;font-weight:600}

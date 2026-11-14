@@ -9,6 +9,7 @@
     "allow-start-broker",
     "allow-stop-broker",
     "allow-open-broker",
+    "allow-open-browser",
     "allow-quit-app"
   ]
 }

@@ -8,6 +8,7 @@ fn main() {
             "start_broker",
             "stop_broker",
             "open_broker",
+            "open_browser",
             "quit_app",
         ])),
     )

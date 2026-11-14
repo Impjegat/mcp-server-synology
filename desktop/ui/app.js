@@ -10,7 +10,7 @@ const els = {
   startPanel: $('start-panel'), runningPanel: $('running-panel'),
   command: $('command'), account: $('account'),
   form: $('start-form'), password: $('password'), start: $('start'),
-  counts: $('counts'), stop: $('stop'), externalNote: $('external-note'),
+  counts: $('counts'), stop: $('stop'), externalNote: $('external-note'), certNote: $('cert-note'),
 };
 
 const LABELS = { stopped: 'Stopped', starting: 'Starting', running: 'Running', error: 'Problem' };
@@ -52,6 +52,14 @@ function render(status) {
   els.stop.disabled = Boolean(status.external);
   els.externalNote.hidden = !status.external;
 
+  const untrusted = running && Boolean(status.cert_untrusted);
+  els.certNote.hidden = !untrusted;
+  els.certNote.textContent = untrusted
+    ? 'The broker is running, but Windows does not trust its certificate, so a window here cannot use passkeys and ' +
+      'the tray cannot read its alerts. Buttons open your browser instead. To fix it, set "ca_file" in ' +
+      'synology-broker-app.json to the CA certificate that signed it (see the README).'
+    : '';
+
   setMessage(status.message, status.phase === 'error');
 }
 
@@ -69,6 +77,7 @@ els.form.addEventListener('submit', async (event) => {
 
 const open = (path) => () => invoke('open_broker', { path }).catch((e) => setMessage(String(e), true));
 $('open').addEventListener('click', open('/'));
+$('open-browser').addEventListener('click', () => invoke('open_browser', { path: '/' }).catch((e) => setMessage(String(e), true)));
 $('login-all').addEventListener('click', open('/login-all'));
 $('log').addEventListener('click', open('/log'));
 $('stop').addEventListener('click', () => invoke('stop_broker').catch((e) => setMessage(String(e), true)));

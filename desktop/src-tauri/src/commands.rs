@@ -141,16 +141,44 @@ pub fn spawn_stop(app: &AppHandle) {
     });
 }
 
-/// Show the broker's page in its own window. That window loads a remote page and has
-/// no capability: it cannot call anything in this app, and it cannot leave the
-/// broker's address.
-pub async fn open(app: &AppHandle, path: &str) -> Result<(), String> {
+fn broker_page(app: &AppHandle, path: &str) -> Result<Url, String> {
     if !PAGES.contains(&path) {
         return Err("That page is not one the app opens.".to_string());
     }
     let state = app.state::<AppState>();
-    let target = Url::parse(&format!("{}{}", state.config.broker_url, path))
-        .map_err(|error| format!("The broker's address is not valid: {error}"))?;
+    Url::parse(&format!("{}{}", state.config.broker_url, path))
+        .map_err(|error| format!("The broker's address is not valid: {error}"))
+}
+
+/// Show the broker's page in the user's default browser. The address is the broker's
+/// own (validated https on this computer) and is passed as one argument, never through
+/// a shell.
+pub fn open_in_browser(app: &AppHandle, path: &str) -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let target = broker_page(app, path)?;
+    std::process::Command::new("rundll32")
+        .args(["url.dll,FileProtocolHandler", target.as_str()])
+        .creation_flags(CREATE_NO_WINDOW)
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("Windows would not open the browser: {error}"))
+}
+
+/// Show the broker's page in its own window. That window loads a remote page and has
+/// no capability: it cannot call anything in this app, and it cannot leave the
+/// broker's address.
+///
+/// If Windows does not trust the broker's certificate, a browser engine refuses
+/// passkeys on the page (WebAuthn is not offered on a site with a certificate
+/// error), so the page opens in the default browser instead, where the person has
+/// already dealt with that.
+pub async fn open(app: &AppHandle, path: &str) -> Result<(), String> {
+    let target = broker_page(app, path)?;
+    if app.state::<AppState>().status().cert_untrusted {
+        return open_in_browser(app, path);
+    }
     let origin = target.origin();
 
     if let Some(existing) = app.get_webview_window("broker") {
@@ -179,6 +207,16 @@ pub async fn open_broker(
 ) -> Result<(), String> {
     require_main(&window)?;
     open(&app, path.as_deref().unwrap_or("/")).await
+}
+
+#[tauri::command]
+pub fn open_browser(
+    window: WebviewWindow,
+    app: AppHandle,
+    path: Option<String>,
+) -> Result<(), String> {
+    require_main(&window)?;
+    open_in_browser(&app, path.as_deref().unwrap_or("/"))
 }
 
 pub fn spawn_open(app: &AppHandle, path: &'static str) {

@@ -16,6 +16,11 @@ pub struct Config {
     pub start_command: String,
     /// Where the broker's private login is. Must be HTTPS on this computer.
     pub broker_url: String,
+    /// The public certificate (PEM) of the CA that signed the broker's certificate, if
+    /// Windows does not already trust it. It is used for this app's own checks of the
+    /// broker only; it is not added to Windows. A relative path is read from the folder
+    /// the .exe is in. This is the same file the adapter calls `ca_file`.
+    pub ca_file: Option<String>,
     /// Seconds between checks of the broker while it runs (3 to 300).
     pub poll_seconds: u64,
     /// End the broker when the app quits (only if this app started it).
@@ -29,6 +34,7 @@ impl Default for Config {
             account: format!("{computer}\\synbroker"),
             start_command: r"C:\SynologyBroker\start-broker.cmd".to_string(),
             broker_url: "https://localhost:8444".to_string(),
+            ca_file: None,
             poll_seconds: 10,
             stop_broker_on_quit: true,
         }
@@ -74,6 +80,9 @@ impl Config {
         }
         if url.username() != "" || url.password().is_some() {
             return Err(format!("{FILE_NAME}: broker_url must not carry a user name or password"));
+        }
+        if self.ca_file.as_deref().is_some_and(|path| path.trim().is_empty()) {
+            return Err(format!("{FILE_NAME}: ca_file is empty (leave it out if there is none)"));
         }
         self.broker_url = url.as_str().trim_end_matches('/').to_string();
         self.poll_seconds = self.poll_seconds.clamp(3, 300);
@@ -139,6 +148,14 @@ mod tests {
     fn a_trailing_slash_is_dropped() {
         let config = Config::parse(r#"{"broker_url":"https://localhost:8444/"}"#).unwrap();
         assert_eq!(config.broker_url, "https://localhost:8444");
+    }
+
+    #[test]
+    fn a_ca_file_is_optional_and_may_not_be_blank() {
+        assert_eq!(Config::parse("{}").unwrap().ca_file, None);
+        let config = Config::parse(r#"{"ca_file":"C:\\certs\\ca.pem"}"#).unwrap();
+        assert_eq!(config.ca_file.as_deref(), Some("C:\\certs\\ca.pem"));
+        assert!(Config::parse(r#"{"ca_file":"  "}"#).is_err());
     }
 
     #[test]

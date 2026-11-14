@@ -15,7 +15,7 @@ It is a shell around the broker, not a second authority. It never sees your NAS 
 
 1. Copy `synology-broker.exe` to a folder you keep (it makes `synology-broker-data/` beside itself for the browser's data, so the folder is the whole app) and run it.
 2. Type the Windows password of the broker's account and press **Start broker**. The window shows *Running* when the broker answers.
-3. **Open broker**, sign in with your passkey, then **Sign in all clients**: tick the clients, type the NAS password (and a code if the account uses one) once.
+3. **Open broker** (or **Open in browser**, which is what it does anyway until Windows trusts the broker's certificate), sign in with your passkey, then **Sign in all clients**: tick the clients, type the NAS password (and a code if the account uses one) once.
 4. Closing the window hides it to the tray. **Quit** from the tray or the window ends the broker too, if this app started it.
 
 If the broker is already running (started the old way), the app finds it and shows *Running*, but it cannot stop a broker it did not start.
@@ -29,14 +29,31 @@ Optional, `synology-broker-app.json` beside the `.exe`. Everything has a default
   "account": "BERNARD-PC\\synbroker",
   "start_command": "C:\\SynologyBroker\\start-broker.cmd",
   "broker_url": "https://localhost:8444",
+  "ca_file": "C:\\path\\to\\broker-ca.pem",
   "poll_seconds": 10,
   "stop_broker_on_quit": true
 }
 ```
 
 - `account` defaults to `<this computer>\synbroker`; `start_command` to `C:\SynologyBroker\start-broker.cmd` (a `.cmd`/`.bat` runs through `cmd.exe`, anything else directly).
-- `broker_url` must be `https` on this computer. The app checks the broker's certificate against Windows' own store, exactly as the browser would.
+- `broker_url` must be `https` on this computer.
+- `ca_file` is the **public** certificate of the CA that signed the broker's certificate: the same file your adapter calls `ca_file`. See [The broker's certificate](#the-brokers-certificate). Leave it out if Windows already trusts the broker's certificate.
 - An unknown or invalid setting is an error shown in the window, not ignored, because this file decides which account your password is used for.
+
+## The broker's certificate
+
+The broker serves HTTPS with a certificate from a private CA, which Windows does not know. Two things follow:
+
+- **The app's own checks** (is the broker up, and does anything need you) verify that certificate. Without `ca_file` it cannot, so the window says *Running, but Windows does not trust its certificate* and the tray cannot read alerts. With `ca_file` set it verifies against that CA, and only for these checks: nothing is added to Windows.
+- **The app's window** is a Chromium engine, and a browser engine refuses to offer a passkey on a site with a certificate error. So for passkeys in the window, Windows itself must trust the CA. Until it does, **Open broker** opens your default browser instead, where you have already dealt with that (and where a password manager's passkey works). **Open in browser** does the same on purpose.
+
+If you want the window to work, trust the CA for your account only (a Windows security dialog asks you to confirm):
+
+```bash
+certutil -user -addstore Root "C:\path\to\broker-ca.pem"
+```
+
+Do that only if the CA's **private key** is kept away from anything an AI tool can read: anyone holding it could mint a certificate for *any* website that Edge and Chrome on your account would then trust. A CA made only to sign `localhost` for the broker is best deleted of its key once the broker's certificate exists, or limited with name constraints. This is your decision; the app never changes the trust store.
 
 ## What this does and does not protect
 
@@ -49,8 +66,8 @@ Optional, `synology-broker-app.json` beside the `.exe`. Everything has a default
 
 These depend on the broker's account, its certificate and your passkey, so they were not exercised in development:
 
-- starting the broker as its own account (and whether Windows lets the app end it afterwards);
-- the passkey inside the app's window. A passkey kept only in 1Password's browser extension will not appear there, because extensions do not load in an embedded window. If it does not work, add a second passkey with Windows Hello (`broker_main.py enroll new-code --add-device` on the broker host) and use that; the 1Password one keeps working in your browser;
+- whether Windows lets the app end the broker it started (starting it as its own account has been seen to work);
+- the passkey inside the app's window, which needs the CA trusted by Windows (above). A passkey kept only in 1Password's browser extension will not appear there either, because extensions do not load in an embedded window. If it does not work, use **Open in browser**, or add a second passkey with Windows Hello (`broker_main.py enroll new-code --add-device` on the broker host) and use that for the window;
 - whether DSM accepts one verification code for several sign-ins in a row (if not, *Sign in all* asks for the next code and carries on).
 
 ## Building
