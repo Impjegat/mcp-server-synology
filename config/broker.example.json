@@ -2,7 +2,9 @@
   "session": {
     "idle_seconds": 900,
     "absolute_seconds": 28800,
-    "pending_seconds": 300
+    "pending_seconds": 300,
+    "owner_idle_seconds": 600,
+    "owner_absolute_seconds": 3600
   },
   "deny_paths": [
     "/homes/admin"

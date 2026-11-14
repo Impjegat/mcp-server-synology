@@ -500,3 +500,55 @@ class TestOutstandingChallenges:
         for _ in range(MAX_OUTSTANDING_CHALLENGES):
             owner.begin_authentication()
         assert owner.finish_authentication(oldest_state, device.get(oldest_options)) is False
+
+
+class TestConfirmation:
+    """A fresh passkey check for one change. Its challenge is bound to that change and
+    is good for nothing else."""
+
+    def test_a_confirmation_returns_what_it_was_bound_to(self, owner, store, device):
+        _enroll(owner, store, device)
+        state, options = owner.begin_confirmation("digest-of-the-change")
+        assert options["userVerification"] == "required"
+        assert owner.finish_confirmation(state, device.get(options)) == "digest-of-the-change"
+
+    def test_it_is_single_use(self, owner, store, device):
+        _enroll(owner, store, device)
+        state, options = owner.begin_confirmation("d")
+        answer = device.get(options)
+        assert owner.finish_confirmation(state, answer) == "d"
+        assert owner.finish_confirmation(state, answer) is None
+
+    def test_a_sign_in_challenge_cannot_confirm_a_change(self, owner, store, device):
+        _enroll(owner, store, device)
+        state, options = owner.begin_authentication()
+        assert owner.finish_confirmation(state, device.get(options)) is None
+
+    def test_a_confirmation_challenge_cannot_sign_in(self, owner, store, device):
+        _enroll(owner, store, device)
+        state, options = owner.begin_confirmation("d")
+        assert owner.finish_authentication(state, device.get(options)) is False
+
+    def test_a_passkey_that_does_not_verify_confirms_nothing(self, owner, store, device):
+        _enroll(owner, store, device)
+        state, options = owner.begin_confirmation("d")
+        assert owner.finish_confirmation(state, {"id": "x", "rawId": "x"}) is None
+        # The challenge was spent by the failed try.
+        assert owner.finish_confirmation(state, device.get(options)) is None
+
+    def test_an_answer_that_skipped_user_verification_does_not_confirm(self, owner, store, device):
+        _enroll(owner, store, device)
+        device.user_verified = False  # the device answers without a PIN or fingerprint
+        state, options = owner.begin_confirmation("d")
+        assert owner.finish_confirmation(state, device.get(options)) is None
+
+    def test_it_expires_with_the_other_challenges(self, owner, store, device, clock):
+        from private_auth.owner import STATE_TTL_SECONDS
+
+        _enroll(owner, store, device)
+        state, options = owner.begin_confirmation("d")
+        clock.advance(STATE_TTL_SECONDS + 1)
+        assert owner.finish_confirmation(state, device.get(options)) is None
+
+    def test_with_no_passkey_enrolled_there_is_nothing_to_confirm_with(self, owner):
+        assert owner.begin_confirmation("d") is None

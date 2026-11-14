@@ -3,9 +3,12 @@
 # The administrator writes one policy file on the broker host. It names each
 # client and lists, for that client, the NAS aliases it may use, the tools it
 # may call and the folder roots it may reach, plus the session deadlines. It is
-# read once at startup and never changed by a request, and nothing a client
-# sends can enlarge it (plans/shipped/2026-10-06-manual-authentication/PLAN.md §3.2,
-# §6.2).
+# read at startup, and nothing a client sends can enlarge it (plans/shipped/
+# 2026-10-06-manual-authentication/PLAN.md §3.2, §6.2). The one thing that changes
+# it while the broker runs is the owner's settings page on the private port, which
+# needs a fresh passkey for every save, is validated by `parse_policy` below, and
+# never touches a client's token digest or expiry (`policy_store.py`,
+# `private_auth/settings.py`).
 #
 # The file holds only a SHA-256 digest of each client's bearer token, never the
 # token. A file that looks as if it contains a token, a password or anything
@@ -94,12 +97,28 @@ DEFAULT_TOOLS: FrozenSet[str] = frozenset(
 # password, and these two would let a client change what the broker holds.
 NEVER_TOOLS: FrozenSet[str] = frozenset({"synology_login"})
 
+# What the private page's "write access" switches grant. File changes only: every
+# one of these goes through the same folder checks as reading, so it reaches only
+# the client's folders. Deleting is its own switch because it cannot be undone.
+# Containers, downloads, sharing and accounts are a different trust tier and are
+# never offered by the page; they can still be named in a client's `tools` by hand.
+WRITE_TOOLS: FrozenSet[str] = frozenset(
+    {"create_directory", "create_file", "move_file", "rename_file"}
+)
+DELETE_TOOLS: FrozenSet[str] = frozenset({"delete"})
+
 _DISCONNECT_TOOL = "synology_logout"
 
 _CLIENT_NAME = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 _DIGEST = re.compile(r"^[0-9a-f]{64}$")
-_ROOT_KEYS = {"clients", "session", "deny_paths"}
-_SESSION_KEYS = {"idle_seconds", "absolute_seconds", "pending_seconds"}
+_ROOT_KEYS = {"clients", "session", "deny_paths", "restricted_mode"}
+_SESSION_KEYS = {
+    "idle_seconds",
+    "absolute_seconds",
+    "pending_seconds",
+    "owner_idle_seconds",
+    "owner_absolute_seconds",
+}
 _CLIENT_KEYS = {"token_sha256", "nas", "tools", "folders", "disconnect", "expires"}
 # How far ahead a grant may end, and how soon before it ends the broker says so.
 _MAX_GRANT_SECONDS = 366 * 86400
@@ -120,11 +139,17 @@ _SECRET_LOOKING = re.compile(r"(token|password|passwd|secret|otp|sid|cookie|sess
 @dataclass(frozen=True)
 class SessionPolicy:
     """Session lifetimes, in seconds. Idle time advances each time a session is
-    used for a permitted call; the absolute lifetime never does."""
+    used for a permitted call; the absolute lifetime never does.
+
+    The first three are for the NAS sessions the broker holds for its clients. The
+    `owner_` pair is for the owner's own sign-in to the private page: how long it
+    stays signed in unused, and in all."""
 
     idle_seconds: int = 900
     absolute_seconds: int = 28800
     pending_seconds: int = 300
+    owner_idle_seconds: int = 600
+    owner_absolute_seconds: int = 3600
 
 
 @dataclass(frozen=True)
@@ -152,6 +177,10 @@ class Policy:
     clients: Mapping[str, ClientPolicy]
     session: SessionPolicy = SessionPolicy()
     deny_paths: Tuple[str, ...] = ()
+    # When set, overrides the broker's restricted mode (`settings.json` or
+    # RESTRICTED_MODE). The private page's write switches set it, so a grant made
+    # there takes effect without a second file being edited.
+    restricted_mode: Optional[bool] = None
 
     def folder_policy_for(self, client: ClientPolicy) -> FolderPolicy:
         """The folder policy for one client: its roots plus the shared denials."""
@@ -300,7 +329,21 @@ def parse_policy(
         values["absolute_seconds"] <= 7 * 24 * 3600,
         "session.absolute_seconds may not exceed seven days",
     )
+    _expect(
+        values["owner_idle_seconds"] <= values["owner_absolute_seconds"],
+        "session.owner_idle_seconds may not exceed session.owner_absolute_seconds",
+    )
+    _expect(
+        values["owner_absolute_seconds"] <= 24 * 3600,
+        "session.owner_absolute_seconds may not exceed 24 hours",
+    )
     session = SessionPolicy(**values)
+
+    restricted_mode = data.get("restricted_mode")
+    _expect(
+        restricted_mode is None or isinstance(restricted_mode, bool),
+        "restricted_mode: must be true or false",
+    )
 
     deny_paths = tuple(_string_list("deny_paths", data.get("deny_paths", [])))
 
@@ -379,7 +422,9 @@ def parse_policy(
             expires_at=expires_at,
         )
 
-    policy = Policy(clients=clients, session=session, deny_paths=deny_paths)
+    policy = Policy(
+        clients=clients, session=session, deny_paths=deny_paths, restricted_mode=restricted_mode
+    )
     # Building each client's folder policy now rejects an unusable root (such as
     # "/") at startup instead of on the first request.
     for client in clients.values():

@@ -88,6 +88,15 @@ class SessionManager:
         # Sessions that ended on a deadline, waiting for their remote logout.
         self._expired: List[SessionRecord] = []
 
+    def set_policy(self, policy: SessionPolicy) -> None:
+        """Change the lifetimes. Sessions already open are judged by the new ones from
+        the next check, so shortening them can end a session at once, and lengthening
+        them lets one run longer than it was promised. Only the owner's settings page
+        calls this."""
+        with self._lock:
+            self._policy = policy
+            self._expire_locked(self._clock())
+
     # -- internals ---------------------------------------------------------
 
     def _is_expired(self, record: SessionRecord, now: float) -> bool:

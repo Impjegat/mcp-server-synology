@@ -51,6 +51,7 @@ from private_auth.security import (
     constant_time_equal,
     origin_allowed,
 )
+from private_auth.settings import SettingsError, SettingsService
 
 logger = logging.getLogger("synology-private-login")
 
@@ -117,6 +118,10 @@ class OwnerAuthenticator(Protocol):
     def finish_enrollment(
         self, state: str, credential: Dict[str, Any], label: str = "passkey"
     ) -> bool: ...
+
+    def begin_confirmation(self, binding: str) -> Optional[Tuple[str, Dict[str, Any]]]: ...
+
+    def finish_confirmation(self, state: str, credential: Dict[str, Any]) -> Optional[str]: ...
 
 
 class SecurityHeadersMiddleware:
@@ -266,6 +271,84 @@ _LOGIN_ALL_JS = """
 })();
 """
 
+# Saves settings in two steps: the server checks the change and says what it would do
+# and asks for a passkey bound to exactly that change; only the passkey's answer lets
+# the server apply it. `b64` is the base64url helper that passkey.js defines.
+_SETTINGS_JS = """
+(function(){
+  const form = document.getElementById('settings');
+  if(!form) return;
+  const msg = document.getElementById('msg');
+  const save = document.getElementById('save');
+  const csrf = form.elements.csrf.value;
+  function say(lines, bad){
+    msg.textContent = '';
+    (Array.isArray(lines) ? lines : [lines]).forEach((line, i)=>{
+      if(i) msg.appendChild(document.createElement('br'));
+      msg.appendChild(document.createTextNode(line));
+    });
+    msg.className = 'note' + (bad ? ' error' : ''); msg.hidden = false;
+  }
+  function syncDelete(){
+    form.querySelectorAll('fieldset[data-client]').forEach(box=>{
+      const write = box.querySelector('input[data-kind=write]'), del = box.querySelector('input[data-kind=delete]');
+      del.disabled = !write.checked; if(!write.checked) del.checked = false;
+    });
+  }
+  form.addEventListener('change', syncDelete); syncDelete();
+  function collect(){
+    const session = {};
+    form.querySelectorAll('input[data-field]').forEach(input=>{
+      session[input.dataset.field] = input.value === '' ? null : Number(input.value);
+    });
+    const clients = {};
+    form.querySelectorAll('fieldset[data-client]').forEach(box=>{
+      const folders = {};
+      box.querySelectorAll('textarea[data-nas]').forEach(area=>{folders[area.dataset.nas] = area.value.split('\\n');});
+      clients[box.dataset.client] = {
+        write: box.querySelector('input[data-kind=write]').checked,
+        delete: box.querySelector('input[data-kind=delete]').checked,
+        folders: folders};
+    });
+    return {session, clients};
+  }
+  async function post(path, body){
+    const response = await fetch(path,{method:'POST', headers:{'Content-Type':'application/json'},
+      credentials:'same-origin', body: JSON.stringify(body)});
+    return {status: response.status, data: await response.json().catch(()=>({}))};
+  }
+  form.addEventListener('submit', async (event)=>{
+    event.preventDefault();
+    save.disabled = true;
+    try{
+      const begun = await post('/api/settings/begin', {csrf, proposal: collect()});
+      if(begun.status===401 || (begun.status===403 && !begun.data.message)){
+        say('Your passkey sign-in has ended. Reload this page and sign in again.', true); return;
+      }
+      if(!begun.data.ok){say(begun.data.message || 'The change was not accepted.', true); return;}
+      if(!begun.data.changes.length){say('Nothing has changed.', false); return;}
+      say(['Confirm with your passkey to apply:'].concat(begun.data.changes.map(line=>'- ' + line)), false);
+      const options = begun.data.options;
+      options.challenge = b64.toBuf(options.challenge);
+      (options.allowCredentials || []).forEach(c=>c.id = b64.toBuf(c.id));
+      let credential;
+      try{ credential = await navigator.credentials.get({publicKey: options}); }
+      catch(error){say('The passkey check was cancelled. Nothing was changed.', true); return;}
+      const done = await post('/api/settings/commit', {csrf, state: begun.data.state, credential:{
+        id: credential.id, rawId: b64.toStr(credential.rawId), type: credential.type,
+        clientExtensionResults: credential.getClientExtensionResults(),
+        response:{clientDataJSON: b64.toStr(credential.response.clientDataJSON),
+          authenticatorData: b64.toStr(credential.response.authenticatorData),
+          signature: b64.toStr(credential.response.signature),
+          userHandle: credential.response.userHandle ? b64.toStr(credential.response.userHandle) : null}}});
+      if(done.data.ok){say(['Saved and active now:'].concat(done.data.changes.map(line=>'- ' + line)), false);}
+      else{say(done.data.message || 'The change was not saved.', true);}
+    }catch(error){say('The change could not be sent.', true);}
+    finally{save.disabled = false;}
+  });
+})();
+"""
+
 _PASSKEY_JS = """
 const b64 = {
   toBuf(s){s=s.replace(/-/g,'+').replace(/_/g,'/');while(s.length%4)s+='=';const r=atob(s),u=new Uint8Array(r.length);for(let i=0;i<r.length;i++)u[i]=r.charCodeAt(i);return u.buffer;},
@@ -315,7 +398,8 @@ document.addEventListener('DOMContentLoaded',()=>{
 
 
 _NAV = (
-    '<nav><a href="/">Dashboard</a><a href="/login-all">Sign in all</a><a href="/log">Log</a></nav>'
+    '<nav><a href="/">Dashboard</a><a href="/login-all">Sign in all</a>'
+    '<a href="/settings">Settings</a><a href="/log">Log</a></nav>'
 )
 
 
@@ -359,10 +443,12 @@ class PrivateLoginApp:
         begin_limiter: Optional[RateLimiter] = None,
         log_buffer: Optional[RingLogHandler] = None,
         wall_clock: Callable[[], float] = time.time,
+        settings: Optional[SettingsService] = None,
     ):
         if not allowed_origins or not allowed_hosts:
             raise ValueError("allowed_origins and allowed_hosts are required")
         self.log_buffer = log_buffer
+        self.settings = settings
         # Calendar time, for the dates a client's grant ends. Session deadlines
         # keep using the session manager's own monotonic clock.
         self._wall_clock = wall_clock
@@ -375,7 +461,13 @@ class PrivateLoginApp:
         # every request would be refused. Accept either spelling.
         self.allowed_hosts = sorted({re.sub(r":\d+$", "", h) for h in allowed_hosts})
         self.secure_cookies = secure_cookies
-        self.sessions = sessions or OwnerSessions()
+        # How long the owner stays signed in comes from the policy, which the owner can
+        # change on the settings page.
+        owner_limits = runtime.policy.session
+        self.sessions = sessions or OwnerSessions(
+            idle_seconds=owner_limits.owner_idle_seconds,
+            absolute_seconds=owner_limits.owner_absolute_seconds,
+        )
         # Ten failed passkey checks per address in five minutes; five wrong
         # enrollment codes in ten, and the code is long enough that this is a
         # courtesy, not the control.
@@ -504,6 +596,24 @@ class PrivateLoginApp:
             return None, None, PlainTextResponse("Forbidden", status_code=403)
         return session, form, None
 
+    async def _authorized_json(
+        self, request: Request
+    ) -> Tuple[Optional[OwnerSession], Optional[Dict[str, Any]], Optional[Response]]:
+        """As `_authorized_form`, for a JSON body: Origin, then the owner session, then
+        the bounded body, then the CSRF token carried in it as `csrf`."""
+        session, refusal = self._authorize(request)
+        if refusal is not None:
+            return None, None, refusal
+        data = await self._json(request)
+        if data is None:
+            return None, None, JSONResponse({"ok": False, "code": "bad_request"}, status_code=400)
+        csrf_value = data.get("csrf")
+        if not isinstance(csrf_value, str) or not constant_time_equal(
+            csrf_value, session.csrf_token
+        ):
+            return None, None, PlainTextResponse("Forbidden", status_code=403)
+        return session, data, None
+
     def _require_owner(self, request: Request) -> Tuple[Optional[OwnerSession], Optional[Response]]:
         session = self._owner(request)
         if session is None:
@@ -518,7 +628,7 @@ class PrivateLoginApp:
             secure=self.secure_cookies,
             samesite="strict",
             path="/",
-            max_age=3600,
+            max_age=int(self.sessions.absolute_seconds),
         )
 
     # -- pages ---------------------------------------------------------------
@@ -831,18 +941,11 @@ class PrivateLoginApp:
         """One client and NAS of a sign-in-all run. The password arrives in the JSON
         body, is handed straight to the login service, and is dropped. Outcomes are
         the login service's stable codes and fixed sentences."""
-        session, refusal = self._authorize(request)
+        _, data, refusal = await self._authorized_json(request)
         if refusal is not None:
             return refusal
-        data = await self._json(request)
-        if data is None:
-            return JSONResponse({"ok": False, "code": "bad_request"}, status_code=400)
-        csrf_value, client_name, nas = data.get("csrf"), data.get("client"), data.get("nas")
+        client_name, nas = data.get("client"), data.get("nas")
         password, otp, username = data.get("password"), data.get("otp"), data.get("username")
-        if not isinstance(csrf_value, str) or not constant_time_equal(
-            csrf_value, session.csrf_token
-        ):
-            return PlainTextResponse("Forbidden", status_code=403)
         if (
             not isinstance(client_name, str)
             or not isinstance(nas, str)
@@ -869,6 +972,131 @@ class PrivateLoginApp:
         return JSONResponse(
             {"ok": outcome.ok, "code": outcome.code, "message": outcome.message}, status_code=status
         )
+
+    # -- settings ------------------------------------------------------------
+
+    async def settings_page(self, request: Request) -> Response:
+        session, refusal = self._require_owner(request)
+        if refusal:
+            return refusal
+        if self.settings is None:
+            return _page(
+                "Settings",
+                _notice("This broker was started without settings that can be changed here."),
+                nav=True,
+            )
+        view = self.settings.view()
+
+        def number(label: str, field: str, step: str) -> str:
+            return (
+                f'<label for="{field}">{html.escape(label)}</label>'
+                f'<input id="{field}" type="number" min="0" step="{step}" '
+                f'data-field="{field}" value="{view[field]:g}">'
+            )
+
+        parts = [
+            _notice(
+                "Saving a change asks for your passkey again. It takes effect at once, and "
+                "clients stay connected. Client tokens, NAS units and grant dates are not "
+                "changed here."
+            )
+        ]
+        if not self.settings.writable():
+            parts.append(
+                _notice(
+                    "The policy file is read-only here, so changes cannot be saved from this "
+                    "page.",
+                    True,
+                )
+            )
+        parts.append(
+            f'<form id="settings" method="post" action="/settings">{_hidden(session.csrf_token)}'
+        )
+        parts.append("<h2>This page</h2>")
+        parts.append(number("Sign out after being unused for (minutes)", "owner_idle_minutes", "1"))
+        parts.append(number("Sign out after (hours, however busy)", "owner_absolute_hours", "0.5"))
+        parts.append("<h2>NAS sessions</h2>")
+        parts.append(number("End a session after being unused for (minutes)", "idle_minutes", "1"))
+        parts.append(number("End a session after (hours, however busy)", "absolute_hours", "0.5"))
+        parts.append("<h2>Clients</h2>")
+        for client in view["clients"]:
+            name = html.escape(client["name"])
+            parts.append(f'<fieldset data-client="{name}"><legend>{name}</legend>')
+            parts.append(
+                f'<label><input type="checkbox" data-kind="write"{" checked" if client["write"] else ""}> '
+                "Write access: create files and folders, rename and move</label>"
+                f'<label><input type="checkbox" data-kind="delete"{" checked" if client["delete"] else ""}> '
+                "Allow delete as well (cannot be undone)</label>"
+            )
+            for nas in client["nas"]:
+                alias = html.escape(nas["alias"])
+                field = f"folders-{name}-{alias}"
+                parts.append(
+                    f'<label for="{field}">Folders on {alias} (one per line, such as /docs)</label>'
+                    f'<textarea id="{field}" rows="4" data-nas="{alias}" spellcheck="false">'
+                    f'{html.escape(chr(10).join(nas["roots"]))}</textarea>'
+                )
+            parts.append("</fieldset>")
+        parts.append('<p><button id="save" type="submit">Review and save</button></p></form>')
+        parts.append('<div id="msg" class="note" role="status" hidden></div>')
+        return _page("Settings", "".join(parts), scripts=("settings.js",), nav=True)
+
+    async def settings_fallback(self, request: Request) -> Response:
+        return PlainTextResponse("This page needs JavaScript to save settings.", status_code=400)
+
+    async def settings_begin(self, request: Request) -> Response:
+        """Check a proposed change and, if it changes something, start the passkey
+        confirmation for exactly that change. Nothing is written here."""
+        _, data, refusal = await self._authorized_json(request)
+        if refusal is not None:
+            return refusal
+        if self.settings is None:
+            return JSONResponse({"ok": False, "message": "Settings are not available."}, 404)
+        throttle = f"settings:{self._client_address(request)}"
+        if not self.begin_limiter.allow(throttle):
+            return JSONResponse({"ok": False, "message": "Too many requests."}, 429)
+        self.begin_limiter.record(throttle)
+        try:
+            prepared = self.settings.prepare(data.get("proposal"))
+        except SettingsError as error:
+            return JSONResponse({"ok": False, "message": str(error)}, 400)
+        if not prepared.digest:
+            return JSONResponse({"ok": True, "changes": []})
+        begun = self.owner.begin_confirmation(prepared.digest)
+        if begun is None:
+            return JSONResponse({"ok": False, "message": "No passkey is enrolled."}, 409)
+        state, options = begun
+        return JSONResponse(
+            {"ok": True, "changes": prepared.changes, "state": state, "options": options}
+        )
+
+    async def settings_commit(self, request: Request) -> Response:
+        """Apply the change the passkey just confirmed."""
+        _, data, refusal = await self._authorized_json(request)
+        if refusal is not None:
+            return refusal
+        if self.settings is None:
+            return JSONResponse({"ok": False, "message": "Settings are not available."}, 404)
+        address = self._client_address(request)
+        if not self.auth_limiter.allow(address):
+            return JSONResponse({"ok": False, "message": "Too many attempts."}, 429)
+        state, credential = data.get("state"), data.get("credential")
+        digest = (
+            self.owner.finish_confirmation(state, credential)
+            if isinstance(state, str) and isinstance(credential, dict)
+            else None
+        )
+        if not digest:
+            self.auth_limiter.record(address)
+            return JSONResponse({"ok": False, "message": "That passkey was not accepted."}, 401)
+        try:
+            changes = self.settings.commit(digest)
+        except SettingsError as error:
+            return JSONResponse({"ok": False, "message": str(error)}, 409)
+        limits = self.runtime.policy.session
+        self.sessions.set_limits(limits.owner_idle_seconds, limits.owner_absolute_seconds)
+        logger.info("The owner changed the broker's settings (%d change(s))", len(changes))
+        return JSONResponse({"ok": True, "changes": changes})
 
     # -- passkey ceremonies --------------------------------------------------
 
@@ -969,6 +1197,9 @@ class PrivateLoginApp:
     async def login_all_js(self, request: Request) -> Response:
         return Response(_LOGIN_ALL_JS, media_type="text/javascript")
 
+    async def settings_js(self, request: Request) -> Response:
+        return Response(_SETTINGS_JS, media_type="text/javascript")
+
     async def healthz(self, request: Request) -> Response:
         return JSONResponse({"status": "ok"})
 
@@ -991,6 +1222,10 @@ class PrivateLoginApp:
                 Route("/api/log", self.api_log, methods=["GET"]),
                 Route("/log", self.log_page, methods=["GET"]),
                 Route("/attention", self.attention, methods=["GET"]),
+                Route("/settings", self.settings_page, methods=["GET"]),
+                Route("/settings", self.settings_fallback, methods=post),
+                Route("/api/settings/begin", self.settings_begin, methods=post),
+                Route("/api/settings/commit", self.settings_commit, methods=post),
                 Route("/auth/begin", self.auth_begin, methods=post),
                 Route("/auth/finish", self.auth_finish, methods=post),
                 Route("/enroll", self.enroll_page, methods=["GET"]),
@@ -1001,6 +1236,7 @@ class PrivateLoginApp:
                 Route("/static/dashboard.js", self.dashboard_js, methods=["GET"]),
                 Route("/static/log.js", self.log_js, methods=["GET"]),
                 Route("/static/login_all.js", self.login_all_js, methods=["GET"]),
+                Route("/static/settings.js", self.settings_js, methods=["GET"]),
                 Route("/healthz", self.healthz, methods=["GET"]),
             ],
             middleware=[

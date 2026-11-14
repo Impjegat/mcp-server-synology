@@ -170,6 +170,17 @@ class OwnerSessions:
     def _key(token: str) -> str:
         return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
+    @property
+    def absolute_seconds(self) -> float:
+        return self._absolute
+
+    def set_limits(self, idle_seconds: float, absolute_seconds: float) -> None:
+        """Change how long an owner stays signed in. Sessions already open are judged
+        by the new limits from their next request."""
+        with self._lock:
+            self._idle = idle_seconds
+            self._absolute = absolute_seconds
+
     def create(self) -> "tuple[str, OwnerSession]":
         """A new session: the cookie value (shown once) and the session."""
         token = secrets.token_urlsafe(32)

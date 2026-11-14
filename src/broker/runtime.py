@@ -93,8 +93,10 @@ class BrokerRuntime:
         remote_logout: Optional[RemoteLogout] = None,
         verify_ssl: Any = True,
         executor_factory: Optional[Callable[..., Any]] = None,
+        restricted_mode_setter: Optional[Callable[[bool], None]] = None,
     ):
         self.policy = policy
+        self._set_restricted_mode = restricted_mode_setter
         self.sessions = sessions
         self._nas_configs = nas_configs
         self._remote_logout = remote_logout or _default_remote_logout(verify_ssl)
@@ -104,6 +106,25 @@ class BrokerRuntime:
         # Session ids held here are not in any SynologyAuth, so the redaction
         # that masks them from logs and tool output has to be told about them.
         register_secret_source(sessions.iter_secrets)
+
+    # -- policy ------------------------------------------------------------
+
+    def apply_policy(self, policy: Policy) -> None:
+        """Switch to a new policy while running. Only the owner's settings page calls
+        this, after a fresh passkey check and `parse_policy` have both passed.
+
+        Each client's executor is made again on its next call, so its tools and
+        folders (and the folder answers it had remembered) are the new ones at once;
+        a call already running finishes under the old. Session lifetimes change for
+        sessions already open too. NAS sessions are kept: they are not an
+        authorization, which is judged on every call. Client tokens and their grants
+        are the verifier's and are not touched: this changes neither."""
+        with self._lock:
+            self.policy = policy
+            self._executors.clear()
+        self.sessions.set_policy(policy.session)
+        if policy.restricted_mode is not None and self._set_restricted_mode is not None:
+            self._set_restricted_mode(policy.restricted_mode)
 
     # -- executors ---------------------------------------------------------
 

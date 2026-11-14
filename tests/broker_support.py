@@ -78,6 +78,8 @@ class Broker:
         document: Dict[str, Any] = {"clients": policy_clients}
         if session:
             document["session"] = session
+        # The policy as a file would hold it, for tests that save a changed one.
+        self.document = document
 
         known_tools = set(sys.modules["mcp_server"].SynologyMCPServer()._tool_registry)
         self.policy = parse_policy(document, known_nas=BASE_URLS, known_tools=known_tools)
