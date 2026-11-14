@@ -43,6 +43,7 @@ from broker.policy import GRANT_WARN_SECONDS
 from broker.runtime import BrokerRuntime
 from private_auth.logbuffer import RingLogHandler
 from private_auth.login import LoginService
+from private_auth.owner import ADD_PASSKEY_BINDING
 from private_auth.security import (
     SECURITY_HEADERS,
     OwnerSession,
@@ -57,6 +58,14 @@ logger = logging.getLogger("synology-private-login")
 
 MAX_FORM_BYTES = 8 * 1024
 MAX_JSON_BYTES = 64 * 1024
+
+# How new this private page is, as /healthz reports it. The desktop app compares it with
+# the level it needs and offers to update a broker that reports less (or, as brokers
+# from before this number existed do, nothing). Raise it whenever the page gains
+# something the app opens or reads.
+#   1: Sign in all, the dashboard figures, the log, settings and /attention, and adding
+#      a passkey from the settings page.
+PRIVATE_PAGE_LEVEL = 1
 
 # A session counts as "ending soon" in /attention when its absolute deadline is this
 # close. Its idle deadline does not count: an unused session runs that down by itself.
@@ -138,6 +147,10 @@ class OwnerAuthenticator(Protocol):
     def begin_confirmation(self, binding: str) -> Optional[Tuple[str, Dict[str, Any]]]: ...
 
     def finish_confirmation(self, state: str, credential: Dict[str, Any]) -> Optional[str]: ...
+
+    def passkeys(self) -> List[Tuple[str, str]]: ...
+
+    def begin_additional_enrollment(self) -> Optional[Tuple[str, Dict[str, Any]]]: ...
 
 
 class SecurityHeadersMiddleware:
@@ -369,6 +382,69 @@ _SETTINGS_JS = """
 })();
 """
 
+# Adds a passkey in three steps: ask, prove a passkey the owner already has (a check
+# bound to "add a passkey" and good for nothing else), then let the device create the
+# new one. `b64` and `post` are the helpers that passkey.js defines.
+_PASSKEYS_JS = """
+(function(){
+  const form = document.getElementById('passkeys');
+  if(!form) return;
+  const msg = document.getElementById('passkey-msg');
+  const add = document.getElementById('add-passkey');
+  const name = document.getElementById('passkey-name');
+  const list = document.getElementById('passkey-list');
+  const csrf = form.elements.csrf.value;
+  function say(text, bad){
+    msg.textContent = text; msg.className = 'note' + (bad ? ' error' : ''); msg.hidden = false;
+  }
+  form.addEventListener('submit', async (event)=>{
+    event.preventDefault();
+    add.disabled = true;
+    try{
+      const begun = await post('/api/passkeys/begin', {csrf});
+      if(begun.status===401 || (begun.status===403 && !begun.data.message)){
+        say('Your passkey sign-in has ended. Reload this page and sign in again.', true); return;
+      }
+      if(!begun.data.ok){say(begun.data.message || 'A passkey cannot be added right now.', true); return;}
+      say('First confirm with a passkey you already have.', false);
+      const ask = begun.data.options;
+      ask.challenge = b64.toBuf(ask.challenge);
+      (ask.allowCredentials || []).forEach(c=>c.id = b64.toBuf(c.id));
+      let proof;
+      try{ proof = await navigator.credentials.get({publicKey: ask}); }
+      catch(error){say('The passkey check was cancelled. Nothing was added.', true); return;}
+      const confirmed = await post('/api/passkeys/confirm', {csrf, state: begun.data.state, credential:{
+        id: proof.id, rawId: b64.toStr(proof.rawId), type: proof.type,
+        clientExtensionResults: proof.getClientExtensionResults(),
+        response:{clientDataJSON: b64.toStr(proof.response.clientDataJSON),
+          authenticatorData: b64.toStr(proof.response.authenticatorData),
+          signature: b64.toStr(proof.response.signature),
+          userHandle: proof.response.userHandle ? b64.toStr(proof.response.userHandle) : null}}});
+      if(!confirmed.data.ok){say(confirmed.data.message || 'That passkey was not accepted.', true); return;}
+      say('Now create the new passkey: choose where to keep it when your device asks.', false);
+      const make = confirmed.data.options;
+      make.challenge = b64.toBuf(make.challenge); make.user.id = b64.toBuf(make.user.id);
+      (make.excludeCredentials || []).forEach(c=>c.id = b64.toBuf(c.id));
+      let made;
+      try{ made = await navigator.credentials.create({publicKey: make}); }
+      catch(error){say('No passkey was created, so nothing was added.', true); return;}
+      const done = await post('/api/passkeys/finish', {csrf, state: confirmed.data.state, label: name.value, credential:{
+        id: made.id, rawId: b64.toStr(made.rawId), type: made.type,
+        clientExtensionResults: made.getClientExtensionResults(),
+        response:{clientDataJSON: b64.toStr(made.response.clientDataJSON),
+          attestationObject: b64.toStr(made.response.attestationObject),
+          transports: made.response.getTransports ? made.response.getTransports() : []}}});
+      if(!done.data.ok){say(done.data.message || 'The new passkey was not added.', true); return;}
+      const item = document.createElement('li');
+      item.textContent = done.data.label + ' (added just now)';
+      list.appendChild(item);
+      say('The new passkey was added. You can sign in with it from now on.', false);
+    }catch(error){say('The request could not be sent.', true);}
+    finally{add.disabled = false;}
+  });
+})();
+"""
+
 _PASSKEY_JS = """
 const b64 = {
   toBuf(s){s=s.replace(/-/g,'+').replace(/_/g,'/');while(s.length%4)s+='=';const r=atob(s),u=new Uint8Array(r.length);for(let i=0;i<r.length;i++)u[i]=r.charCodeAt(i);return u.buffer;},
@@ -449,6 +525,14 @@ def _page(
 
 def _notice(text: str, error: bool = False) -> str:
     return f'<p class="note{" error" if error else ""}" role="status">{html.escape(text)}</p>'
+
+
+def _passkey_label(value: Any) -> str:
+    """The name the owner gave a new passkey, made safe to store and to show: printable
+    characters only, at most 64 of them, and never empty."""
+    text = value if isinstance(value, str) else ""
+    text = "".join(c for c in text if c.isprintable()).strip()[:64].strip()
+    return text or "passkey"
 
 
 def _hidden(csrf: str) -> str:
@@ -1063,7 +1147,9 @@ class PrivateLoginApp:
         if self.settings is None:
             return _page(
                 "Settings",
-                _notice("This broker was started without settings that can be changed here."),
+                _notice("This broker was started without settings that can be changed here.")
+                + self._passkeys_section(session),
+                scripts=("passkeys.js",),
                 nav=True,
             )
         view = self.settings.view()
@@ -1120,7 +1206,31 @@ class PrivateLoginApp:
             parts.append("</fieldset>")
         parts.append('<p><button id="save" type="submit">Review and save</button></p></form>')
         parts.append('<div id="msg" class="note" role="status" hidden></div>')
-        return _page("Settings", "".join(parts), scripts=("settings.js",), nav=True)
+        parts.append(self._passkeys_section(session))
+        return _page("Settings", "".join(parts), scripts=("settings.js", "passkeys.js"), nav=True)
+
+    def _passkeys_section(self, session: OwnerSession) -> str:
+        """The passkeys that sign in to this page, and the form that adds one."""
+        items = "".join(
+            f"<li>{html.escape(label)}"
+            + (f" (added {html.escape(created)})" if created else "")
+            + "</li>"
+            for label, created in self.owner.passkeys()
+        )
+        return (
+            "<h2>Passkeys</h2>"
+            + _notice(
+                "These sign you in to this page. Adding one asks for a passkey you already "
+                "have, then lets your device create the new one."
+            )
+            + f'<ul id="passkey-list">{items}</ul>'
+            f'<form id="passkeys" method="post" action="/settings">{_hidden(session.csrf_token)}'
+            '<label for="passkey-name">Name for the new passkey</label>'
+            '<input id="passkey-name" type="text" maxlength="64" value="Windows Hello" '
+            'autocomplete="off">'
+            '<p><button id="add-passkey" type="submit">Add a passkey</button></p></form>'
+            '<div id="passkey-msg" class="note" role="status" hidden></div>'
+        )
 
     async def settings_fallback(self, request: Request) -> Response:
         return PlainTextResponse("This page needs JavaScript to save settings.", status_code=400)
@@ -1182,6 +1292,70 @@ class PrivateLoginApp:
         self.sessions.set_limits(limits.owner_idle_seconds, limits.owner_absolute_seconds)
         logger.info("The owner changed the broker's settings (%d change(s))", len(changes))
         return JSONResponse({"ok": True, "changes": changes})
+
+    # -- adding a passkey ----------------------------------------------------
+
+    async def passkeys_begin(self, request: Request) -> Response:
+        """Start the passkey check that approves adding another passkey. Nothing is
+        added here, and the check is good for nothing else."""
+        _, _, refusal = await self._authorized_json(request)
+        if refusal is not None:
+            return refusal
+        throttle = f"passkeys:{self._client_address(request)}"
+        if not self.begin_limiter.allow(throttle):
+            return JSONResponse({"ok": False, "message": "Too many requests."}, 429)
+        self.begin_limiter.record(throttle)
+        begun = self.owner.begin_confirmation(ADD_PASSKEY_BINDING)
+        if begun is None:
+            return JSONResponse({"ok": False, "message": "No passkey is enrolled."}, 409)
+        state, options = begun
+        return JSONResponse({"ok": True, "state": state, "options": options})
+
+    async def passkeys_confirm(self, request: Request) -> Response:
+        """Check the passkey that approves the addition and, if it is good and was
+        begun for exactly this, hand the browser what it needs to create the new one.
+
+        A check that fails counts against the same per-address limit as a failed
+        passkey sign-in (`auth_limiter`), as a failed settings confirmation does."""
+        _, data, refusal = await self._authorized_json(request)
+        if refusal is not None:
+            return refusal
+        address = self._client_address(request)
+        if not self.auth_limiter.allow(address):
+            return JSONResponse({"ok": False, "message": "Too many attempts."}, 429)
+        state, credential = data.get("state"), data.get("credential")
+        binding = (
+            self.owner.finish_confirmation(state, credential)
+            if isinstance(state, str) and isinstance(credential, dict)
+            else None
+        )
+        # A confirmation begun for something else (a settings change) proves the owner
+        # is here, but not that this is what they approved.
+        if binding != ADD_PASSKEY_BINDING:
+            self.auth_limiter.record(address)
+            return JSONResponse({"ok": False, "message": "That passkey was not accepted."}, 401)
+        begun = self.owner.begin_additional_enrollment()
+        if begun is None:
+            return JSONResponse({"ok": False, "message": "No passkey is enrolled."}, 409)
+        new_state, options = begun
+        return JSONResponse({"ok": True, "state": new_state, "options": options})
+
+    async def passkeys_finish(self, request: Request) -> Response:
+        """Store the passkey the device has just created, if it answers the challenge
+        that `passkeys_confirm` handed out."""
+        _, data, refusal = await self._authorized_json(request)
+        if refusal is not None:
+            return refusal
+        state, credential = data.get("state"), data.get("credential")
+        label = _passkey_label(data.get("label"))
+        if (
+            not isinstance(state, str)
+            or not isinstance(credential, dict)
+            or not self.owner.finish_enrollment(state, credential, label)
+        ):
+            return JSONResponse({"ok": False, "message": "The new passkey was not added."}, 400)
+        logger.info("The owner added a passkey")
+        return JSONResponse({"ok": True, "label": label})
 
     # -- passkey ceremonies --------------------------------------------------
 
@@ -1285,8 +1459,11 @@ class PrivateLoginApp:
     async def settings_js(self, request: Request) -> Response:
         return Response(_SETTINGS_JS, media_type="text/javascript")
 
+    async def passkeys_js(self, request: Request) -> Response:
+        return Response(_PASSKEYS_JS, media_type="text/javascript")
+
     async def healthz(self, request: Request) -> Response:
-        return JSONResponse({"status": "ok"})
+        return JSONResponse({"status": "ok", "level": PRIVATE_PAGE_LEVEL})
 
     def build(self) -> Starlette:
         post = ["POST"]
@@ -1311,6 +1488,9 @@ class PrivateLoginApp:
                 Route("/settings", self.settings_fallback, methods=post),
                 Route("/api/settings/begin", self.settings_begin, methods=post),
                 Route("/api/settings/commit", self.settings_commit, methods=post),
+                Route("/api/passkeys/begin", self.passkeys_begin, methods=post),
+                Route("/api/passkeys/confirm", self.passkeys_confirm, methods=post),
+                Route("/api/passkeys/finish", self.passkeys_finish, methods=post),
                 Route("/auth/begin", self.auth_begin, methods=post),
                 Route("/auth/finish", self.auth_finish, methods=post),
                 Route("/enroll", self.enroll_page, methods=["GET"]),
@@ -1322,6 +1502,7 @@ class PrivateLoginApp:
                 Route("/static/log.js", self.log_js, methods=["GET"]),
                 Route("/static/login_all.js", self.login_all_js, methods=["GET"]),
                 Route("/static/settings.js", self.settings_js, methods=["GET"]),
+                Route("/static/passkeys.js", self.passkeys_js, methods=["GET"]),
                 Route("/healthz", self.healthz, methods=["GET"]),
             ],
             middleware=[

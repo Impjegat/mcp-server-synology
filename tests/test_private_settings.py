@@ -358,6 +358,34 @@ class TestCommit:
         assert first["state"] != second["state"]
 
     @pytest.mark.asyncio
+    async def test_a_passkey_check_begun_to_add_a_passkey_saves_no_settings(self, rig):
+        """The other direction is in test_private_passkeys.py: each check is good only
+        for what it was begun for."""
+        before = rig.policy_on_disk()
+        async with rig.client() as http:
+            await sign_in(http)
+            token = await csrf(http)
+            await begin(http, token, {"session": {"idle_minutes": 30}})  # a change is pending
+            added = await http.post(
+                "/api/passkeys/begin", headers=JSON_HEADERS, json={"csrf": token}
+            )
+            response = await commit(http, token, added.json()["state"])
+
+        assert added.status_code == 200
+        assert response.status_code == 409 and response.json()["ok"] is False
+        assert rig.policy_on_disk() == before
+
+    @pytest.mark.asyncio
+    async def test_the_page_also_offers_to_add_a_passkey(self, rig):
+        async with rig.client() as http:
+            await sign_in(http)
+            page = (await http.get("/settings")).text
+
+        assert "<h2>Passkeys</h2>" in page
+        assert "<li>test passkey (added 2026-10-18)</li>" in page
+        assert page.index('id="settings"') < page.index('id="passkeys"')
+
+    @pytest.mark.asyncio
     async def test_it_needs_origin_session_and_csrf_token_as_well(self, rig):
         async with rig.client() as http:
             await sign_in(http)

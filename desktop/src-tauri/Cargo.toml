@@ -17,6 +17,9 @@ serde_json = "1"
 # Windows' own certificate store (Schannel), so the broker's certificate is judged
 # exactly as the browser pane judges it. No proxy: this only ever talks to loopback.
 reqwest = { version = "0.12", default-features = false, features = ["native-tls", "json"] }
+# Already part of reqwest's native-tls: named here only to read the `ca_file` (PEM or
+# DER) into the bytes Windows' certificate store takes.
+native-tls = "0.2"
 tokio = { version = "1", features = ["time"] }
 url = "2"
 zeroize = "1"
@@ -26,8 +29,10 @@ version = "0.61"
 features = [
   "Win32_Foundation",
   "Win32_Security",
+  "Win32_Security_Cryptography",
   "Win32_System_JobObjects",
   "Win32_System_Threading",
+  "Win32_UI_WindowsAndMessaging",
 ]
 
 [profile.release]

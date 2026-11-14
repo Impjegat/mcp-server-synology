@@ -9,11 +9,6 @@ h1{font-size:1.25rem;margin:0}
 .pill.starting{color:var(--warn);border-color:var(--warn)}
 .pill.error{color:var(--bad);border-color:var(--bad)}
 .pill.attention{color:var(--warn);border-color:var(--warn)}
-.message{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:.6rem .8rem}
-.message.error{border-color:var(--bad);color:var(--bad)}
-.message.warn{border-color:var(--warn);color:var(--warn)}
-.muted{color:var(--muted);font-size:.9rem}
-code{font-size:.85rem;word-break:break-all}
 label{display:block;margin:.9rem 0 .25rem;font-weight:600}
 input{width:100%;padding:.5rem;font:inherit;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--fg)}
 button{font:inherit;padding:.5rem 1rem;border:1px solid var(--line);border-radius:6px;background:var(--panel);color:var(--fg);cursor:pointer}
@@ -21,8 +16,16 @@ button:hover:not(:disabled){border-color:var(--accent)}
 button:disabled{opacity:.55;cursor:default}
 button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
 button.danger{color:var(--bad)}
-button.link{border:0;background:none;color:var(--accent);padding:0}
 #start{margin-top:1rem;width:100%}
 .buttons{display:grid;grid-template-columns:1fr 1fr;gap:.6rem;margin-top:.8rem}
-footer{position:fixed;left:1.4rem;right:1.4rem;bottom:1rem;display:flex;gap:1rem;align-items:baseline}
+.progress{height:.6rem;margin-top:2.2rem;border:1px solid var(--line);border-radius:999px;background:var(--panel);overflow:hidden}
+#progress-bar{height:100%;width:0;border-radius:999px;background:var(--accent);transition:width .35s ease-out}
+#notices{position:fixed;left:1.4rem;right:1.4rem;bottom:1rem;display:flex;flex-direction:column;gap:.5rem}
+.notice{position:relative;background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:.55rem 2.2rem .55rem .8rem;font-size:.9rem}
+.notice p{margin:0}
+.notice.warn{border-color:var(--warn);color:var(--warn)}
+.notice.error{border-color:var(--bad);color:var(--bad)}
+.notice .close{position:absolute;top:.15rem;right:.25rem;border:0;background:none;color:inherit;padding:.1rem .45rem;font-size:1.15rem;line-height:1}
+.notice .close:hover{border:0;opacity:.7}
+.notice .action{margin-top:.5rem;padding:.3rem .8rem;color:var(--fg)}
 [hidden]{display:none!important}

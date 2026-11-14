@@ -1,4 +1,7 @@
 //! The tray icon: its state, its tooltip and its menu.
+//!
+//! It is a status light with shortcuts, not a second way to close the app: the app is
+//! closed with its window, so there is no Quit here.
 
 use tauri::image::Image;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
@@ -24,13 +27,12 @@ fn icon(state: TrayState) -> Image<'static> {
 }
 
 pub fn build(app: &AppHandle) -> tauri::Result<()> {
-    let open = MenuItem::with_id(app, "open", "Open broker", true, None::<&str>)?;
+    let open = MenuItem::with_id(app, "open", "Open Broker", true, None::<&str>)?;
     let sign_in = MenuItem::with_id(app, "sign-in-all", "Sign in all clients", true, None::<&str>)?;
-    let show = MenuItem::with_id(app, "show", "Show app", true, None::<&str>)?;
-    let stop = MenuItem::with_id(app, "stop", "Stop broker", true, None::<&str>)?;
-    let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
+    let settings = MenuItem::with_id(app, "settings", "Settings", true, None::<&str>)?;
+    let stop = MenuItem::with_id(app, "stop", "Stop Broker", true, None::<&str>)?;
     let separator = PredefinedMenuItem::separator(app)?;
-    let menu = Menu::with_items(app, &[&open, &sign_in, &show, &separator, &stop, &quit])?;
+    let menu = Menu::with_items(app, &[&open, &sign_in, &settings, &separator, &stop])?;
 
     TrayIconBuilder::with_id(TRAY_ID)
         .icon(icon(TrayState::Stopped))
@@ -40,9 +42,8 @@ pub fn build(app: &AppHandle) -> tauri::Result<()> {
         .on_menu_event(|app, event| match event.id().as_ref() {
             "open" => commands::spawn_open(app, "/"),
             "sign-in-all" => commands::spawn_open(app, "/login-all"),
-            "show" => show_main(app),
+            "settings" => commands::spawn_open(app, "/settings"),
             "stop" => commands::spawn_stop(app),
-            "quit" => commands::quit(app),
             _ => {}
         })
         .on_tray_icon_event(|tray, event| {
