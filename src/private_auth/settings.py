@@ -322,7 +322,10 @@ class SettingsService:
         with self._lock:
             held = self._pending.pop(digest, None)
         if held is None or held[3] <= self._clock():
-            raise SettingsError("That change has expired. Make it again.")
+            raise SettingsError(
+                "That change has expired, or a newer one from another open Settings page "
+                "replaced it. Make it again."
+            )
         new, base, changes, _ = held
         try:
             policy = self._store.save(new, based_on=base)

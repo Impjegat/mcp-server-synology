@@ -47,3 +47,9 @@ Everything in `shipped/` is implemented and pushed. In date order:
 - the review fixes: [`fix-nas-transport`](shipped/2026-10-11-fix-nas-transport/PLAN.md) (redirects, verified certificate, final TLS setting), [`fix-private-login`](shipped/2026-10-11-fix-private-login/PLAN.md) (enrollment, cancelled logins), [`fix-folder-policy`](shipped/2026-10-11-fix-folder-policy/PLAN.md) (denied folders, listings, NFS discovery) and [`fix-grants-and-service-errors`](shipped/2026-10-11-fix-grants-and-service-errors/PLAN.md) (grant expiry, download creation, lost sessions, replay)
 
 What is not done is the user's: choosing and proving the broker's host, the cutover and the live acceptance checks, listed in the guide's "Moving from the old setup". The plans are shipped because their code is, not because those are.
+
+**Desktop app (2026-11-14)** — a portable Windows app that starts the broker and shows its private page, and the page features behind it (Sign in all, dashboard, log, passkey-confirmed settings):
+
+- [`desktop-app`](shipped/2026-11-14-desktop-app/PLAN.md) — the Tauri app in `desktop/`, and `/login-all`, `/attention`, `/log` and `/settings` on the broker's private page
+
+As above, what is left is the user's: deploying the broker code to its host, and the checks that need the real broker's account, certificate and passkey, listed at the end of that plan.

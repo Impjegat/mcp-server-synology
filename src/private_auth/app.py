@@ -199,7 +199,11 @@ _DASHBOARD_JS = """
       if(data.signature !== table.dataset.signature){location.reload();return;}
       data.rows.forEach(row=>{
         document.querySelectorAll('td[data-client][data-nas]').forEach(td=>{
-          if(td.dataset.client===row.client && td.dataset.nas===row.nas){td.textContent=row.left;}
+          if(td.dataset.client===row.client && td.dataset.nas===row.nas){
+            td.textContent = row.left;
+            // The cell before it is the state, which carries the idle clock.
+            if(td.previousElementSibling){td.previousElementSibling.textContent = row.state_text;}
+          }
         });
       });
     }catch(e){}finally{busy=false;}
@@ -530,15 +534,21 @@ class PrivateLoginApp:
                     state = "connected"
                     idle_left = int(live["idle_seconds_left"])  # type: ignore[call-overload]
                     absolute_left = int(live["absolute_seconds_left"])  # type: ignore[call-overload]
+                    state_text = f"connected (idle limit in about {idle_left // 60} min)"
                 elif pending is not None:
                     state = "waiting"
+                    state_text = "waiting for you to sign in"
                 else:
                     state = "not connected"
+                    state_text = "not connected"
                 rows.append(
                     {
                         "client": client.name,
                         "nas": nas,
                         "state": state,
+                        # The sentence the table shows for it. It carries the idle clock,
+                        # so the page refreshes it with the other clocks (`_DASHBOARD_JS`).
+                        "state_text": state_text,
                         "idle_left": idle_left,
                         "absolute_left": absolute_left,
                         "left": (
@@ -697,21 +707,19 @@ class PrivateLoginApp:
                 f'<input type="hidden" name="client" value="{name}">'
                 f'<input type="hidden" name="nas" value="{nas_name}">'
             )
+            state = entry["state_text"]
             if entry["state"] == "connected":
-                state = f"connected (idle limit in about {entry['idle_left'] // 60} min)"
                 action = (
                     f'<form method="post" action="/disconnect">{_hidden(session.csrf_token)}'
                     f'{pair}<button type="submit">Disconnect</button></form>'
                 )
             elif entry["state"] == "waiting":
-                state = "waiting for you to sign in"
                 action = (
                     f'<a href="/login/{html.escape(entry["request_id"])}">Continue</a> '
                     f'<form method="post" action="/pending/cancel" class="inline">{_hidden(session.csrf_token)}'
                     f'{pair}<button type="submit">Cancel</button></form>'
                 )
             else:
-                state = "not connected"
                 action = (
                     f'<form method="post" action="/pending/new">{_hidden(session.csrf_token)}'
                     f'{pair}<button type="submit">Sign in</button></form>'
@@ -995,11 +1003,28 @@ class PrivateLoginApp:
 
     async def login_all_step(self, request: Request) -> Response:
         """One client and NAS of a sign-in-all run. The password arrives in the JSON
-        body, is handed straight to the login service, and is dropped. Outcomes are
-        the login service's stable codes and fixed sentences."""
+        body and is handed straight to the login service. The request's own copy is
+        cleared afterwards; Python gives no way to wipe the string itself, which goes when
+        the local variable does, as this function returns. Outcomes are the login
+        service's stable codes and fixed sentences.
+
+        Every call counts against a per-address limit, as the settings calls do, on top of
+        the login service's own lockout after repeated wrong answers: a run signs a handful
+        of clients in, so the limit is far above what a person needs."""
         _, data, refusal = await self._authorized_json(request)
         if refusal is not None:
             return refusal
+        throttle = f"login-all:{self._client_address(request)}"
+        if not self.begin_limiter.allow(throttle):
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "code": "rate_limited",
+                    "message": "Too many sign-in attempts at once. Wait a minute and try again.",
+                },
+                status_code=429,
+            )
+        self.begin_limiter.record(throttle)
         client_name, nas = data.get("client"), data.get("nas")
         password, otp, username = data.get("password"), data.get("otp"), data.get("username")
         if (

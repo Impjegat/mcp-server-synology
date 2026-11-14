@@ -6,7 +6,9 @@
 # redacting filter as every other handler (see `attach`), so a session id or a
 # password that found its way into a message is masked here too.
 
+import copy
 import logging
+import re
 from collections import deque
 from typing import Deque, List
 
@@ -22,6 +24,29 @@ def _is_routine(request_target: str) -> bool:
     log line, that merely contains one of these names does not make a request routine."""
     path = request_target.split("?", 1)[0]
     return path in _ROUTINE_PATHS or path.startswith(_ROUTINE_PREFIXES)
+
+
+# `/login/<request id>` is the address of one waiting sign-in. The owner already has it,
+# and opening it needs the owner's session as well, but a capability-shaped value has no
+# business in a log that people read and paste, so the buffer keeps the path without it.
+_LOGIN_ID = re.compile(r"^(/login/)[^/?#\s]+")
+
+
+def _masked(record: logging.LogRecord) -> logging.LogRecord:
+    """`record`, or a copy of it with a sign-in request's id masked in an access line.
+    A copy, so the other handlers (the terminal's, say) are not affected."""
+    args = record.args
+    if (
+        record.name == "uvicorn.access"
+        and isinstance(args, tuple)
+        and len(args) == 5
+        and isinstance(args[2], str)
+        and _LOGIN_ID.match(args[2])
+    ):
+        clean = copy.copy(record)
+        clean.args = (args[0], args[1], _LOGIN_ID.sub(r"\1***", args[2]), args[3], args[4])
+        return clean
+    return record
 
 
 class _SkipRoutineRequests(logging.Filter):
@@ -47,7 +72,7 @@ class RingLogHandler(logging.Handler):
 
     def emit(self, record: logging.LogRecord) -> None:
         try:
-            self._lines.append(self.format(record))
+            self._lines.append(self.format(_masked(record)))
         except Exception:
             self.handleError(record)
 
