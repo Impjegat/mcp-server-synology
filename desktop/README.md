@@ -109,6 +109,7 @@ These need the broker's account, its certificate and your passkey, so they were 
 - **Trust certificate** against Windows' real store. The call is tested on a store that exists only in memory; pressing the button and answering Windows' dialog is yours.
 - **The passkey inside the app's window** (above).
 - Whether DSM accepts one verification code for several sign-ins in a row (if not, signing in several clients from the Clients table asks for the next code and carries on).
+- **Before releasing, or taking a Tauri update (the version is pinned exactly, so security updates are taken on purpose, not by Dependabot):** with the broker running and Windows' passkey prompt open, press **Sign out** and confirm the app stays responsive; then start it again and confirm the page loads. Closing the page's view in that state froze the app once.
 - **The one-window layout was exercised on a development machine** with a stand-in broker (this repository's real pages, a fake NAS) and a software passkey; the real broker, its certificate trust and your own passkey were not.
 
 ## Building

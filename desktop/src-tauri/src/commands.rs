@@ -55,9 +55,15 @@ fn retire_page(page: &Webview) {
     // Under the same lock as `show_page`, so a stop and a show happen one after the other.
     let _one_at_a_time = PAGE_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     PAGE_RETIRED.store(true, Ordering::SeqCst);
-    let _ = page.hide();
+    if let Err(error) = page.hide() {
+        eprintln!("The broker's page could not be hidden: {error}");
+    }
     if let Ok(blank) = Url::parse(BLANK) {
-        let _ = page.navigate(blank);
+        // If this fails the flag is already set, so the next show points the view back at
+        // the broker anyway, and `open_broker` refuses until then.
+        if let Err(error) = page.navigate(blank) {
+            eprintln!("The broker's page could not be blanked: {error}");
+        }
     }
 }
 
