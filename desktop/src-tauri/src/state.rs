@@ -37,7 +37,7 @@ pub const START_DEADLINE_SECONDS: u64 = 60;
 
 /// The lowest `level` (what the broker's `/healthz` reports) whose private page has
 /// everything this app opens and reads. A broker that reports less, or none, is older.
-pub const REQUIRED_LEVEL: u32 = 1;
+pub const REQUIRED_LEVEL: u32 = 2;
 
 /// The commit this app was built from: the broker version "Update Broker" fetches.
 pub const BROKER_COMMIT: &str = env!("BROKER_COMMIT");

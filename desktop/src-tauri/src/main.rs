@@ -1,5 +1,5 @@
-// The Synology broker's desktop shell: starts the broker, shows its private login in a
-// window of its own, and tells you from the tray when a client is waiting.
+// The Synology broker's desktop shell: starts the broker, shows its private pages in the
+// same window, and tells you from the tray when a client is waiting.
 //
 // It never sees the NAS password, the one-time code or a session: those are typed into
 // the broker's own page. The only secret it handles is the broker's Windows account
@@ -34,14 +34,14 @@ fn exe_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
-/// Where the control window keeps its browser data. `None` if it cannot be made there,
+/// Where the app's own view keeps its browser data. `None` if it cannot be made there,
 /// in which case Windows' usual per-user place is used instead.
 pub fn data_dir() -> Option<PathBuf> {
     let dir = exe_dir().join("synology-broker-data");
     std::fs::create_dir_all(&dir).ok().map(|_| dir)
 }
 
-/// Where the window that shows the broker's page keeps its own (see `commands::open`).
+/// Where the view that shows the broker's page keeps its own (see `commands::show_page`).
 pub fn page_data_dir() -> Option<PathBuf> {
     let dir = data_dir()?.join("page");
     std::fs::create_dir_all(&dir).ok().map(|_| dir)
@@ -95,7 +95,7 @@ fn http_client(
 /// One confirmation at a time, however often the close button is pressed.
 static CONFIRMING: AtomicBool = AtomicBool::new(false);
 
-/// Ask, in a box owned by the control window, whether to end the broker with the app.
+/// Ask, in a box owned by the app's window, whether to end the broker with the app.
 #[cfg(windows)]
 fn confirm_close(owner: Option<isize>) -> bool {
     use windows::core::w;
@@ -149,11 +149,13 @@ fn main() {
             commands::start_broker,
             commands::stop_broker,
             commands::open_broker,
+            commands::place_page,
+            commands::hide_page,
             commands::trust_certificate,
             commands::prepare_update,
         ])
         .on_window_event(|window, event| {
-            // The control window's close button closes the app, and the broker with it
+            // The window's close button closes the app, and the broker with it
             // if this app started it. That is worth one question: every client would
             // have to be signed in to the NAS again.
             if window.label() != "main" {
@@ -185,9 +187,11 @@ fn main() {
             let mut builder =
                 WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
                     .title("Synology Broker")
-                    .inner_size(460.0, 460.0)
-                    .resizable(false)
-                    .maximizable(false)
+                    // The title bar is the app's own (menu, back and forward, the status dot,
+                    // the window buttons), drawn in the page; so Windows draws none.
+                    .decorations(false)
+                    .inner_size(1000.0, 700.0)
+                    .min_inner_size(760.0, 520.0)
                     .center();
             if let Some(dir) = data_dir() {
                 builder = builder.data_directory(dir);

@@ -23,15 +23,18 @@ fn main() {
     println!("cargo:rerun-if-changed=../../.git/logs/HEAD");
     println!("cargo:rustc-env=BROKER_COMMIT={}", broker_commit());
 
-    // Every command the local control window may call is listed here, so each needs
-    // an explicit permission in capabilities/default.json. The broker's own window
-    // is a remote page and has no capability at all: it can call none of them.
+    // Every command the app's own view may call is listed here, so each needs an
+    // explicit permission in capabilities/default.json. The view that shows the
+    // broker's page is a remote page and has no capability at all: it can call none
+    // of them.
     tauri_build::try_build(
         tauri_build::Attributes::new().app_manifest(tauri_build::AppManifest::new().commands(&[
             "get_status",
             "start_broker",
             "stop_broker",
             "open_broker",
+            "place_page",
+            "hide_page",
             "trust_certificate",
             "prepare_update",
         ])),

@@ -28,11 +28,10 @@ fn icon(state: TrayState) -> Image<'static> {
 
 pub fn build(app: &AppHandle) -> tauri::Result<()> {
     let open = MenuItem::with_id(app, "open", "Open Broker", true, None::<&str>)?;
-    let sign_in = MenuItem::with_id(app, "sign-in-all", "Sign in all clients", true, None::<&str>)?;
     let settings = MenuItem::with_id(app, "settings", "Settings", true, None::<&str>)?;
     let stop = MenuItem::with_id(app, "stop", "Stop Broker", true, None::<&str>)?;
     let separator = PredefinedMenuItem::separator(app)?;
-    let menu = Menu::with_items(app, &[&open, &sign_in, &settings, &separator, &stop])?;
+    let menu = Menu::with_items(app, &[&open, &settings, &separator, &stop])?;
 
     TrayIconBuilder::with_id(TRAY_ID)
         .icon(icon(TrayState::Stopped))
@@ -41,7 +40,6 @@ pub fn build(app: &AppHandle) -> tauri::Result<()> {
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id().as_ref() {
             "open" => commands::spawn_open(app, "/"),
-            "sign-in-all" => commands::spawn_open(app, "/login-all"),
             "settings" => commands::spawn_open(app, "/settings"),
             "stop" => commands::spawn_stop(app),
             _ => {}

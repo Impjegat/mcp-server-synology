@@ -117,7 +117,7 @@ test('every page the app opens or reads is one the broker in this repository ser
   const pages = read('src-tauri/src/commands.rs').match(/^const PAGES: \[&str; \d+\] = \[([^\]]+)\];$/m);
   assert.ok(pages, 'the list of pages the app opens was not found in commands.rs');
   const opened = [...pages[1].matchAll(/"([^"]+)"/g)].map((match) => match[1]);
-  assert.deepEqual(opened, ['/', '/login-all', '/log', '/settings']);
+  assert.deepEqual(opened, ['/', '/log', '/settings']);
 
   // The two endpoints the monitor reads, each of which it must really ask for.
   const monitor = read('src-tauri/src/monitor.rs');
@@ -132,6 +132,17 @@ test('every page the app opens or reads is one the broker in this repository ser
     const line = broker.split(/\r?\n/).find((text) => text.includes(route) && text.includes('methods=["GET"]'));
     assert.ok(line, `the broker has no GET route for ${page}`);
   }
+});
+
+// The broker reads the app's name in the user agent of the view that shows its page, and
+// then leaves out the navigation the app has already got. Two spellings, two languages.
+test('the app calls its page by the name the broker looks for', () => {
+  const read = (file) => fs.readFileSync(path.join(ROOT, file), 'utf8');
+  const agent = read('src-tauri/src/commands.rs').match(/const PAGE_USER_AGENT: &str = "[^"]*\b(SynologyBrokerApp\/)\d+"/);
+  assert.ok(agent, 'the app\'s user agent was not found in commands.rs');
+  const broker = read('../src/private_auth/app.py').match(/^APP_USER_AGENT = "([^"]+)"$/m);
+  assert.ok(broker, 'the broker\'s APP_USER_AGENT was not found');
+  assert.equal(broker[1], agent[1]);
 });
 
 test('the guide says both switches exist only in debug builds', () => {

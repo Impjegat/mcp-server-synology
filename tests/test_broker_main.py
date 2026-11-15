@@ -492,18 +492,22 @@ class TestPrivateLoginEndToEnd:
                 assert "/login" not in reply_text and origin not in reply_text
 
                 dashboard = (await http.get("/")).text
-                assert "smoke" in dashboard and "waiting for you to sign in" in dashboard
-                location = re.search(r'href="(/login/[^"]+)"', dashboard).group(1)
+                assert "smoke" in dashboard and 'data-state="waiting"' in dashboard
                 csrf = re.search(r'name="csrf" value="([^"]+)"', dashboard).group(1)
 
-                page = await http.get(location)
-                assert "Sign in to the NAS" in page.text
-
-                # Try a login. The NAS here is unreachable; that must come back as a plain sentence.
+                # Try a login the way the Clients page does: the waiting client is ticked and
+                # the password typed once. The NAS here is unreachable; that must come back as
+                # a plain sentence.
                 attempt = await http.post(
-                    location,
+                    "/api/login-all/step",
                     headers=headers,
-                    data={"csrf": csrf, "password": PASSWORD, "username": "reader"},
+                    json={
+                        "csrf": csrf,
+                        "client": "smoke",
+                        "nas": "default",
+                        "password": PASSWORD,
+                        "username": "reader",
+                    },
                 )
                 assert attempt.status_code == 200 and "could not be reached" in attempt.text
                 assert PASSWORD not in attempt.text and PASSWORD not in str(dict(attempt.headers))

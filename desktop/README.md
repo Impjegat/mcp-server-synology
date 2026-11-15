@@ -5,7 +5,7 @@ A small portable Windows app that replaces the shortcut, the two terminals and t
 One `.exe` (about 4 MB), no installer. It:
 
 - **starts the broker** as its own Windows account with no console window (you type that account's Windows password once; it is used for the instant it takes to start the broker and is not kept);
-- **shows the broker's private page** (passkey, dashboard, *Sign in all*, settings, log) in a window of its own, never in your browser;
+- **shows the broker's private page** (passkey, clients, settings, log) in the same window, never in your browser;
 - **updates the broker's code** to the version the app was built from, when the broker is older;
 - sits in the **tray** as a status light (grey stopped, green running, amber a client is waiting for you) and sends **notifications** when a client is waiting, a session is about to reach its limit, or a client's grant needs renewing.
 
@@ -14,18 +14,20 @@ It is a shell around the broker, not a second authority. It never sees your NAS 
 ## Using it
 
 1. Copy `synology-broker.exe` to a folder you keep (it makes `synology-broker-data/` beside itself for the browser's data, so the folder is the whole app) and run it.
-2. Type the Windows password of the broker's account and press **Start Broker**. A progress bar shows until the broker answers; then the window shows *Running* and the broker's dashboard opens in a window of the app.
-3. Sign in there with your passkey, then use **Sign in all clients**, **Settings** and **Log** from the app's window (or from the links at the top of the page).
-4. **The X closes the app, and the broker with it** if this app started it. Because that disconnects every client, the app asks first while a broker is running. Minimise sends the app to the taskbar. The window cannot be maximised.
+2. The window is a card with two steps. Type the Windows password of the broker's account and press **Start Broker** (step 1). A progress bar shows until the broker answers.
+3. Step 2 is the passkey: the broker's own sign-in page shows in the card and asks for it by itself (press its button to try again). Then the card becomes a sidebar (**Clients**, **Settings**, **Log**) with the broker's page beside it.
+4. **Clients** is one table: tick one client, several or all, type the NAS password once, and **Sign in** signs the ticked ones in. **Disconnect** ends them. The last two columns are dots; hover over one to see what it means.
+5. **Sign out** (bottom of the sidebar, or **Back** on the passkey step) stops the broker and returns to the Windows password. There is no other way to leave a signed-in page with the broker still running: the broker is meant to be started by this app and by nothing else.
+6. **The X closes the app, and the broker with it.** Because that disconnects every client, the app asks first while a broker is running. The title bar has the sidebar toggle, Back and Forward through the pages you have visited, a dot for the broker's state (grey stopped, amber starting, green running, amber while a client is waiting, red for a problem), minimise, maximise and close.
 
 Anything the app has to tell you is a card at the bottom of the window with an **×** to dismiss it. A dismissed card stays away until its cause goes and comes back. Two of them have a button, and you will meet both the first time:
 
 - **"This broker is an older version"** with **Update Broker**: see [Updating the broker](#updating-the-broker).
-- **"Windows does not trust the broker's certificate yet"** with **Trust certificate**: see [The broker's certificate](#the-brokers-certificate). Until then the page buttons are greyed out, because the page cannot load in a window.
+- **"Windows does not trust the broker's certificate yet"** with **Trust certificate**: see [The broker's certificate](#the-brokers-certificate). Until then the passkey step stays empty and the sidebar's entries are greyed out, because the page cannot load.
 
-The tray icon has no Quit: its menu opens the broker's pages and stops the broker, and a click shows the window.
+The tray icon has no Quit: its menu opens the broker's pages (Open Broker, Settings) and stops the broker, and a click shows the window.
 
-If the broker is already running (started the old way), the app finds it and shows *Running*, but it cannot stop or update a broker it did not start.
+If the broker is already running (started the old way), the app finds it and shows *Running*, but it cannot stop or update a broker it did not start, so **Sign out** is greyed out. That case is not meant to exist: the broker is to be started by this app only (the broker itself does not yet refuse to be started any other way).
 
 ## Settings file
 
@@ -68,7 +70,7 @@ certutil -user -delstore Root "Name of your broker CA"
 
 The broker's code lives in a folder that only the broker's account can write, so an AI tool running as you cannot change it. The app can update it because you type that account's password.
 
-The broker says how new it is (`level` in `/healthz`). When that is less than this app needs, the window says *This broker is an older version*, greys out the pages the broker lacks, and offers **Update Broker**. Pressing it stops the broker and returns to the password box, whose button now reads **Update and Start Broker**. With the password, the app runs one line as the broker's account, hidden, and then starts the broker as usual:
+The broker says how new it is (`level` in `/healthz`). When that is less than this app needs (level 2: the Clients page, and pages that suit the one-window app), the window says *This broker is an older version*, greys out the pages the broker lacks, and offers **Update Broker**. Pressing it stops the broker and returns to the password box, whose button now reads **Update and Start Broker**. With the password, the app runs one line as the broker's account, hidden, and then starts the broker as usual:
 
 ```text
 git -C <broker_checkout> fetch origin <commit>   and then   git -C <broker_checkout> checkout --detach <commit>
@@ -93,7 +95,8 @@ If yours is not offered, add one that is, once: open the broker's page in your u
 
 ## What this does and does not protect
 
-- The broker's page is a **remote page in its own window with no capability**: it cannot call anything in the app, and it cannot navigate away from the broker's address. It also has its own browser data folder, so it does not share an engine with the control window. The app's commands are each granted to the local control window only.
+- The broker's page is a **remote page in a view of its own, beside the app's own view in the same window, with no capability**: it cannot call anything in the app (a call from it is refused by name), and it cannot navigate away from the broker's address. It also has its own browser data folder, so it does not share an engine with the app's own view. The app's commands are each granted to the app's own view only, by the view's name and not the window's, because a grant to the window would reach the page too. All that the app's view learns from the page is its title and the path it moved to, and it uses them only to decide what to show; the NAS password, one-time code and sessions stay in the page.
+- Showing two views in one window uses a Tauri feature that Tauri still calls unstable (`unstable` in `Cargo.toml`). `Cargo.lock` pins the version, and the app has been run against it on Windows 11; a Tauri update should be tested before it is taken.
 - The app runs as **you**, like the AI tools you use. The broker is protected from them by running as a different account. The app does not change that, but it does mean a program that can **edit this app, its settings file or the start script** could make the app launch something else as the broker's account when you type that password. Keep this folder, and the broker's start script, somewhere an AI tool cannot write, and hover over the password label when in doubt.
 - **Stop, and closing the app, are hard stops.** The broker cannot log its NAS sessions out when it is ended this way, so they linger on the NAS until its own timeout. Press **Disconnect all** on the dashboard first if that matters. (A graceful stop from the app is a known follow-up.)
 - **Trusting the CA** is a change to your Windows account that outlives the app: see above for when it is safe and how to undo it.
@@ -105,7 +108,9 @@ These need the broker's account, its certificate and your passkey, so they were 
 - **Update Broker** as the broker's account. The update line itself is tested against real git repositories, and the whole flow against a stand-in broker run as the developer's own account; what has not run is that line under the real account, with its own Git and network access.
 - **Trust certificate** against Windows' real store. The call is tested on a store that exists only in memory; pressing the button and answering Windows' dialog is yours.
 - **The passkey inside the app's window** (above).
-- Whether DSM accepts one verification code for several sign-ins in a row (if not, *Sign in all* asks for the next code and carries on).
+- Whether DSM accepts one verification code for several sign-ins in a row (if not, signing in several clients from the Clients table asks for the next code and carries on).
+- **Before releasing, or taking a Tauri update (the version is pinned exactly, so security updates are taken on purpose, not by Dependabot):** with the broker running and Windows' passkey prompt open, press **Sign out** and confirm the app stays responsive; then start it again and confirm the page loads. Closing the page's view in that state froze the app once.
+- **The one-window layout was exercised on a development machine** with a stand-in broker (this repository's real pages, a fake NAS) and a software passkey; the real broker, its certificate trust and your own passkey were not.
 
 ## Building
 
@@ -124,11 +129,11 @@ A **debug** build (`npx tauri build --debug --no-bundle`) has two switches that 
 
 ```
 desktop/
-  ui/         the control window (plain HTML, CSS and JS; no framework, no build step):
+  ui/         the window's own view (plain HTML, CSS and JS; no framework, no build step):
               view.js decides what to show for a status, app.js puts it on the page
   tests/      view.test.js and release.test.js (node --test; both also run in CI)
   src-tauri/
-    src/      main.rs (windows, close), commands.rs, launch.rs (CreateProcessWithLogonW,
+    src/      main.rs (the window, close), commands.rs (including the broker page's view), launch.rs (CreateProcessWithLogonW,
               the update line), trust.rs (Windows' certificate store), monitor.rs (health,
               level and /attention), alerts.rs, tray.rs, config.rs, state.rs
     icons/    app icon and the three tray icons

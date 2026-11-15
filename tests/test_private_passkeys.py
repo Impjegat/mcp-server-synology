@@ -134,7 +134,7 @@ class TestAddingAPasskey:
 
         async with world.client() as fresh:
             assert (await sign_in(fresh, world.second)).status_code == 200
-            assert "Sign in all" in (await fresh.get("/settings")).text
+            assert "<title>Settings</title>" in (await fresh.get("/settings")).text
         async with world.client() as fresh:
             assert (await sign_in(fresh, world.first)).status_code == 200
 
@@ -160,10 +160,14 @@ class TestAddingAPasskey:
 
         assert signed_out.status_code == 303
         assert "<h2>Passkeys</h2>" in page
-        # It says what else adding one does: an unused code from the host is replaced.
-        assert "code from the broker host that has not been used yet stops working" in page
+        # It says, when hovered over, what else adding one does: an unused code from the
+        # host stops working.
+        assert "code from the broker host that has not been used yet stop working" in page
         assert re.search(r"<li>password manager \(added \d{4}-\d\d-\d\d\)</li>", page)
-        assert '<button id="add-passkey" type="submit">Add a passkey</button>' in page
+        assert (
+            '<button id="add-passkey" type="submit" title="' in page
+            and ">Add a passkey</button>" in page
+        )
         assert '<script src="/static/passkeys.js" defer></script>' in page
         assert "<script>" not in page and "onclick" not in page
         assert script.status_code == 200
@@ -582,42 +586,42 @@ class TestLevel:
         assert served == ROUTES_AT_LEVEL[PRIVATE_PAGE_LEVEL]
 
 
-ROUTES_AT_LEVEL = {
-    1: {
-        "GET /",
-        "GET /healthz",
-        "GET /attention",
-        "GET /api/state",
-        "GET /log",
-        "GET /api/log",
-        "GET /login-all",
-        "POST /login-all",
-        "POST /api/login-all/step",
-        "GET /login/{request_id}",
-        "POST /login/{request_id}",
-        "POST /pending/new",
-        "POST /pending/cancel",
-        "POST /disconnect",
-        "POST /disconnect-all",
-        "POST /logout",
-        "GET /settings",
-        "POST /settings",
-        "POST /api/settings/begin",
-        "POST /api/settings/commit",
-        "POST /api/passkeys/begin",
-        "POST /api/passkeys/confirm",
-        "POST /api/passkeys/finish",
-        "POST /auth/begin",
-        "POST /auth/finish",
-        "GET /enroll",
-        "POST /enroll/begin",
-        "POST /enroll/finish",
-        "GET /static/app.css",
-        "GET /static/passkey.js",
-        "GET /static/dashboard.js",
-        "GET /static/log.js",
-        "GET /static/login_all.js",
-        "GET /static/settings.js",
-        "GET /static/passkeys.js",
-    },
+# Level 2 changed what the pages look like and do, not which routes there are.
+_LEVEL_1_ROUTES = {
+    "GET /",
+    "GET /healthz",
+    "GET /attention",
+    "GET /api/state",
+    "GET /log",
+    "GET /api/log",
+    "GET /login-all",
+    "POST /login-all",
+    "POST /api/login-all/step",
+    "GET /login/{request_id}",
+    "POST /login/{request_id}",
+    "POST /pending/new",
+    "POST /pending/cancel",
+    "POST /disconnect",
+    "POST /disconnect-all",
+    "POST /logout",
+    "GET /settings",
+    "POST /settings",
+    "POST /api/settings/begin",
+    "POST /api/settings/commit",
+    "POST /api/passkeys/begin",
+    "POST /api/passkeys/confirm",
+    "POST /api/passkeys/finish",
+    "POST /auth/begin",
+    "POST /auth/finish",
+    "GET /enroll",
+    "POST /enroll/begin",
+    "POST /enroll/finish",
+    "GET /static/app.css",
+    "GET /static/passkey.js",
+    "GET /static/dashboard.js",
+    "GET /static/log.js",
+    "GET /static/login_all.js",
+    "GET /static/settings.js",
+    "GET /static/passkeys.js",
 }
+ROUTES_AT_LEVEL = {1: _LEVEL_1_ROUTES, 2: _LEVEL_1_ROUTES}

@@ -16,6 +16,7 @@
 #   - passwords, codes and sessions never appear in a URL, a cookie, a log line,
 #     a response body or a redirect.
 
+import contextvars
 import datetime
 import html
 import json
@@ -65,7 +66,18 @@ MAX_JSON_BYTES = 64 * 1024
 # something the app opens or reads.
 #   1: Sign in all, the dashboard figures, the log, settings and /attention, and adding
 #      a passkey from the settings page.
-PRIVATE_PAGE_LEVEL = 1
+#   2: The one-window app: the Clients page (the dashboard and Sign in all in one table,
+#      with dots for the state and the expiry date), settings with a card per client, and
+#      pages that leave out their own navigation when the app shows them.
+PRIVATE_PAGE_LEVEL = 2
+
+# The app shows these pages inside its own window and says so in its user agent. They
+# then leave out the navigation (the app has its own) and sign in by themselves. This
+# is presentation only: nothing is allowed or refused because of it.
+APP_USER_AGENT = "SynologyBrokerApp/"
+_embedded: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "private_page_embedded", default=False
+)
 
 # A session counts as "ending soon" in /attention when its absolute deadline is this
 # close. Its idle deadline does not count: an unused session runs that down by itself.
@@ -153,6 +165,25 @@ class OwnerAuthenticator(Protocol):
     def begin_additional_enrollment(self) -> Optional[Tuple[str, Dict[str, Any]]]: ...
 
 
+class EmbeddedMiddleware:
+    """Notes, for the length of a request, that the app is the one asking (see
+    `APP_USER_AGENT`). Only what a page looks like follows from it."""
+
+    def __init__(self, app: ASGIApp):
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        agent = dict(scope.get("headers") or []).get(b"user-agent", b"")
+        token = _embedded.set(APP_USER_AGENT.encode() in agent)
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            _embedded.reset(token)
+
+
 class SecurityHeadersMiddleware:
     """Adds the security headers to every response, errors included."""
 
@@ -179,48 +210,106 @@ class SecurityHeadersMiddleware:
 
 
 _CSS = """
-body{font:16px/1.5 system-ui,sans-serif;max-width:42rem;margin:2rem auto;padding:0 1rem;color:#1b1f23;background:#fff}
-h1{font-size:1.4rem} table{border-collapse:collapse;width:100%} th,td{text-align:left;padding:.4rem .5rem;border-bottom:1px solid #d0d7de}
-button,input{font:inherit} input[type=password],input[type=text]{width:100%;padding:.4rem;box-sizing:border-box}
-button{padding:.45rem .9rem;cursor:pointer} label{display:block;margin:.8rem 0 .2rem}
+:root{color-scheme:light dark;--bg:#fff;--fg:#1b1f23;--muted:#57606a;--line:#d0d7de;--panel:#f6f8fa;--accent:#0969da;--ok:#1a7f37;--warn:#9a6700;--bad:#cf222e}
+@media (prefers-color-scheme:dark){:root{--bg:#0d1117;--fg:#e6edf3;--muted:#8b949e;--line:#30363d;--panel:#161b22;--accent:#58a6ff;--ok:#3fb950;--warn:#d29922;--bad:#f85149}}
+*{box-sizing:border-box}
+body{margin:0;font:15px/1.5 system-ui,"Segoe UI",sans-serif;background:var(--bg);color:var(--fg)}
+body.web{max-width:64rem;margin:2rem auto;padding:0 1.2rem 3rem}
+body.embedded{padding:1.4rem 1.8rem 3rem}
+body.bare{padding:0}
+body.bare h1,body.bare nav{display:none}
+h1{font-size:1.15rem;margin:0 0 1rem}
+body.web h1{font-size:1.4rem}
+h2{font-size:.8rem;letter-spacing:.05em;text-transform:uppercase;color:var(--muted);margin:1.8rem 0 .2rem}
+a{color:var(--accent)}
+nav{margin:0 0 1rem}
+nav a{margin-right:1rem}
+label{display:block;margin:.9rem 0 .25rem;font-weight:600}
+label.check{display:flex;gap:.5rem;align-items:center;font-weight:400;margin:.5rem 0}
+input[type=password],input[type=text],input[type=number],textarea{width:100%;padding:.5rem;font:inherit;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--fg)}
+textarea{font:.85rem/1.5 ui-monospace,Consolas,monospace;resize:vertical}
+input:focus-visible,textarea:focus-visible,button:focus-visible,a:focus-visible,summary:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+button{font:inherit;padding:.45rem 1rem;border:1px solid var(--line);border-radius:6px;background:var(--panel);color:var(--fg);cursor:pointer}
+button:hover:not(:disabled){border-color:var(--accent)}
+button:disabled{opacity:.55;cursor:default}
+button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+body.bare button{width:100%;margin:0}
 form.inline{display:inline}
-nav{margin:0 0 1rem} nav a{margin-right:1rem}
-.muted{color:#57606a} .warn{color:#9a6700;font-weight:600}
-pre.log{white-space:pre-wrap;word-break:break-word;font:.8rem/1.4 ui-monospace,Consolas,monospace;background:#f6f8fa;border:1px solid #d0d7de;border-radius:4px;padding:.6rem;max-height:70vh;overflow:auto}
+form.narrow,.narrow{max-width:26rem}
+.bar{display:flex;gap:.5rem;margin-top:1rem}
+table{border-collapse:collapse;width:100%}
+th,td{text-align:left;padding:.5rem .4rem;border-bottom:1px solid var(--line);vertical-align:middle}
+th{font-size:.8rem;color:var(--muted);font-weight:600}
 td.num{white-space:nowrap}
-.note{background:#f6f8fa;border:1px solid #d0d7de;padding:.6rem .8rem;border-radius:4px;margin:1rem 0}
-.error{background:#fff1f0;border:1px solid #ffa39e}.facts dt{font-weight:600;margin-top:.6rem} .facts dd{margin:0}
-@media (prefers-color-scheme:dark){body{background:#0d1117;color:#e6edf3}.note{background:#161b22;border-color:#30363d}.error{background:#2d1517}th,td{border-color:#30363d}.muted{color:#8b949e}.warn{color:#d29922}pre.log{background:#161b22;border-color:#30363d}}
+td.sel,th.sel{width:2rem;padding-right:0}
+table.clients td:nth-child(4){white-space:nowrap}
+table.clients th.c,table.clients td.c{text-align:center}
+.sdot{display:inline-block;width:.8rem;height:.8rem;border-radius:50%;background:var(--muted);cursor:help;vertical-align:middle}
+.sdot.ok{background:var(--ok)}
+.sdot.warn{background:var(--warn)}
+.sdot.bad{background:var(--bad)}
+.muted{color:var(--muted)}
+.warn{color:var(--warn);font-weight:600}
+.facts{display:grid;grid-template-columns:max-content 1fr;gap:.3rem 1.2rem;margin:0 0 .6rem}
+.facts dt{color:var(--muted)}
+.facts dd{margin:0}
+.note{margin:1rem 0 0;padding:.55rem .8rem;border:1px solid var(--line);border-radius:6px;background:var(--panel);font-size:.9rem}
+.note.error,.error{border-color:var(--bad);color:var(--bad)}
+body.bare .note{margin:.6rem 0 0}
+details.client{margin:.6rem 0 0;border:1px solid var(--line);border-radius:8px}
+details.client>summary{display:flex;align-items:center;gap:.5rem;padding:.55rem .9rem;font-weight:600;cursor:pointer;list-style:none;border-radius:8px}
+details.client>summary::-webkit-details-marker{display:none}
+details.client>summary::before{content:"";width:.45rem;height:.45rem;border-right:2px solid var(--muted);border-bottom:2px solid var(--muted);transform:rotate(-45deg);transition:transform .15s}
+details.client[open]>summary::before{transform:rotate(45deg)}
+details.client>summary:hover{background:var(--panel)}
+details.client .body{padding:0 1rem 1rem}
+ul.keys{list-style:none;margin:.6rem 0 0;padding:0}
+ul.keys li{padding:.45rem 0;border-bottom:1px solid var(--line)}
+pre.log{margin:0;white-space:pre-wrap;word-break:break-word;font:.8rem/1.5 ui-monospace,Consolas,monospace;background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:.7rem;max-height:75vh;overflow:auto}
 """
 
-# Keeps the dashboard's figures current and reloads it when something changed state.
-# It asks /api/state without touching the owner session's idle clock, so a window left
-# open cannot keep the owner signed in.
+# Keeps the Clients table current: the dots for the state and the expiry date and what
+# a tick box may do. It asks /api/state without touching the owner session's idle clock,
+# so a window left open cannot keep the owner signed in. A row that appeared or went
+# away reloads the page; anything else is changed in place, so a password being typed
+# and the ticks are never lost.
 _DASHBOARD_JS = """
 (function(){
   const table = document.getElementById('rows');
   if(!table) return;
   let busy = false;
-  async function tick(){
-    if(busy || document.hidden) return;
+  function paint(tr, row){
+    const state = tr.querySelector('.sdot.state'), expiry = tr.querySelector('.sdot.expiry');
+    const box = tr.querySelector('input.pair');
+    if(state){
+      state.className = 'sdot state ' + row.state_dot;
+      state.title = row.state_title; state.setAttribute('aria-label', row.state_title);
+    }
+    if(expiry){
+      expiry.className = 'sdot expiry ' + row.grant_dot;
+      expiry.title = row.grant_title; expiry.setAttribute('aria-label', row.grant_title);
+    }
+    if(box){box.dataset.state = row.state;}
+  }
+  async function tick(force){
+    if(busy || (document.hidden && force !== true)) return;
     busy = true;
     try{
       const r = await fetch('/api/state',{credentials:'same-origin',cache:'no-store'});
       if(r.status===401){location.href='/';return;}
       if(!r.ok) return;
       const data = await r.json();
-      if(data.signature !== table.dataset.signature){location.reload();return;}
-      data.rows.forEach(row=>{
-        document.querySelectorAll('td[data-client][data-nas]').forEach(td=>{
-          if(td.dataset.client===row.client && td.dataset.nas===row.nas){
-            td.textContent = row.left;
-            // The cell before it is the state, which carries the idle clock.
-            if(td.previousElementSibling){td.previousElementSibling.textContent = row.state_text;}
-          }
-        });
-      });
+      const shown = table.querySelectorAll('tbody tr[data-client]');
+      const same = data.rows.length === shown.length && data.rows.every((row, i) =>
+        shown[i].dataset.client === row.client && shown[i].dataset.nas === row.nas);
+      if(!same){location.reload();return;}
+      data.rows.forEach((row, i) => paint(shown[i], row));
+      table.dataset.signature = data.signature;
+      const form = table.closest('form');
+      if(form){form.dispatchEvent(new Event('change',{bubbles:true}));}
     }catch(e){}finally{busy=false;}
   }
+  document.addEventListener('clients:refresh', () => tick(true));
   setInterval(tick, 5000);
 })();
 """
@@ -246,25 +335,43 @@ _LOG_JS = """
 })();
 """
 
-# Signs in several client/NAS pairs from one password entry, one pair at a time. The
-# password lives only in the page's field: it is sent with each step, never stored,
-# and the field is cleared as soon as the run ends, wrongly or not. It stops at the
-# first failure, so a typo costs one attempt on one pair and not one on every pair.
+# The Clients table's form. Tick some clients or all of them, type the NAS password
+# once, and it signs in every ticked client that is not connected, one pair at a time,
+# or disconnects the ticked ones that are. The password lives only in the page's field:
+# it is sent with each step, never stored, and the field is cleared as soon as the run
+# ends, wrongly or not. It stops at the first failure, so a typo costs one attempt on
+# one pair and not one on every pair.
 _LOGIN_ALL_JS = """
 (function(){
-  const form = document.getElementById('loginall');
+  const form = document.getElementById('clients');
   if(!form) return;
   const msg = document.getElementById('msg');
   const go = document.getElementById('go');
+  const drop = document.getElementById('drop');
+  const all = document.getElementById('all');
   const csrf = form.elements.csrf.value;
+  let running = false;
+  const boxes = () => Array.from(form.querySelectorAll('input.pair'));
   function say(text, bad){msg.textContent = text; msg.className = 'note' + (bad ? ' error' : ''); msg.hidden = false;}
+  function sync(){
+    const list = boxes(), on = list.filter(box => box.checked);
+    all.checked = on.length > 0 && on.length === list.length;
+    all.indeterminate = on.length > 0 && on.length < list.length;
+    go.disabled = running || !on.some(box => box.dataset.state !== 'connected');
+    drop.disabled = running || !on.some(box => box.dataset.state !== 'not connected');
+  }
+  form.addEventListener('change', (event)=>{
+    if(event.target === all){boxes().forEach(box => {box.checked = all.checked;});}
+    sync();
+  });
+  sync();
   form.addEventListener('submit', async (event)=>{
     event.preventDefault();
     const password = form.elements.password, otp = form.elements.otp, user = form.elements.username;
-    const todo = Array.from(form.querySelectorAll('input.pair')).filter(box=>box.checked && !box.disabled);
-    if(!todo.length){say('Tick at least one client.', true); return;}
+    const todo = boxes().filter(box => box.checked && box.dataset.state !== 'connected');
+    if(!todo.length) return;
     if(!password.value){say('Enter the NAS password.', true); password.focus(); return;}
-    go.disabled = true;
+    running = true; sync();
     try{
       for(const box of todo){
         const label = box.dataset.client + ' on ' + box.dataset.nas;
@@ -281,8 +388,7 @@ _LOGIN_ALL_JS = """
           say('Your passkey sign-in has ended. Reload this page and sign in again.', true); return;
         }
         if(answer.ok){
-          box.checked = false; box.disabled = true;
-          const cell = box.closest('tr').querySelector('.st'); if(cell){cell.textContent = 'connected';}
+          box.checked = false; box.dataset.state = 'connected';
           continue;
         }
         const code = answer.code, text = answer.message || 'The sign-in did not complete.';
@@ -298,8 +404,34 @@ _LOGIN_ALL_JS = """
         return;
       }
       password.value = ''; otp.value = '';
-      say('Every ticked client is connected.', false);
-    }finally{go.disabled = false;}
+      msg.hidden = true;
+    }finally{
+      running = false; sync();
+      document.dispatchEvent(new Event('clients:refresh'));
+    }
+  });
+  drop.addEventListener('click', async ()=>{
+    const todo = boxes().filter(box => box.checked && box.dataset.state !== 'not connected');
+    if(!todo.length) return;
+    running = true; sync();
+    try{
+      for(const box of todo){
+        const path = box.dataset.state === 'connected' ? '/disconnect' : '/pending/cancel';
+        const body = new URLSearchParams({csrf:csrf, client:box.dataset.client, nas:box.dataset.nas});
+        const r = await fetch(path,{method:'POST', credentials:'same-origin', redirect:'manual',
+          headers:{'Content-Type':'application/x-www-form-urlencoded'}, body: body});
+        if(r.status===401 || r.status===403){
+          say('Your passkey sign-in has ended. Reload this page and sign in again.', true); return;
+        }
+        if(!r.ok && r.type !== 'opaqueredirect'){say('That client could not be disconnected.', true); return;}
+        box.checked = false;
+      }
+      msg.hidden = true;
+    }catch(error){say('The broker could not be reached.', true);}
+    finally{
+      running = false; sync();
+      document.dispatchEvent(new Event('clients:refresh'));
+    }
   });
 })();
 """
@@ -323,7 +455,7 @@ _SETTINGS_JS = """
     msg.className = 'note' + (bad ? ' error' : ''); msg.hidden = false;
   }
   function syncDelete(){
-    form.querySelectorAll('fieldset[data-client]').forEach(box=>{
+    form.querySelectorAll('details[data-client]').forEach(box=>{
       const write = box.querySelector('input[data-kind=write]'), del = box.querySelector('input[data-kind=delete]');
       del.disabled = !write.checked; if(!write.checked) del.checked = false;
     });
@@ -335,7 +467,7 @@ _SETTINGS_JS = """
       session[input.dataset.field] = input.value === '' ? null : Number(input.value);
     });
     const clients = {};
-    form.querySelectorAll('fieldset[data-client]').forEach(box=>{
+    form.querySelectorAll('details[data-client]').forEach(box=>{
       const folders = {};
       box.querySelectorAll('textarea[data-nas]').forEach(area=>{folders[area.dataset.nas] = area.value.split('\\n');});
       clients[box.dataset.client] = {
@@ -488,15 +620,14 @@ async function enroll(){
 }
 document.addEventListener('DOMContentLoaded',()=>{
   const a=document.getElementById('signin'); if(a)a.addEventListener('click',signIn);
+  // Inside the app the passkey is asked for as soon as the page is there; the button stays for a retry.
+  if(a && document.body.classList.contains('embedded')) signIn();
   const b=document.getElementById('enroll'); if(b)b.addEventListener('click',enroll);
 });
 """
 
 
-_NAV = (
-    '<nav><a href="/">Dashboard</a><a href="/login-all">Sign in all</a>'
-    '<a href="/settings">Settings</a><a href="/log">Log</a></nav>'
-)
+_NAV = '<nav><a href="/">Clients</a><a href="/settings">Settings</a><a href="/log">Log</a></nav>'
 
 
 def _page(
@@ -507,9 +638,17 @@ def _page(
     scripts: Sequence[str] = (),
     nav: bool = False,
     refresh_to: Optional[str] = None,
+    bare: bool = False,
 ) -> HTMLResponse:
+    """A page. `title` is both the tab's title and the heading: the app reads it to know
+    what it is showing. Inside the app (`_embedded`) there is no navigation, because the
+    app has its own; `bare` leaves out the heading too, for a page that is one button."""
     # `refresh_to` is a fixed path of ours, never a value taken from the request.
     refresh = f'<meta http-equiv="refresh" content="3;url={refresh_to}">' if refresh_to else ""
+    embedded = _embedded.get()
+    classes = "embedded" if embedded else "web"
+    if bare:
+        classes += " bare"
     script_tags = "".join(
         f'<script src="/static/{name}" defer></script>' for name in ("passkey.js", *scripts)
     )
@@ -518,8 +657,19 @@ def _page(
         '<meta name="viewport" content="width=device-width,initial-scale=1">'
         f'{refresh}<title>{html.escape(title)}</title><link rel="stylesheet" href="/static/app.css">'
         f"{script_tags}</head>"
-        f"<body><h1>{html.escape(title)}</h1>{_NAV if nav else ''}{body}</body></html>",
+        f'<body class="{classes}"><h1>{html.escape(title)}</h1>'
+        f"{_NAV if nav and not embedded else ''}{body}</body></html>",
         status_code=status,
+    )
+
+
+def _dot(kind: str, colour: str, tip: str) -> str:
+    """A coloured dot that says what it means when hovered over. `colour` is one of the
+    dot classes in `_CSS` or empty (grey)."""
+    shown = html.escape(tip)
+    return (
+        f'<span class="sdot {kind}{" " + colour if colour else ""}" role="img" '
+        f'title="{shown}" aria-label="{shown}"></span>'
     )
 
 
@@ -631,11 +781,35 @@ class PrivateLoginApp:
                 else:
                     state = "not connected"
                     state_text = "not connected"
+                grant_text = _grant_text(grant_left, client.expires_at)
+                if grant_left is None:
+                    grant_dot, grant_title = "", "No expiry date"
+                elif grant_left <= 0:
+                    grant_dot, grant_title = "bad", grant_text[:1].upper() + grant_text[1:]
+                elif grant_left <= GRANT_WARN_SECONDS:
+                    grant_dot, grant_title = "warn", grant_text[:1].upper() + grant_text[1:]
+                else:
+                    grant_dot, grant_title = "ok", grant_text[:1].upper() + grant_text[1:]
+                if state == "connected":
+                    state_dot = "ok"
+                    state_title = f"Connected. Session ends in {_span(absolute_left)}."
+                elif state == "waiting":
+                    state_dot, state_title = (
+                        "warn",
+                        "Waiting for you: this client asked to sign in.",
+                    )
+                else:
+                    state_dot, state_title = "", "Not connected: this client has no NAS session."
                 rows.append(
                     {
                         "client": client.name,
                         "nas": nas,
                         "state": state,
+                        # What the dots show, and what they say when hovered over.
+                        "state_dot": state_dot,
+                        "state_title": state_title,
+                        "grant_dot": grant_dot,
+                        "grant_title": grant_title,
                         # The sentence the table shows for it. It carries the idle clock,
                         # so the page refreshes it with the other clocks (`_DASHBOARD_JS`).
                         "state_text": state_text,
@@ -770,12 +944,14 @@ class PrivateLoginApp:
                         "Nobody can sign in yet. On the broker host, run the enroll command, then open /enroll here."
                     )
                     + '<p><a href="/enroll">Enroll a passkey</a></p>',
+                    bare=True,
                 )
+            # The app reads this title to know the passkey is still to be given.
             return _page(
-                "Private sign-in",
-                _notice("Sign in with the passkey on this device to continue.")
-                + '<p><button id="signin" type="button">Sign in with passkey</button></p>'
+                "Sign in",
+                '<button id="signin" class="primary" type="button">Sign in with passkey</button>'
                 '<p id="msg" class="note error" role="status" hidden></p>',
+                bare=True,
             )
 
         snapshot = self._snapshot()
@@ -791,61 +967,68 @@ class PrivateLoginApp:
             None if progress and not running else _NOTICES.get(request.query_params.get("m", ""))
         )
         rows = []
+        needs_account = False
         for entry in snapshot:
+            client = self.runtime.policy.clients[entry["client"]]
+            account = self.login.account_for(entry["nas"])
+            needs_account = needs_account or not account
             name, nas_name = html.escape(entry["client"]), html.escape(entry["nas"])
-            pair = (
-                f'<input type="hidden" name="client" value="{name}">'
-                f'<input type="hidden" name="nas" value="{nas_name}">'
+            roots = ", ".join(client.folders.get(entry["nas"], ())) or "none"
+            box = (
+                f'<input type="checkbox" class="pair" data-client="{name}" data-nas="{nas_name}" '
+                f'data-state="{html.escape(entry["state"])}" '
+                f'aria-label="Select {name} on {nas_name}">'
             )
-            state = entry["state_text"]
-            if entry["state"] == "connected":
-                action = (
-                    f'<form method="post" action="/disconnect">{_hidden(session.csrf_token)}'
-                    f'{pair}<button type="submit">Disconnect</button></form>'
-                )
-            elif entry["state"] == "waiting":
-                action = (
-                    f'<a href="/login/{html.escape(entry["request_id"])}">Continue</a> '
-                    f'<form method="post" action="/pending/cancel" class="inline">{_hidden(session.csrf_token)}'
-                    f'{pair}<button type="submit">Cancel</button></form>'
-                )
-            else:
-                action = (
-                    f'<form method="post" action="/pending/new">{_hidden(session.csrf_token)}'
-                    f'{pair}<button type="submit">Sign in</button></form>'
-                )
-            grant_class = ' class="warn"' if entry["grant_soon"] else ""
             rows.append(
-                f"<tr><td>{name}</td><td>{nas_name}</td><td>{state}</td>"
-                f'<td class="num" data-client="{name}" data-nas="{nas_name}">{html.escape(entry["left"])}</td>'
-                f"<td{grant_class}>{html.escape(entry['grant'])}</td><td>{action}</td></tr>"
+                f'<tr data-client="{name}" data-nas="{nas_name}"><td class="sel">{box}</td>'
+                f"<td>{name}</td><td>{nas_name}</td>"
+                f"<td>{html.escape(account) if account else 'you type it'}</td>"
+                f"<td>{len(client.allowed_tools())}</td><td>{html.escape(roots)}</td>"
+                f'<td class="c">{_dot("expiry", entry["grant_dot"], entry["grant_title"])}</td>'
+                f'<td class="c">{_dot("state", entry["state_dot"], entry["state_title"])}</td></tr>'
             )
-        any_live = any(entry["state"] == "connected" for entry in snapshot)
-        disconnect_all = (
-            f'<form method="post" action="/disconnect-all">{_hidden(session.csrf_token)}'
-            '<button type="submit">Disconnect all</button></form> '
-            if any_live
+        username_field = (
+            '<label for="username">NAS account name (for units with no configured account)</label>'
+            '<input id="username" name="username" type="text" autocomplete="username">'
+            if needs_account
             else ""
+        )
+        # A browser has no app around it, so it keeps a way to end the owner's session.
+        end_session = (
+            ""
+            if _embedded.get()
+            else f'<form method="post" action="/logout" class="inline">{_hidden(session.csrf_token)}'
+            '<button type="submit">End this session</button></form>'
         )
         body = (
             (_notice(notice) if notice else "")
-            + f'<table id="rows" data-signature="{html.escape(self._signature(snapshot))}">'
-            "<thead><tr><th>Client</th><th>NAS</th><th>State</th><th>Session</th>"
-            "<th>Grant</th><th></th></tr></thead><tbody>"
+            + '<form id="clients" method="post" action="/login-all" autocomplete="off">'
+            + _hidden(session.csrf_token)
+            + f'<table id="rows" class="clients" data-signature="{html.escape(self._signature(snapshot))}">'
+            '<thead><tr><th class="sel"><input type="checkbox" id="all" aria-label="Select all"></th>'
+            "<th>Client</th><th>NAS</th><th>Account</th><th>Tools</th><th>Folders</th>"
+            '<th class="c">Expiry date</th><th class="c">State</th></tr></thead><tbody>'
             + "".join(rows)
             + "</tbody></table>"
-            + '<p><a href="/login-all">Sign in all clients with one password</a></p>'
-            + f"<div>{disconnect_all}"
-            + f'<form method="post" action="/logout" class="inline">{_hidden(session.csrf_token)}'
-            '<button type="submit">End this session</button></form></div>'
+            + '<div class="narrow">'
+            + username_field
+            + '<label for="password">NAS password</label>'
+            '<input id="password" name="password" type="password" autocomplete="current-password">'
+            '<label for="otp">Verification code</label>'
+            '<input id="otp" name="otp" type="text" inputmode="numeric" '
+            'autocomplete="one-time-code" maxlength="10">'
+            '<div class="bar"><button id="go" type="submit" class="primary" disabled>Sign in</button>'
+            '<button id="drop" type="button" disabled>Disconnect</button></div>'
+            '<p id="msg" class="note" role="status" hidden></p></div></form>'
+            + (f"<p>{end_session}</p>" if end_session else "")
         )
         # After a duplicate submission, look again in a moment for as long as the first
         # one is running; the table says Connected once it has finished, and then the
         # refreshing stops because there is nothing left to wait for.
         return _page(
-            "Synology broker",
+            "Clients",
             body,
-            scripts=("dashboard.js",),
+            scripts=("login_all.js", "dashboard.js"),
             nav=True,
             refresh_to="/?m=progress" if running else None,
         )
@@ -1011,10 +1194,7 @@ class PrivateLoginApp:
         if self.log_buffer is None:
             return _page("Log", _notice("This broker keeps no log to show here."), nav=True)
         lines = html.escape("\n".join(self.log_buffer.lines()))
-        body = (
-            _notice("The broker's recent log lines, newest last. Kept in memory only.")
-            + f'<pre id="log" class="log">{lines}</pre>'
-        )
+        body = f'<pre id="log" class="log">{lines}</pre>'
         return _page("Log", body, scripts=("log.js",), nav=True)
 
     async def api_log(self, request: Request) -> Response:
@@ -1029,58 +1209,9 @@ class PrivateLoginApp:
     # -- sign in several clients at once -------------------------------------
 
     async def login_all_page(self, request: Request) -> Response:
-        session, refusal = self._require_owner(request)
-        if refusal:
-            return refusal
-        state = {(r["client"], r["nas"]): r["state"] for r in self._snapshot()}
-        rows = []
-        needs_account = False
-        for client in self.runtime.policy.clients.values():
-            roots = client.folders
-            for nas in sorted(client.nas):
-                account = self.login.account_for(nas)
-                needs_account = needs_account or not account
-                live = state.get((client.name, nas)) == "connected"
-                folders = ", ".join(roots.get(nas, ())) or "none"
-                name, nas_name = html.escape(client.name), html.escape(nas)
-                box = (
-                    f'<input type="checkbox" class="pair" data-client="{name}" data-nas="{nas_name}"'
-                    f'{" disabled" if live else " checked"} aria-label="Sign in {name} on {nas_name}">'
-                )
-                rows.append(
-                    f"<tr><td>{box}</td><td>{name}</td><td>{nas_name}</td>"
-                    f"<td>{html.escape(account) if account else 'you type it'}</td>"
-                    f"<td>{len(client.allowed_tools())}</td><td>{html.escape(folders)}</td>"
-                    f'<td class="st">{"connected" if live else "not connected"}</td></tr>'
-                )
-        username_field = (
-            '<label for="username">NAS account name (for units with no configured account)</label>'
-            '<input id="username" name="username" type="text" autocomplete="username">'
-            if needs_account
-            else ""
-        )
-        body = (
-            _notice(
-                "Check which NAS account each client signs in as, how many tools it gets and "
-                "which folders it can reach. Then type the password once: it signs in every "
-                "ticked client, one after the other, and stops at the first one that fails."
-            )
-            + '<form id="loginall" method="post" action="/login-all" autocomplete="off">'
-            + _hidden(session.csrf_token)
-            + "<table><thead><tr><th></th><th>Client</th><th>NAS</th><th>Account</th>"
-            "<th>Tools</th><th>Folders</th><th>State</th></tr></thead><tbody>"
-            + "".join(rows)
-            + "</tbody></table>"
-            + username_field
-            + '<label for="password">NAS password</label>'
-            '<input id="password" name="password" type="password" autocomplete="current-password">'
-            '<label for="otp">Verification code (if the account uses one)</label>'
-            '<input id="otp" name="otp" type="text" inputmode="numeric" '
-            'autocomplete="one-time-code" maxlength="10">'
-            '<p><button id="go" type="submit">Sign in ticked clients</button></p></form>'
-            '<p id="msg" class="note" role="status" hidden></p>'
-        )
-        return _page("Sign in all", body, scripts=("login_all.js",), nav=True)
+        """Signing in several clients at once is the Clients page now: this address is
+        kept so an old link or bookmark still ends up there."""
+        return RedirectResponse("/", status_code=303)
 
     async def login_all_fallback(self, request: Request) -> Response:
         """The form was posted without the page's script. The body is never read, so
@@ -1153,7 +1284,7 @@ class PrivateLoginApp:
         if self.settings is None:
             return _page(
                 "Settings",
-                _notice("This broker was started without settings that can be changed here.")
+                _notice("This broker has no settings that can be changed here.")
                 + self._passkeys_section(session),
                 scripts=("passkeys.js",),
                 nav=True,
@@ -1167,13 +1298,7 @@ class PrivateLoginApp:
                 f'data-field="{field}" value="{_number_text(view[field])}">'
             )
 
-        parts = [
-            _notice(
-                "Saving a change asks for your passkey again. It takes effect at once, and "
-                "clients stay connected. Client tokens, NAS units and grant dates are not "
-                "changed here."
-            )
-        ]
+        parts: List[str] = []
         if not self.settings.writable():
             parts.append(
                 _notice(
@@ -1183,34 +1308,38 @@ class PrivateLoginApp:
                 )
             )
         parts.append(
-            f'<form id="settings" method="post" action="/settings">{_hidden(session.csrf_token)}'
+            f'<form id="settings" class="narrow" method="post" action="/settings">{_hidden(session.csrf_token)}'
         )
-        parts.append("<h2>This page</h2>")
-        parts.append(number("Sign out after being unused for (minutes)", "owner_idle_minutes", "1"))
-        parts.append(number("Sign out after (hours, however busy)", "owner_absolute_hours", "0.5"))
+        parts.append("<h2>This app</h2>")
+        parts.append(number("Sign out when unused for (minutes)", "owner_idle_minutes", "1"))
+        parts.append(number("Sign out after (hours)", "owner_absolute_hours", "0.5"))
         parts.append("<h2>NAS sessions</h2>")
-        parts.append(number("End a session after being unused for (minutes)", "idle_minutes", "1"))
-        parts.append(number("End a session after (hours, however busy)", "absolute_hours", "0.5"))
+        parts.append(number("End when unused for (minutes)", "idle_minutes", "1"))
+        parts.append(number("End after (hours)", "absolute_hours", "0.5"))
         parts.append("<h2>Clients</h2>")
         for client in view["clients"]:
             name = html.escape(client["name"])
-            parts.append(f'<fieldset data-client="{name}"><legend>{name}</legend>')
             parts.append(
-                f'<label><input type="checkbox" data-kind="write"{" checked" if client["write"] else ""}> '
-                "Write access: create files and folders, rename and move</label>"
-                f'<label><input type="checkbox" data-kind="delete"{" checked" if client["delete"] else ""}> '
-                "Allow delete as well (cannot be undone)</label>"
+                f'<details class="client" data-client="{name}"><summary>{name}</summary><div class="body">'
+            )
+            parts.append(
+                f'<label class="check"><input type="checkbox" data-kind="write"{" checked" if client["write"] else ""}> '
+                "Write access</label>"
+                f'<label class="check"><input type="checkbox" data-kind="delete"{" checked" if client["delete"] else ""}> '
+                "Delete access</label>"
             )
             for nas in client["nas"]:
                 alias = html.escape(nas["alias"])
                 field = f"folders-{name}-{alias}"
                 parts.append(
-                    f'<label for="{field}">Folders on {alias} (one per line, such as /docs)</label>'
+                    f'<label for="{field}">Folders on {alias}, one per line</label>'
                     f'<textarea id="{field}" rows="4" data-nas="{alias}" spellcheck="false">'
                     f'{html.escape(chr(10).join(nas["roots"]))}</textarea>'
                 )
-            parts.append("</fieldset>")
-        parts.append('<p><button id="save" type="submit">Review and save</button></p></form>')
+            parts.append("</div></details>")
+        parts.append(
+            '<div class="bar"><button id="save" type="submit" class="primary">Save</button></div></form>'
+        )
         parts.append('<div id="msg" class="note" role="status" hidden></div>')
         parts.append(self._passkeys_section(session))
         return _page("Settings", "".join(parts), scripts=("settings.js", "passkeys.js"), nav=True)
@@ -1224,19 +1353,16 @@ class PrivateLoginApp:
             for label, created in self.owner.passkeys()
         )
         return (
-            "<h2>Passkeys</h2>"
-            + _notice(
-                "These sign you in to this page. Adding one asks for a passkey you already "
-                "have, then lets your device create the new one. A one-time code from the "
-                "broker host that has not been used yet stops working when you add one here."
-            )
-            + f'<ul id="passkey-list">{items}</ul>'
+            '<div class="narrow"><h2>Passkeys</h2>'
+            f'<ul id="passkey-list" class="keys">{items}</ul>'
             f'<form id="passkeys" method="post" action="/settings">{_hidden(session.csrf_token)}'
-            '<label for="passkey-name">Name for the new passkey</label>'
+            '<label for="passkey-name">Name for a new passkey</label>'
             '<input id="passkey-name" type="text" maxlength="64" value="Windows Hello" '
             'autocomplete="off">'
-            '<p><button id="add-passkey" type="submit">Add a passkey</button></p></form>'
-            '<div id="passkey-msg" class="note" role="status" hidden></div>'
+            '<div class="bar"><button id="add-passkey" type="submit" '
+            'title="Adding a passkey makes a one-time code from the broker host that has '
+            'not been used yet stop working.">Add a passkey</button></div></form>'
+            '<div id="passkey-msg" class="note" role="status" hidden></div></div>'
         )
 
     async def settings_fallback(self, request: Request) -> Response:
@@ -1536,6 +1662,7 @@ class PrivateLoginApp:
                 # carries the security headers.
                 Middleware(SecurityHeadersMiddleware),
                 Middleware(TrustedHostMiddleware, allowed_hosts=self.allowed_hosts),
+                Middleware(EmbeddedMiddleware),
             ],
         )
 
