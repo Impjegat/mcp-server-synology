@@ -355,10 +355,11 @@ pub fn show_page(app: &AppHandle, bounds: &Bounds, path: &str) -> Result<(), Str
             // Left blank when the broker stopped: point it at the broker again. The flag is
             // cleared only once that has worked, so a failure leaves it for the next try.
             page.navigate(broker_page(app, path)?).map_err(|error| error.to_string())?;
-            PAGE_RETIRED.store(false, Ordering::SeqCst);
         }
         page.set_bounds(bounds.rect()).map_err(|error| error.to_string())?;
         page.show().map_err(|error| error.to_string())?;
+        // Only now is the view live again; if a step above failed, the next call starts over.
+        PAGE_RETIRED.store(false, Ordering::SeqCst);
         let _ = page.set_focus();
         return Ok(());
     }
@@ -425,6 +426,15 @@ pub async fn open_broker(
     path: Option<String>,
 ) -> Result<(), String> {
     require_main(&webview)?;
+    // The same conditions as `show_page`, and never a view left blank by a stop.
+    let status = app.state::<AppState>().status();
+    if status.phase != Phase::Running || status.window_untrusted {
+        return Err("The broker's page cannot be shown now.".to_string());
+    }
+    let _one_at_a_time = PAGE_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if PAGE_RETIRED.load(Ordering::SeqCst) {
+        return Err("The broker's page is not shown.".to_string());
+    }
     let target = broker_page(&app, path.as_deref().unwrap_or("/"))?;
     let page = app.get_webview(PAGE_LABEL).ok_or("The broker's page is not shown.")?;
     page.navigate(target).map_err(|error| error.to_string())
