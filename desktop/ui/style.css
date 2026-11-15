@@ -1,31 +1,80 @@
-:root{color-scheme:light dark;--bg:#fff;--fg:#1b1f23;--muted:#57606a;--line:#d0d7de;--panel:#f6f8fa;--accent:#0969da;--ok:#1a7f37;--warn:#9a6700;--bad:#cf222e}
+:root{color-scheme:light dark;--bg:#fff;--fg:#1b1f23;--muted:#57606a;--line:#d0d7de;--panel:#f6f8fa;--accent:#0969da;--ok:#1a7f37;--warn:#9a6700;--bad:#cf222e;--side:228px}
 @media (prefers-color-scheme:dark){:root{--bg:#0d1117;--fg:#e6edf3;--muted:#8b949e;--line:#30363d;--panel:#161b22;--accent:#58a6ff;--ok:#3fb950;--warn:#d29922;--bad:#f85149}}
 *{box-sizing:border-box}
-body{margin:0;padding:1.2rem 1.4rem;font:15px/1.5 system-ui,"Segoe UI",sans-serif;background:var(--bg);color:var(--fg)}
-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:1rem}
+html,body{height:100%}
+body{margin:0;display:flex;flex-direction:column;overflow:hidden;font:15px/1.5 system-ui,"Segoe UI",sans-serif;background:var(--bg);color:var(--fg)}
 h1{font-size:1.25rem;margin:0}
-.pill{padding:.15rem .7rem;border-radius:999px;font-size:.8rem;font-weight:600;border:1px solid var(--line);background:var(--panel)}
-.pill.running{color:var(--ok);border-color:var(--ok)}
-.pill.starting{color:var(--warn);border-color:var(--warn)}
-.pill.error{color:var(--bad);border-color:var(--bad)}
-.pill.attention{color:var(--warn);border-color:var(--warn)}
-label{display:block;margin:.9rem 0 .25rem;font-weight:600}
-input{width:100%;padding:.5rem;font:inherit;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--fg)}
-button{font:inherit;padding:.5rem 1rem;border:1px solid var(--line);border-radius:6px;background:var(--panel);color:var(--fg);cursor:pointer}
+[hidden]{display:none!important}
+
+input[type=password]{width:100%;padding:.5rem;font:inherit;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--fg)}
+input:focus-visible,button:focus-visible,a:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+button{font:inherit;padding:.45rem 1rem;border:1px solid var(--line);border-radius:6px;background:var(--panel);color:var(--fg);cursor:pointer}
 button:hover:not(:disabled){border-color:var(--accent)}
 button:disabled{opacity:.55;cursor:default}
 button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
-button.danger{color:var(--bad)}
-#start{margin-top:1rem;width:100%}
-.buttons{display:grid;grid-template-columns:1fr 1fr;gap:.6rem;margin-top:.8rem}
-.progress{height:.6rem;margin-top:2.2rem;border:1px solid var(--line);border-radius:999px;background:var(--panel);overflow:hidden}
+
+/* -- title bar: menu, back and forward, status dot on the left; window controls on the right -- */
+#titlebar{position:relative;flex:none;height:36px;display:flex;align-items:center;padding-left:.5rem;background:var(--panel);border-bottom:1px solid var(--line);user-select:none}
+#titlebar button{border:0;background:none;color:var(--muted);width:30px;height:28px;padding:0;border-radius:6px;display:grid;place-items:center}
+#titlebar button:hover:not(:disabled){background:var(--line);color:var(--fg);border:0}
+#titlebar button:disabled{opacity:.35}
+#titlebar .spacer{flex:1;align-self:stretch}
+#titlebar .wbtn{width:46px;height:36px;border-radius:0}
+#titlebar .wbtn.close:hover:not(:disabled){background:#c42b1c;color:#fff}
+.dot{flex:none;width:.65rem;height:.65rem;margin:0 .7rem;border-radius:50%;background:var(--muted)}
+.dot.running{background:var(--ok)}
+.dot.starting{background:var(--warn);animation:pulse 1.2s ease-in-out infinite}
+.dot.attention{background:var(--warn)}
+.dot.error{background:var(--bad)}
+@keyframes pulse{50%{opacity:.3}}
+@media (prefers-reduced-motion:reduce){.dot.starting{animation:none}}
+
+/* -- before sign-in: one card in the middle of the window ---------------------- */
+#gate{flex:1;min-height:0;display:flex;align-items:center;justify-content:center;background:var(--panel);padding-bottom:2rem}
+.card{position:relative;width:25rem;max-width:calc(100% - 2rem);padding:2.2rem 1.5rem 1.6rem;background:var(--bg);border:1px solid var(--line);border-radius:10px}
+/* The title sits on the card's border: its top half shows the window behind, its lower half hides the line. */
+.card h1{position:absolute;top:0;left:1.1rem;transform:translateY(calc(-50% - .5px));display:flex;align-items:center;gap:.6rem;padding:0 .6rem;line-height:1;background:linear-gradient(to bottom,transparent calc(50% - 2px),var(--bg) calc(50% - 2px))}
+.card h1 img{display:block;border-radius:7px}
+.card h1 img.logo-dark{display:none}
+@media (prefers-color-scheme:dark){.card h1 img.logo-light{display:none}.card h1 img.logo-dark{display:block}}
+.steps{display:flex;align-items:flex-start;margin:1.1rem 0 1.3rem}
+.step{display:flex;flex-direction:column;align-items:center;gap:.4rem;width:6.8rem;font-size:.78rem;color:var(--muted);text-align:center}
+.step .n{width:1.9rem;height:1.9rem;border-radius:50%;display:grid;place-items:center;font-weight:700;background:var(--panel);border:1px solid var(--line);color:var(--muted)}
+.step.active,.step.done{color:var(--fg)}
+.step.active .n{background:var(--accent);border-color:var(--accent);color:#fff}
+.step.done .n{background:var(--ok);border-color:var(--ok);color:#fff}
+.steps .line{flex:1;height:2px;margin-top:.95rem;background:var(--line)}
+.steps .line.done{background:var(--ok)}
+.card button{width:100%;margin-top:1rem}
+#signin-panel #gate-back{margin-top:.6rem}
+.progress{height:.6rem;margin:1.6rem 0 .6rem;border:1px solid var(--line);border-radius:999px;background:var(--panel);overflow:hidden}
 #progress-bar{height:100%;width:0;border-radius:999px;background:var(--accent);transition:width .35s ease-out}
-#notices{position:fixed;left:1.4rem;right:1.4rem;bottom:1rem;display:flex;flex-direction:column;gap:.5rem}
-.notice{position:relative;background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:.55rem 2.2rem .55rem .8rem;font-size:.9rem}
+/* Where the broker's own sign-in page shows: tall enough for its button and a line of text. */
+#card-slot{height:5.2rem}
+
+/* -- signed in: sidebar and page ----------------------------------------------- */
+#shell{flex:1;min-height:0;display:flex}
+body.collapsed #side{display:none}
+#side{flex:0 0 var(--side);display:flex;flex-direction:column;padding:.8rem .8rem 1rem;background:var(--panel);border-right:1px solid var(--line)}
+#nav{display:flex;flex-direction:column;gap:.15rem}
+#nav a{display:flex;align-items:center;justify-content:space-between;padding:.45rem .6rem;border-radius:6px;color:var(--fg);text-decoration:none}
+#nav a:hover{background:var(--bg)}
+#nav a.current{background:var(--bg);font-weight:600;box-shadow:inset 3px 0 0 var(--accent)}
+#nav a[aria-disabled=true]{opacity:.45;pointer-events:none}
+.badge{min-width:1.35rem;padding:0 .4rem;border-radius:999px;background:var(--warn);color:#fff;font-size:.75rem;font-weight:700;text-align:center}
+.side-foot{margin-top:auto;display:flex;flex-direction:column}
+/* The page is the broker's, shown in a view that sits over #page-slot; this column keeps the notices below it. */
+#main{flex:1;min-width:0;display:flex;flex-direction:column;background:var(--bg)}
+#page-slot{flex:1;min-height:0}
+#dock:empty{display:none}
+
+/* -- notices: cards at the bottom of the window, each with its own close -------- */
+#notices{position:fixed;left:1.4rem;right:1.4rem;bottom:1rem;display:flex;flex-direction:column;gap:.5rem;align-items:center}
+#dock #notices{position:static;padding:.6rem 1.4rem 1rem}
+.notice{position:relative;width:100%;max-width:34rem;background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:.55rem 2.2rem .55rem .8rem;font-size:.9rem;box-shadow:0 4px 14px rgba(0,0,0,.18)}
 .notice p{margin:0}
 .notice.warn{border-color:var(--warn);color:var(--warn)}
 .notice.error{border-color:var(--bad);color:var(--bad)}
 .notice .close{position:absolute;top:.15rem;right:.25rem;border:0;background:none;color:inherit;padding:.1rem .45rem;font-size:1.15rem;line-height:1}
 .notice .close:hover{border:0;opacity:.7}
 .notice .action{margin-top:.5rem;padding:.3rem .8rem;color:var(--fg)}
-[hidden]{display:none!important}

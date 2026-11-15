@@ -159,7 +159,7 @@ class TestSigningIn:
             page = (await http.get("/")).text
 
         assert done.status_code == 200 and "__Host-owner" in done.headers["set-cookie"]
-        assert "Synology broker" in page and "alice" in page
+        assert "<title>Clients</title>" in page and "alice" in page
 
     @pytest.mark.asyncio
     async def test_a_signed_response_cannot_be_replayed(self, world, enrolled):

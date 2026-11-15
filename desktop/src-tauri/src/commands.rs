@@ -1,13 +1,20 @@
-//! What the local control window can ask the app to do.
+//! What the app's own view can ask the app to do.
 //!
-//! Each command is also listed in build.rs and granted by capabilities/default.json,
-//! so only the `main` window can call it. Each checks that itself as well: the
-//! broker's own window is a remote page and must never be able to start or stop
-//! anything.
+//! The window holds two views: the app's own (the title bar, the card, the sidebar),
+//! labelled `main`, and beside it the broker's page, labelled `broker`. Each command is
+//! also listed in build.rs and granted by capabilities/default.json, so only the `main`
+//! view can call it. Each checks that itself as well: the broker's page is a remote page
+//! and must never be able to start or stop anything.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 use std::time::Instant;
 
-use tauri::{AppHandle, Emitter, Manager, State, Url, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
+use serde::Deserialize;
+use tauri::webview::WebviewBuilder;
+use tauri::{
+    AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, Rect, State, Url, Webview, WebviewUrl,
+};
 use zeroize::Zeroizing;
 
 use crate::launch::{self, Owned, UpdateError};
@@ -15,13 +22,47 @@ use crate::state::{AppState, Phase, Stage, Status, BROKER_COMMIT};
 use crate::{monitor, tray, trust};
 
 /// The only places on the broker's page the app opens. Anything else is refused.
-const PAGES: [&str; 4] = ["/", "/login-all", "/log", "/settings"];
+const PAGES: [&str; 3] = ["/", "/log", "/settings"];
 
-fn require_main(window: &WebviewWindow) -> Result<(), String> {
-    if window.label() == "main" {
+/// The label of the view that shows the broker's page.
+const PAGE_LABEL: &str = "broker";
+
+/// What that view calls itself. The broker reads it to know its pages are shown in the
+/// app: they then leave out their own navigation and ask for the passkey by themselves.
+/// It changes how a page looks and nothing the broker allows.
+const PAGE_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
+    (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 Edg/130.0.0.0 SynologyBrokerApp/1";
+
+/// One view is made at a time, however many places it is asked for at once.
+static PAGE_LOCK: Mutex<()> = Mutex::new(());
+
+/// The view is kept, blank and out of sight, when the broker stops (see `retire_page`),
+/// and the next time the page is shown it is pointed at the broker again.
+static PAGE_RETIRED: AtomicBool = AtomicBool::new(false);
+
+const BLANK: &str = "about:blank";
+
+/// Take the broker's page away when the broker stops: hide its view and blank it.
+///
+/// The view is not closed. A page that is asking for a passkey has a Windows prompt open,
+/// and closing the view while that prompt is up froze the whole app until the prompt was
+/// dismissed (seen with a debug build on Windows 11). Going to a blank page ends the
+/// request without that, and the same view serves the next start.
+fn retire_page(page: &Webview) {
+    PAGE_RETIRED.store(true, Ordering::SeqCst);
+    let _ = page.hide();
+    if let Ok(blank) = Url::parse(BLANK) {
+        let _ = page.navigate(blank);
+    }
+}
+
+/// The view a command was called from must be the app's own. Not the window: the window
+/// holds the broker's page as well, and what is asked is which of the two is asking.
+fn require_main(webview: &Webview) -> Result<(), String> {
+    if webview.label() == "main" {
         Ok(())
     } else {
-        Err("Not allowed from this window.".to_string())
+        Err("Not allowed from this view.".to_string())
     }
 }
 
@@ -29,12 +70,13 @@ fn publish(app: &AppHandle) {
     let state = app.state::<AppState>();
     let status = state.status();
     tray::update(app, status.phase == Phase::Running, status.attention.as_ref());
-    let _ = app.emit("broker-status", status);
+    // To the app's own view only: not to the view that shows the broker's page.
+    let _ = app.emit_to("main", "broker-status", status);
 }
 
 #[tauri::command]
-pub fn get_status(window: WebviewWindow, state: State<'_, AppState>) -> Result<Status, String> {
-    require_main(&window)?;
+pub fn get_status(webview: Webview, state: State<'_, AppState>) -> Result<Status, String> {
+    require_main(&webview)?;
     Ok(state.status())
 }
 
@@ -54,12 +96,12 @@ enum Attempt {
 /// version if an update is pending. The password is wiped as soon as Windows has used it.
 #[tauri::command]
 pub async fn start_broker(
-    window: WebviewWindow,
+    webview: Webview,
     app: AppHandle,
     state: State<'_, AppState>,
     password: String,
 ) -> Result<(), String> {
-    require_main(&window)?;
+    require_main(&webview)?;
     let password = Zeroizing::new(password);
     if let Some(error) = &state.config_error {
         return Err(error.clone());
@@ -173,8 +215,8 @@ pub fn stop(app: &AppHandle) -> Result<(), String> {
     };
     if result.is_ok() {
         // Its page is gone with it.
-        if let Some(page) = app.get_webview_window("broker") {
-            let _ = page.close();
+        if let Some(page) = app.get_webview(PAGE_LABEL) {
+            retire_page(&page);
         }
     }
     publish(app);
@@ -182,8 +224,8 @@ pub fn stop(app: &AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn stop_broker(window: WebviewWindow, app: AppHandle) -> Result<(), String> {
-    require_main(&window)?;
+pub fn stop_broker(webview: Webview, app: AppHandle) -> Result<(), String> {
+    require_main(&webview)?;
     stop(&app)
 }
 
@@ -197,8 +239,8 @@ pub fn spawn_stop(app: &AppHandle) {
 /// Stop the broker and mark the next start as one that first brings the broker's code
 /// to this app's version. The password is asked for then, as for any start.
 #[tauri::command]
-pub fn prepare_update(window: WebviewWindow, app: AppHandle) -> Result<(), String> {
-    require_main(&window)?;
+pub fn prepare_update(webview: Webview, app: AppHandle) -> Result<(), String> {
+    require_main(&webview)?;
     if !launch::commit_ok(BROKER_COMMIT) {
         return Err("This build of the app does not know which broker version to fetch.".to_string());
     }
@@ -226,8 +268,8 @@ pub fn prepare_update(window: WebviewWindow, app: AppHandle) -> Result<(), Strin
 /// Windows asks the person to confirm in a dialog of its own; this returns when they
 /// have answered, and then looks at the broker again at once.
 #[tauri::command]
-pub async fn trust_certificate(window: WebviewWindow, app: AppHandle) -> Result<(), String> {
-    require_main(&window)?;
+pub async fn trust_certificate(webview: Webview, app: AppHandle) -> Result<(), String> {
+    require_main(&webview)?;
     let der = {
         let state = app.state::<AppState>();
         if !state.status().can_trust {
@@ -251,16 +293,50 @@ fn broker_page(app: &AppHandle, path: &str) -> Result<Url, String> {
         .map_err(|error| format!("The broker's address is not valid: {error}"))
 }
 
-/// Show the broker's page in its own window. That window loads a remote page and has
-/// no capability: it cannot call anything in this app, and it cannot leave the
-/// broker's address.
+/// Where the app's own view wants the broker's page: a box inside the window, in the
+/// view's own (logical) pixels.
+#[derive(Debug, Deserialize)]
+pub struct Bounds {
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+}
+
+impl Bounds {
+    /// A real box: finite, inside the window's corner, and neither empty nor absurd.
+    fn is_sane(&self) -> bool {
+        [self.x, self.y, self.width, self.height].iter().all(|value| value.is_finite())
+            && self.x >= 0.0
+            && self.y >= 0.0
+            && (1.0..=20_000.0).contains(&self.width)
+            && (1.0..=20_000.0).contains(&self.height)
+    }
+
+    fn rect(&self) -> Rect {
+        Rect {
+            position: LogicalPosition::new(self.x, self.y).into(),
+            size: LogicalSize::new(self.width, self.height).into(),
+        }
+    }
+}
+
+/// Show the broker's page in `bounds`, making its view first if there is none.
 ///
-/// A window is a browser engine and takes its trust from Windows' own store (the
-/// `ca_file` does not count: a window cannot use it). Until Windows trusts the broker's
-/// certificate the page would not load, so nothing is opened and the control window
+/// The view loads a remote page and has no capability: it cannot call anything in this
+/// app, and it cannot leave the broker's address. It has its own browser data, apart
+/// from the app's own view, so that its engine is a separate one, and it is only ever
+/// made after Windows came to trust the broker's certificate, so it never holds an
+/// older answer about that.
+///
+/// A view is a browser engine and takes its trust from Windows' own store (the
+/// `ca_file` does not count: a view cannot use it). Until Windows trusts the broker's
+/// certificate the page would not load, so nothing is made and the app's own view
 /// offers to trust it instead.
-pub async fn open(app: &AppHandle, path: &str) -> Result<(), String> {
-    let target = broker_page(app, path)?;
+pub fn show_page(app: &AppHandle, bounds: &Bounds, path: &str) -> Result<(), String> {
+    if !bounds.is_sane() {
+        return Err("The page cannot be shown there.".to_string());
+    }
     let status = app.state::<AppState>().status();
     if status.phase != Phase::Running {
         return Err("The broker is not running.".to_string());
@@ -268,52 +344,93 @@ pub async fn open(app: &AppHandle, path: &str) -> Result<(), String> {
     if status.window_untrusted {
         return Err("Windows does not trust the broker's certificate yet.".to_string());
     }
-    let origin = target.origin();
-
-    if let Some(existing) = app.get_webview_window("broker") {
-        existing.navigate(target).map_err(|error| error.to_string())?;
-        let _ = existing.show();
-        let _ = existing.unminimize();
-        let _ = existing.set_focus();
+    let _one_at_a_time = PAGE_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(page) = app.get_webview(PAGE_LABEL) {
+        if PAGE_RETIRED.swap(false, Ordering::SeqCst) {
+            // Left blank when the broker stopped: point it at the broker again.
+            page.navigate(broker_page(app, path)?).map_err(|error| error.to_string())?;
+        }
+        page.set_bounds(bounds.rect()).map_err(|error| error.to_string())?;
+        page.show().map_err(|error| error.to_string())?;
+        let _ = page.set_focus();
         return Ok(());
     }
-    let mut builder = WebviewWindowBuilder::new(app, "broker", WebviewUrl::External(target))
-        .title("Synology Broker private page")
-        .inner_size(1000.0, 780.0)
-        .center()
-        .on_navigation(move |next| next.origin() == origin);
-    // Its own browser data, apart from the control window's: the engine that shows the
-    // remote page is then a separate one, and it is always started after Windows came
-    // to trust the certificate, so it never holds an older answer about that.
+
+    let target = broker_page(app, path)?;
+    let origin = target.origin();
+    let window = app.get_window("main").ok_or("The window is gone.")?;
+    let on_route = app.clone();
+    let on_title = app.clone();
+    let mut builder = WebviewBuilder::new(PAGE_LABEL, WebviewUrl::External(target))
+        .user_agent(PAGE_USER_AGENT)
+        // It cannot leave the broker's address. What it moves to is told to the app's own
+        // view, which only uses it to know which page is shown.
+        .on_navigation(move |next| {
+            if next.as_str() == BLANK {
+                return true;
+            }
+            if next.origin() != origin {
+                return false;
+            }
+            let _ = on_route.emit_to("main", "page-route", next.path().to_string());
+            true
+        })
+        .on_document_title_changed(move |_, title| {
+            let _ = on_title.emit_to("main", "page-title", title);
+        });
     if let Some(dir) = crate::page_data_dir() {
         builder = builder.data_directory(dir);
     }
-    builder.build().map_err(|error| error.to_string())?;
+    let page = window
+        .add_child(builder, LogicalPosition::new(bounds.x, bounds.y), LogicalSize::new(bounds.width, bounds.height))
+        .map_err(|error| error.to_string())?;
+    // The passkey is asked for by the page, and Windows asks only a window that has focus.
+    let _ = page.set_focus();
     Ok(())
 }
 
 #[tauri::command]
+pub async fn place_page(
+    webview: Webview,
+    app: AppHandle,
+    bounds: Bounds,
+    path: Option<String>,
+) -> Result<(), String> {
+    require_main(&webview)?;
+    show_page(&app, &bounds, path.as_deref().unwrap_or("/"))
+}
+
+/// Take the broker's page out of sight: for when the app's own view is not showing it.
+#[tauri::command]
+pub async fn hide_page(webview: Webview, app: AppHandle) -> Result<(), String> {
+    require_main(&webview)?;
+    if let Some(page) = app.get_webview(PAGE_LABEL) {
+        let _ = page.hide();
+    }
+    Ok(())
+}
+
+/// Move the broker's page to another page of the broker's.
+#[tauri::command]
 pub async fn open_broker(
-    window: WebviewWindow,
+    webview: Webview,
     app: AppHandle,
     path: Option<String>,
 ) -> Result<(), String> {
-    require_main(&window)?;
-    open(&app, path.as_deref().unwrap_or("/")).await
+    require_main(&webview)?;
+    let target = broker_page(&app, path.as_deref().unwrap_or("/"))?;
+    let page = app.get_webview(PAGE_LABEL).ok_or("The broker's page is not shown.")?;
+    page.navigate(target).map_err(|error| error.to_string())
 }
 
-/// Open a page from the tray or after a start. If it cannot be opened, the control
-/// window is shown instead: it says why.
+/// Ask the app's own view to show a page, from the tray: the window comes forward, and
+/// the view moves the broker's page if it is showing it.
 pub fn spawn_open(app: &AppHandle, path: &'static str) {
-    let app = app.clone();
-    tauri::async_runtime::spawn(async move {
-        if open(&app, path).await.is_err() {
-            crate::show_main(&app);
-        }
-    });
+    crate::show_main(app);
+    let _ = app.emit_to("main", "open-page", path);
 }
 
-/// Whether closing the control window now would end a broker (see
+/// Whether closing the window now would end a broker (see
 /// `state::close_needs_confirmation`).
 pub fn close_needs_confirmation(app: &AppHandle) -> bool {
     let state = app.state::<AppState>();
@@ -323,4 +440,34 @@ pub fn close_needs_confirmation(app: &AppHandle) -> bool {
         inner.owned.is_some(),
         state.config.stop_broker_on_quit,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn bounds(x: f64, y: f64, width: f64, height: f64) -> Bounds {
+        Bounds { x, y, width, height }
+    }
+
+    #[test]
+    fn only_a_real_box_inside_the_window_is_placed() {
+        assert!(bounds(228.0, 37.0, 772.0, 600.0).is_sane());
+        assert!(bounds(0.0, 0.0, 1.0, 1.0).is_sane());
+        assert!(!bounds(-1.0, 0.0, 100.0, 100.0).is_sane());
+        assert!(!bounds(0.0, -0.5, 100.0, 100.0).is_sane());
+        assert!(!bounds(0.0, 0.0, 0.0, 100.0).is_sane());
+        assert!(!bounds(0.0, 0.0, 100.0, 0.5).is_sane());
+        assert!(!bounds(0.0, 0.0, 20_001.0, 100.0).is_sane());
+        assert!(!bounds(f64::NAN, 0.0, 100.0, 100.0).is_sane());
+        assert!(!bounds(0.0, 0.0, f64::INFINITY, 100.0).is_sane());
+    }
+
+    #[test]
+    fn the_app_opens_three_pages_and_the_page_calls_itself_by_the_name_the_broker_reads() {
+        assert_eq!(PAGES, ["/", "/log", "/settings"]);
+        // The broker's `APP_USER_AGENT` (src/private_auth/app.py): desktop/tests/release.test.js
+        // checks the two agree.
+        assert!(PAGE_USER_AGENT.contains("SynologyBrokerApp/"));
+    }
 }

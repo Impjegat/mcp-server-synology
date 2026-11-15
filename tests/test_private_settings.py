@@ -152,14 +152,14 @@ class TestPage:
         assert 'data-field="idle_minutes" value="1.666667"' in page
         assert 'data-field="owner_idle_minutes" value="10"' in page
         assert 'data-field="owner_absolute_hours" value="1"' in page
-        assert page.count("<fieldset") == 2
+        assert page.count('<details class="client"') == 2
         assert "/docs\n/photos/2026</textarea>" in page
         assert 'data-nas="nas2"' in page
         assert page.count('data-kind="write"') == 2 and "checked" not in re.sub(
             r'data-kind="(write|delete)">', "", page.split("<h2>Clients</h2>")[1]
         )
         assert '<script src="/static/settings.js" defer></script>' in page
-        assert "Settings" in page and 'name="csrf"' in page
+        assert "<title>Settings</title>" in page and 'name="csrf"' in page
 
     @pytest.mark.asyncio
     async def test_a_client_with_write_access_shows_it_ticked(self, rig):
@@ -184,7 +184,7 @@ class TestPage:
             await sign_in(http)
             page = (await http.get("/settings")).text
             begun = await begin(http, await csrf(http), {})
-        assert "started without settings" in page and begun.status_code == 404
+        assert "no settings that can be changed here" in page and begun.status_code == 404
 
     @pytest.mark.asyncio
     async def test_the_page_and_script_load_nothing_from_elsewhere(self, rig):

@@ -1,11 +1,11 @@
-// What the control window shows for a given status. Pure functions, so they can be
+// What the app's window shows for a given status. Pure functions, so they can be
 // tested without a window (desktop/tests/view.test.js); app.js only applies them.
 (function (root) {
   'use strict';
 
   const PILL = { stopped: 'Stopped', starting: 'Starting', running: 'Running', error: 'Problem' };
 
-  /** `PC\name` becomes `Name`: what the password label calls the account. */
+  /** `PC\name` becomes `Name`: what the password box calls the account. */
   function accountName(account) {
     const text = String(account || '').trim();
     const name = text.includes('\\') ? text.slice(text.lastIndexOf('\\') + 1) : text;
@@ -28,35 +28,67 @@
     return Math.min(99, Math.max(floor || 0, Math.round(eased)));
   }
 
-  /** Which panel, pill, labels and buttons a status calls for. */
-  function view(status) {
+  // The broker's page names itself in its title, and the app reads that to tell whether
+  // the passkey has been given: these are the pages shown before it. (The first is what
+  // the page is called now; the second is what a broker older than this app calls it.)
+  const SIGNED_OUT = ['Sign in', 'Private sign-in', 'No owner enrolled', 'Enroll a passkey'];
+
+  /** Whether the page titled `title` is one only a signed-in owner sees. No title yet is not. */
+  function signedIn(title) {
+    return typeof title === 'string' && title !== '' && title !== 'about:blank' && !SIGNED_OUT.includes(title);
+  }
+
+  /** Which sidebar entry a path of the broker's belongs to. */
+  function section(path) {
+    return path === '/settings' || path === '/log' ? path : '/';
+  }
+
+  /** The pages visited, for Back and Forward. Visiting the page already shown changes nothing. */
+  function visit(history, path) {
+    if (history.trail[history.at] === path) return history;
+    const trail = history.trail.slice(0, history.at + 1).concat(path);
+    return { trail, at: trail.length - 1 };
+  }
+
+  /** One step back (`-1`) or forward (`1`); no step at either end. */
+  function step(history, by) {
+    const at = history.at + by;
+    return at < 0 || at >= history.trail.length ? history : { trail: history.trail, at };
+  }
+
+  /**
+   * What the one window shows for a status. `isSignedIn` is whether the broker's page
+   * says the passkey has been accepted: until then the window is the card in the middle
+   * (start, progress, then the passkey, which the broker's own page asks for); afterwards
+   * it is the sidebar and the broker's pages.
+   */
+  function view(status, isSignedIn) {
     const s = status || {};
     const running = s.phase === 'running';
     const starting = s.phase === 'starting';
-    const waiting = running && Boolean(s.attention) && s.attention.waiting > 0;
+    const count = running && s.attention ? s.attention.waiting || 0 : 0;
     const name = accountName(s.account);
-    // A page of the broker can only open here once Windows trusts its certificate.
+    // The broker's pages can only open here once Windows trusts its certificate.
     const pages = running && !s.window_untrusted;
     return {
-      panel: running ? 'running' : starting ? 'progress' : 'start',
+      panel: running ? (isSignedIn && pages ? 'shell' : 'signin') : starting ? 'progress' : 'start',
       pill: {
-        text: waiting ? 'Waiting for you' : starting && s.stage === 'updating' ? 'Updating' : PILL[s.phase] || 'Stopped',
-        kind: waiting ? 'attention' : s.phase || 'stopped',
+        text: count ? 'Waiting for you' : starting && s.stage === 'updating' ? 'Updating' : PILL[s.phase] || 'Stopped',
+        kind: count ? 'attention' : s.phase || 'stopped',
       },
+      waiting: count,
       passwordLabel: `Windows password for the ${name} account`,
       // The check against a changed settings file, one hover away instead of on screen.
       passwordHint: s.start_command && s.account ? `Starts ${s.start_command} as ${s.account}` : '',
       startLabel: s.update_pending ? 'Update and Start Broker' : 'Start Broker',
       canStart: !starting && !running && !s.config_error,
       progressLabel: s.stage === 'updating' ? 'Updating the broker' : 'Starting the broker',
-      buttons: {
-        open: pages,
-        // These pages do not exist on a broker older than this app.
-        loginAll: pages && !s.outdated,
-        settings: pages && !s.outdated,
-        log: pages && !s.outdated,
-        stop: running && !s.external,
-      },
+      // The broker's page can be shown at all (and so asks for the passkey).
+      pages,
+      // Sign out stops the broker, which the app can only do to one it started.
+      canSignOut: running && !s.external,
+      // These pages do not exist on a broker older than this app.
+      nav: { home: pages, settings: pages && !s.outdated, log: pages && !s.outdated },
     };
   }
 
@@ -88,7 +120,7 @@
       list.push({
         id: 'trust',
         kind: 'warn',
-        text: 'Windows does not trust the broker\'s certificate yet, so its pages cannot open here.',
+        text: 'Windows does not trust the broker\'s certificate yet.',
         action: s.can_trust ? { label: 'Trust certificate', command: 'trust_certificate', hint: TRUST_HINT } : null,
       });
     }
@@ -96,7 +128,7 @@
       list.push({
         id: 'outdated',
         kind: 'warn',
-        text: 'This broker is an older version. Sign in all, Settings and Log need the update.',
+        text: 'This broker is an older version. Settings and Log need the update.',
         action: s.can_update ? { label: 'Update Broker', command: 'prepare_update' } : null,
       });
     }
@@ -124,7 +156,7 @@
     return new Set([...dismissed].filter((key) => present.has(key)));
   }
 
-  const api = { accountName, progress, view, notices, visible, reconcile };
+  const api = { accountName, progress, signedIn, section, visit, step, view, notices, visible, reconcile };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.BrokerView = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this);

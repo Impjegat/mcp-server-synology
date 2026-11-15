@@ -405,7 +405,7 @@ class TestOwnerSignIn:
     async def test_the_session_ends_when_idle(self, private):
         async with private.client() as http:
             await sign_in(http)
-            assert "Synology broker" in (await http.get("/")).text
+            assert "<title>Clients</title>" in (await http.get("/")).text
             private.broker.clock.advance(601)
             assert "Sign in with passkey" in (await http.get("/")).text
 
@@ -431,12 +431,13 @@ class TestDashboard:
             await sign_in(http)
             page = (await http.get("/")).text
 
-        rows = re.findall(r"<tr><td>(\w+)</td><td>(\w+)</td><td>([^<]+)</td>", page)
-        assert rows == [
-            ("alice", "nas1", "not connected"),
-            ("bob", "nas1", "not connected"),
-            ("bob", "nas2", "not connected"),
-        ]
+        rows = re.findall(
+            r'<tr data-client="(\w+)" data-nas="(\w+)">.*?sdot state[ a-z]*" role="img" title="([^"]+)"',
+            page,
+            flags=re.S,
+        )
+        none = "Not connected: this client has no NAS session."
+        assert rows == [("alice", "nas1", none), ("bob", "nas1", none), ("bob", "nas2", none)]
 
     @pytest.mark.asyncio
     async def test_it_shows_connected_and_waiting_states(self, private):
@@ -446,8 +447,10 @@ class TestDashboard:
             await sign_in(http)
             page = (await http.get("/")).text
 
-        assert re.search(r"<td>alice</td><td>nas1</td><td>connected \(idle limit", page)
-        assert "waiting for you to sign in" in page
+        assert 'data-client="alice" data-nas="nas1" data-state="connected"' in page
+        assert 'data-client="bob" data-nas="nas1" data-state="waiting"' in page
+        assert "Connected. Session ends in" in page
+        assert "Waiting for you: this client asked to sign in." in page
         assert "SID-1" not in page and "TOK-1" not in page
 
     @pytest.mark.asyncio
@@ -531,7 +534,7 @@ class TestStartingASignIn:
         async with private.client() as http:
             await sign_in(http)
             page = (await http.get("/")).text
-        assert "waiting for you to sign in" in page and pending.request_id in page
+        assert 'data-state="waiting"' in page and "Waiting for you" in page
 
     @pytest.mark.asyncio
     async def test_repeated_calls_leave_one_request_and_a_status_check_leaves_none(self, private):
@@ -636,7 +639,7 @@ class TestSubmittingTheLogin:
 
         assert done.status_code == 303 and done.headers["location"] == "/?m=connected"
         assert "Connected. The client can use the NAS now." in page
-        assert re.search(r"<td>alice</td><td>nas1</td><td>connected", page)
+        assert 'data-client="alice" data-nas="nas1" data-state="connected"' in page
 
         with patch.object(SynologyFileStation, "list_shares", return_value=[{"name": "docs"}]):
             result = await private.broker.runtime.call_tool(
@@ -922,7 +925,7 @@ class TestWithdrawnWhileSigningIn:
         assert "already in progress" in while_running.text and keep_looking in while_running.text
         assert keep_looking in again.text
         # Once it has finished the table shows the result, with nothing left to wait for.
-        assert "connected (idle limit" in after.text
+        assert 'data-state="connected"' in after.text
         assert "http-equiv" not in after.text and "already in progress" not in after.text
 
     @pytest.mark.asyncio
@@ -1312,3 +1315,52 @@ class TestAFormPostFromABrowserThatFollowsTheStandard:
     @pytest.mark.parametrize("policy", ["same-origin", "strict-origin", "origin", "unsafe-url"])
     def test_other_policies_keep_the_origin(self, policy):
         assert origin_a_browser_sends_with_a_same_origin_form_post(policy, ORIGIN) == ORIGIN
+
+
+APP_AGENT = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) SynologyBrokerApp/1"}
+
+
+class TestShownInsideTheApp:
+    """The desktop app shows these pages in its own window and says so in its user agent.
+    They then leave out their own navigation, and the sign-in page asks for the passkey
+    by itself. Only what a page looks like follows from it."""
+
+    @pytest.mark.asyncio
+    async def test_a_browser_gets_the_navigation_and_the_app_does_not(self, private):
+        async with private.client() as http:
+            await sign_in(http)
+            browser = (await http.get("/")).text
+            inside = (await http.get("/", headers=APP_AGENT)).text
+            settings = (await http.get("/settings", headers=APP_AGENT)).text
+
+        assert '<body class="web">' in browser and '<nav><a href="/">Clients</a>' in browser
+        assert "End this session" in browser
+        assert '<body class="embedded">' in inside and "<nav>" not in inside
+        assert "End this session" not in inside
+        assert '<body class="embedded">' in settings and "<nav>" not in settings
+
+    @pytest.mark.asyncio
+    async def test_the_sign_in_page_is_titled_so_the_app_can_tell_it_is_showing_it(self, private):
+        async with private.client() as http:
+            signed_out = (await http.get("/", headers=APP_AGENT)).text
+            await sign_in(http)
+            signed_in = (await http.get("/", headers=APP_AGENT)).text
+
+        assert "<title>Sign in</title>" in signed_out and 'class="embedded bare"' in signed_out
+        assert 'id="signin"' in signed_out
+        assert "<title>Clients</title>" in signed_in
+        assert [t for t in ("Settings", "Log") if f"<title>{t}</title>" in signed_in] == []
+
+    @pytest.mark.asyncio
+    async def test_the_script_asks_for_the_passkey_by_itself_only_inside_the_app(self, private):
+        async with private.client() as http:
+            script = (await http.get("/static/passkey.js")).text
+        assert "classList.contains('embedded')" in script and "signIn();" in script
+
+    @pytest.mark.asyncio
+    async def test_the_user_agent_changes_nothing_but_the_look(self, private):
+        async with private.client() as http:
+            refused = await http.post("/disconnect", headers={**JSON_HEADERS, **APP_AGENT}, data={})
+            no_owner = await http.get("/settings", headers=APP_AGENT)
+        assert refused.status_code == 401
+        assert no_owner.status_code == 303 and no_owner.headers["location"] == "/"

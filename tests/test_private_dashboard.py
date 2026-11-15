@@ -183,7 +183,7 @@ class TestApiState:
                 assert (await http.get("/")).status_code == 200
             page = (await http.get("/")).text
 
-        assert "Synology broker" in page
+        assert "<title>Clients</title>" in page
 
 
 class TestIdleTextStaysCurrent:
@@ -197,7 +197,7 @@ class TestIdleTextStaysCurrent:
             private.broker.clock.advance(50)  # half the idle limit used up
             second = (await http.get("/api/state")).json()["rows"][0]
 
-        assert "<td>connected (idle limit in about 1 min)</td>" in page
+        assert 'data-state="connected"' in page and "Connected. Session ends in" in page
         assert first["state_text"] == "connected (idle limit in about 1 min)"
         assert second["state_text"] == "connected (idle limit in about 0 min)"
 
@@ -212,22 +212,40 @@ class TestIdleTextStaysCurrent:
         assert texts[("bob", "nas1")] == "waiting for you to sign in"
 
     @pytest.mark.asyncio
-    async def test_the_script_rewrites_the_state_cell_with_the_other_clocks(self, private):
+    async def test_the_dots_say_what_they_mean_and_the_script_repaints_them_in_place(self, private):
+        private.broker.sign_in("alice", "nas1")
+        private.broker.sessions.begin_pending("bob", "nas1")
         async with private.client() as http:
+            await sign_in(http)
+            rows = {
+                (r["client"], r["nas"]): r for r in (await http.get("/api/state")).json()["rows"]
+            }
             script = (await http.get("/static/dashboard.js")).text
-        assert "row.state_text" in script and "previousElementSibling" in script
+
+        assert rows[("alice", "nas1")]["state_dot"] == "ok"
+        assert rows[("alice", "nas1")]["state_title"].startswith("Connected. Session ends in ")
+        assert rows[("bob", "nas1")]["state_dot"] == "warn"
+        assert rows[("bob", "nas2")]["state_dot"] == ""
+        assert rows[("bob", "nas2")]["state_title"].startswith("Not connected")
+        assert rows[("alice", "nas1")]["grant_dot"] == "ok"
+        # What the page does with them: change the dots and the ticks' state, never reload
+        # for a change of state (a password may be half typed).
+        assert "row.state_title" in script and "row.grant_title" in script
+        assert "clients:refresh" in script and script.count("location.reload") == 1
 
 
 class TestDashboardAdditions:
     @pytest.mark.asyncio
-    async def test_disconnect_all_is_offered_only_when_something_is_connected(self, private):
+    async def test_nothing_is_ticked_and_both_buttons_start_disabled(self, private):
+        private.broker.sign_in("alice", "nas1")
         async with private.client() as http:
             await sign_in(http)
-            idle = (await http.get("/")).text
-            private.broker.sign_in("alice", "nas1")
-            live = (await http.get("/")).text
+            page = (await http.get("/")).text
 
-        assert "Disconnect all" not in idle and "Disconnect all" in live
+        assert page.count('class="pair"') == 3 and " checked" not in page
+        assert '<button id="go" type="submit" class="primary" disabled>Sign in</button>' in page
+        assert '<button id="drop" type="button" disabled>Disconnect</button>' in page
+        assert 'id="all"' in page and "Disconnect all" not in page
 
     @pytest.mark.asyncio
     async def test_the_page_has_the_signature_and_the_refresh_script(self, private):
@@ -260,7 +278,7 @@ class TestDashboardAdditions:
             await sign_in(http)
             page = (await http.get("/")).text
 
-        assert "renew soon" in page and 'class="warn"' in page
+        assert "renew soon" in page and 'class="sdot expiry warn"' in page
 
     @pytest.mark.asyncio
     async def test_disconnect_all_ends_every_session_and_needs_the_csrf_token(self, private):
@@ -298,16 +316,23 @@ class TestSignInAllPage:
         private.broker.sign_in("bob", "nas2", session_id="SID-2")
         async with private.client() as http:
             await sign_in(http)
-            page = (await http.get("/login-all")).text
+            page = (await http.get("/")).text
 
         assert "/docs, /photos/2026" in page  # alice's folders
         assert page.count('class="pair"') == 3
-        assert 'data-client="bob" data-nas="nas2" disabled' in page  # already connected
-        assert 'data-client="alice" data-nas="nas1" checked' in page
+        assert 'data-client="bob" data-nas="nas2" data-state="connected"' in page
+        assert " checked" not in page  # the owner chooses; nothing is ticked for them
         assert "reader" in page  # the account it signs in as
         assert 'name="csrf"' in page and 'type="password"' in page
         assert '<script src="/static/login_all.js" defer></script>' in page
         assert "SID-2" not in page
+
+    @pytest.mark.asyncio
+    async def test_the_old_address_leads_to_the_clients_page(self, private):
+        async with private.client() as http:
+            await sign_in(http)
+            response = await http.get("/login-all")
+        assert response.status_code == 303 and response.headers["location"] == "/"
 
     @pytest.mark.asyncio
     async def test_posting_the_form_without_the_script_keeps_nothing(self, private):

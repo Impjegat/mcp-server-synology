@@ -212,7 +212,7 @@ pub async fn tick(app: &AppHandle) -> Duration {
         let _ = app.notification().builder().title(alert.title()).body(alert.body()).show();
     }
     tray::update(app, phase == Phase::Running, snapshot.as_ref());
-    let _ = app.emit("broker-status", state.status());
+    let _ = app.emit_to("main", "broker-status", state.status());
     if just_started {
         commands::spawn_open(app, "/");
     }

@@ -9,33 +9,76 @@
   <script src="app.js" defer></script>
 </head>
 <body>
-  <header>
-    <h1>Synology Broker</h1>
-    <span id="pill" class="pill stopped">Stopped</span>
+  <header id="titlebar" data-tauri-drag-region>
+    <button id="menu" type="button" title="Hide sidebar" aria-label="Hide sidebar" disabled>
+      <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><rect x="1.75" y="2.75" width="12.5" height="10.5" rx="2" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M6 3v10" stroke="currentColor" stroke-width="1.4"/></svg>
+    </button>
+    <button id="back" type="button" title="Back" aria-label="Back" disabled>
+      <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M10 3 5 8l5 5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </button>
+    <button id="forward" type="button" title="Forward" aria-label="Forward" disabled>
+      <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="m6 3 5 5-5 5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </button>
+    <span id="dot" class="dot stopped" role="img" aria-label="Stopped" title="Stopped"></span>
+    <span class="spacer" data-tauri-drag-region></span>
+    <button id="win-min" class="wbtn" type="button" title="Minimise" aria-label="Minimise">
+      <svg viewBox="0 0 10 10" width="10" height="10" aria-hidden="true"><path d="M0 5h10" stroke="currentColor" stroke-width="1"/></svg>
+    </button>
+    <button id="win-max" class="wbtn" type="button" title="Maximise" aria-label="Maximise">
+      <svg id="max-icon" viewBox="0 0 10 10" width="10" height="10" aria-hidden="true"><rect x=".5" y=".5" width="9" height="9" fill="none" stroke="currentColor" stroke-width="1"/></svg>
+    </button>
+    <button id="win-close" class="wbtn close" type="button" title="Close" aria-label="Close">
+      <svg viewBox="0 0 10 10" width="10" height="10" aria-hidden="true"><path d="m0 0 10 10M10 0 0 10" stroke="currentColor" stroke-width="1"/></svg>
+    </button>
   </header>
 
-  <section id="start-panel">
-    <form id="start-form" autocomplete="off">
-      <label id="password-label" for="password">Windows password for the Synbroker account</label>
-      <input id="password" type="password" autocomplete="off" spellcheck="false">
-      <button id="start" type="submit">Start Broker</button>
-    </form>
-  </section>
+  <!-- Until the broker runs and the passkey is accepted, the window shows only this card. -->
+  <section id="gate">
+    <div class="card">
+      <h1><img class="logo-light" src="logo-light.png" alt="" width="30" height="30"><img class="logo-dark" src="logo-dark.png" alt="" width="30" height="30">Synology Broker</h1>
+      <div class="steps">
+        <div class="step active" id="step1" aria-current="step"><span class="n">1</span><span>Windows password</span></div>
+        <div class="line" id="line"></div>
+        <div class="step" id="step2"><span class="n">2</span><span>Passkey</span></div>
+      </div>
 
-  <section id="progress-panel" hidden>
-    <div id="progress" class="progress" role="progressbar" aria-label="Starting the broker"
-         aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="progress-bar"></div></div>
-  </section>
+      <form id="start-form" autocomplete="off">
+        <input id="password" type="password" autocomplete="off" spellcheck="false"
+               aria-label="Windows password for the Synbroker account">
+        <button id="start" class="primary" type="submit">Start Broker</button>
+      </form>
 
-  <section id="running-panel" hidden>
-    <div class="buttons">
-      <button id="open" class="primary" data-page="/">Open Broker</button>
-      <button id="login-all" data-page="/login-all">Sign in all clients</button>
-      <button id="settings" data-page="/settings">Settings</button>
-      <button id="log" data-page="/log">Log</button>
-      <button id="stop" class="danger">Stop Broker</button>
+      <div id="progress-panel" hidden>
+        <div id="progress" class="progress" role="progressbar" aria-label="Starting the broker"
+             aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="progress-bar"></div></div>
+      </div>
+
+      <!-- The broker's own sign-in page is shown here, in a view of its own: the passkey
+           is asked for by that page, not by this one. -->
+      <div id="signin-panel" hidden>
+        <div id="card-slot" class="slot"></div>
+        <button id="gate-back" type="button">Back</button>
+      </div>
     </div>
   </section>
+
+  <!-- Signed in: the sidebar is this window's; the page beside it is the broker's. -->
+  <div id="shell" hidden>
+    <aside id="side">
+      <nav id="nav">
+        <a href="/" data-nav="home">Clients<span id="badge" class="badge" hidden></span></a>
+        <a href="/settings" data-nav="settings">Settings</a>
+        <a href="/log" data-nav="log">Log</a>
+      </nav>
+      <div class="side-foot">
+        <button id="signout" type="button">Sign out</button>
+      </div>
+    </aside>
+    <main id="main">
+      <div id="page-slot" class="slot"></div>
+      <div id="dock"></div>
+    </main>
+  </div>
 
   <div id="notices" aria-live="polite"></div>
 </body>
