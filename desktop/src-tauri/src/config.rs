@@ -25,6 +25,9 @@ pub struct Config {
     pub poll_seconds: u64,
     /// End the broker when the app quits (only if this app started it).
     pub stop_broker_on_quit: bool,
+    /// The folder that holds the broker's code as a git checkout: what "Update Broker"
+    /// brings to this app's version, as the broker's account.
+    pub broker_checkout: String,
 }
 
 impl Default for Config {
@@ -37,6 +40,7 @@ impl Default for Config {
             ca_file: None,
             poll_seconds: 10,
             stop_broker_on_quit: true,
+            broker_checkout: r"C:\SynologyBroker\app\mcp-server-synology".to_string(),
         }
     }
 }
@@ -84,6 +88,10 @@ impl Config {
         if self.ca_file.as_deref().is_some_and(|path| path.trim().is_empty()) {
             return Err(format!("{FILE_NAME}: ca_file is empty (leave it out if there is none)"));
         }
+        // Refused here, not when the update runs: this path ends up on a command line
+        // that runs as the broker's account.
+        crate::launch::update_command_line("git", &self.broker_checkout, &"0".repeat(40))
+            .map_err(|error| format!("{FILE_NAME}: {error}"))?;
         self.broker_url = url.as_str().trim_end_matches('/').to_string();
         self.poll_seconds = self.poll_seconds.clamp(3, 300);
         Ok(self)
@@ -156,6 +164,18 @@ mod tests {
         let config = Config::parse(r#"{"ca_file":"C:\\certs\\ca.pem"}"#).unwrap();
         assert_eq!(config.ca_file.as_deref(), Some("C:\\certs\\ca.pem"));
         assert!(Config::parse(r#"{"ca_file":"  "}"#).is_err());
+    }
+
+    #[test]
+    fn the_broker_checkout_has_a_default_and_must_be_a_plain_full_path() {
+        let config = Config::parse("{}").unwrap();
+        assert_eq!(config.broker_checkout, r"C:\SynologyBroker\app\mcp-server-synology");
+        let config = Config::parse(r#"{"broker_checkout":"D:\\broker\\code"}"#).unwrap();
+        assert_eq!(config.broker_checkout, r"D:\broker\code");
+        for bad in ["", "code", r"C:\\a&b", r"C:\\%TEMP%\\x", r#"C:\\a\" b"#] {
+            let text = format!(r#"{{"broker_checkout":"{bad}"}}"#);
+            assert!(Config::parse(&text).is_err(), "{bad} was accepted");
+        }
     }
 
     #[test]

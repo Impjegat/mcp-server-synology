@@ -44,6 +44,12 @@ jobs:
       # policy; a test compares them too, this makes a stale file obvious.
       - name: Tool catalog is up to date
         run: python scripts/generate_tool_catalog.py --check
+      # What the desktop app's window shows for each status, and that its two
+      # development switches stay out of release builds: plain JavaScript with no
+      # dependencies, so it needs only the Node that the runner already has. (The app's
+      # Rust tests need its whole toolchain and are run where it is built.)
+      - name: Desktop window logic and release guard
+        run: node --test desktop/tests/view.test.js desktop/tests/release.test.js
 
   docker:
     # The images MCP clients and the broker host actually run.

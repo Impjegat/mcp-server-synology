@@ -62,6 +62,12 @@ class FakeOwner:
     def finish_enrollment(self, state, credential, label="passkey"):
         return False
 
+    def passkeys(self):
+        return [("test passkey", "2026-10-18")] if self.enrolled else []
+
+    def begin_additional_enrollment(self):
+        return None
+
 
 class Runner:
     def __init__(self, *replies):

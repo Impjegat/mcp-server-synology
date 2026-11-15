@@ -51,5 +51,6 @@ What is not done is the user's: choosing and proving the broker's host, the cuto
 **Desktop app (2026-11-14)** — a portable Windows app that starts the broker and shows its private page, and the page features behind it (Sign in all, dashboard, log, passkey-confirmed settings):
 
 - [`desktop-app`](shipped/2026-11-14-desktop-app/PLAN.md) — the Tauri app in `desktop/`, and `/login-all`, `/attention`, `/log` and `/settings` on the broker's private page
+- [`desktop-app-round-2`](shipped/2026-11-14-desktop-app-round-2/PLAN.md) — what the first real use asked for: a lean window with nothing in the browser, **Update Broker** and **Trust certificate** in the app, and **Add a passkey** on the settings page
 
-As above, what is left is the user's: deploying the broker code to its host, and the checks that need the real broker's account, certificate and passkey, listed at the end of that plan.
+As above, what is left is the user's: the checks that need the real broker's account, certificate and passkey, listed at the end of each plan. Deploying the broker code to its host is now a button in the app.

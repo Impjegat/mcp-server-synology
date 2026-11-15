@@ -14,8 +14,10 @@ mod launch;
 mod monitor;
 mod state;
 mod tray;
+mod trust;
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use tauri::{AppHandle, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder, WindowEvent};
@@ -32,10 +34,16 @@ fn exe_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
-/// Where the windows keep their browser data. `None` if it cannot be made there, in
-/// which case Windows' usual per-user place is used instead.
+/// Where the control window keeps its browser data. `None` if it cannot be made there,
+/// in which case Windows' usual per-user place is used instead.
 pub fn data_dir() -> Option<PathBuf> {
     let dir = exe_dir().join("synology-broker-data");
+    std::fs::create_dir_all(&dir).ok().map(|_| dir)
+}
+
+/// Where the window that shows the broker's page keeps its own (see `commands::open`).
+pub fn page_data_dir() -> Option<PathBuf> {
+    let dir = data_dir()?.join("page");
     std::fs::create_dir_all(&dir).ok().map(|_| dir)
 }
 
@@ -48,15 +56,24 @@ pub fn show_main(app: &AppHandle) {
 }
 
 /// The CA certificate named by `ca_file`: PEM, or DER if it is not PEM. A relative path
-/// is read from the folder the .exe is in.
-fn load_ca(path: &str) -> Result<reqwest::Certificate, String> {
+/// is read from the folder the .exe is in. Given back both as the HTTP client takes it
+/// and as the bytes Windows' certificate store takes.
+fn load_ca(path: &str) -> Result<(reqwest::Certificate, Vec<u8>), String> {
     let path = PathBuf::from(path);
     let path = if path.is_absolute() { path } else { exe_dir().join(path) };
     let bytes = std::fs::read(&path)
         .map_err(|error| format!("ca_file: cannot read {}: {error}", path.display()))?;
-    reqwest::Certificate::from_pem(&bytes)
-        .or_else(|_| reqwest::Certificate::from_der(&bytes))
-        .map_err(|_| format!("ca_file: {} is not a certificate (PEM or DER)", path.display()))
+    let not_one = || format!("ca_file: {} is not a certificate (PEM or DER)", path.display());
+    let der = trust::ca_file_der(&bytes).map_err(|error| match error {
+        trust::CaFileError::NotACertificate => not_one(),
+        trust::CaFileError::MoreThanOne => format!(
+            "ca_file: {} holds more than one certificate or key. It must hold only the CA \
+             certificate that signed the broker's.",
+            path.display()
+        ),
+    })?;
+    let certificate = reqwest::Certificate::from_der(&der).map_err(|_| not_one())?;
+    Ok((certificate, der))
 }
 
 /// The broker is on this computer: never through a proxy, and a bounded wait.
@@ -75,18 +92,39 @@ fn http_client(
     builder.build().expect("the HTTP client could not be built")
 }
 
+/// One confirmation at a time, however often the close button is pressed.
+static CONFIRMING: AtomicBool = AtomicBool::new(false);
+
+/// Ask, in a box owned by the control window, whether to end the broker with the app.
+#[cfg(windows)]
+fn confirm_close(owner: Option<isize>) -> bool {
+    use windows::core::w;
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, IDYES, MB_ICONQUESTION, MB_YESNO};
+
+    let owner = owner.map(|raw| HWND(raw as *mut core::ffi::c_void));
+    unsafe {
+        MessageBoxW(
+            owner,
+            w!("Stop the broker and close?"),
+            w!("Synology Broker"),
+            MB_YESNO | MB_ICONQUESTION,
+        ) == IDYES
+    }
+}
+
 fn main() {
     let (config, mut config_error) = match Config::load(&exe_dir()) {
         Ok(config) => (config, None),
         Err(error) => (Config::default(), Some(error)),
     };
-    let ca = match config.ca_file.as_deref().map(load_ca) {
-        Some(Ok(ca)) => Some(ca),
+    let (ca, ca_der) = match config.ca_file.as_deref().map(load_ca) {
+        Some(Ok((ca, der))) => (Some(ca), Some(der)),
         Some(Err(error)) => {
             config_error.get_or_insert(error);
-            None
+            (None, None)
         }
-        None => None,
+        None => (None, None),
     };
     let client = http_client(ca, true);
     // What a window sees: Windows' own store, without the `ca_file`.
@@ -98,30 +136,58 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| show_main(app)))
         .plugin(tauri_plugin_notification::init())
-        .manage(AppState::new(config, config_error, client, system_client, diagnostic_client))
+        .manage(AppState::new(
+            config,
+            config_error,
+            client,
+            system_client,
+            diagnostic_client,
+            ca_der,
+        ))
         .invoke_handler(tauri::generate_handler![
             commands::get_status,
             commands::start_broker,
             commands::stop_broker,
             commands::open_broker,
-            commands::open_browser,
-            commands::quit_app,
+            commands::trust_certificate,
+            commands::prepare_update,
         ])
         .on_window_event(|window, event| {
-            // Closing the control window hides it to the tray; Quit really quits.
-            if window.label() == "main" {
-                if let WindowEvent::CloseRequested { api, .. } = event {
-                    api.prevent_close();
-                    let _ = window.hide();
+            // The control window's close button closes the app, and the broker with it
+            // if this app started it. That is worth one question: every client would
+            // have to be signed in to the NAS again.
+            if window.label() != "main" {
+                return;
+            }
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                let app = window.app_handle().clone();
+                if !commands::close_needs_confirmation(&app) {
+                    app.exit(0);
+                    return;
                 }
+                api.prevent_close();
+                if CONFIRMING.swap(true, Ordering::SeqCst) {
+                    return;
+                }
+                let owner = window.hwnd().ok().map(|hwnd| hwnd.0 as isize);
+                // Not on this thread: the box waits for an answer, and this one runs
+                // the windows.
+                std::thread::spawn(move || {
+                    let close = confirm_close(owner);
+                    CONFIRMING.store(false, Ordering::SeqCst);
+                    if close {
+                        app.exit(0);
+                    }
+                });
             }
         })
         .setup(|app| {
             let mut builder =
                 WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
                     .title("Synology Broker")
-                    .inner_size(480.0, 600.0)
+                    .inner_size(460.0, 460.0)
                     .resizable(false)
+                    .maximizable(false)
                     .center();
             if let Some(dir) = data_dir() {
                 builder = builder.data_directory(dir);
@@ -135,8 +201,8 @@ fn main() {
         .expect("the app could not be built")
         .run(|app, event| {
             if let RunEvent::Exit = event {
-                // Quitting ends a broker this app started, if the settings say so. (The
-                // job object does it as well if the app is killed.)
+                // Closing the app ends a broker this app started, if the settings say
+                // so. (The job object does it as well if the app is killed.)
                 let state = app.state::<AppState>();
                 if state.config.stop_broker_on_quit {
                     let owned = state

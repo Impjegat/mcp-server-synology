@@ -8,13 +8,16 @@
 # Enrollment is a human administration step on the broker host: `broker_main.py
 # enroll new-code` prints a one-time code, the owner opens the enrollment page on
 # the trusted device, types it, and registers the passkey. Once a passkey exists,
-# no further one can be added without running that command again, on the host
+# a further one can be added in two ways only: by running that command again, on the
+# host, or from the private page by an owner who is signed in and has just proved a
+# passkey they already hold, for exactly that purpose (`begin_additional_enrollment`)
 # (plans/shipped/2026-10-06-manual-authentication/PLAN.md §3.2, §5.1).
 
 import base64
 import hashlib
 import hmac
 import json
+import logging
 import os
 import secrets
 import tempfile
@@ -23,6 +26,9 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
+
+# The private page's own log, so what is said here is read where its lines are.
+logger = logging.getLogger("synology-private-login")
 
 STATE_TTL_SECONDS = 120
 MAX_OUTSTANDING_CHALLENGES = 256
@@ -36,6 +42,14 @@ _PURPOSE_ENROLL = "enroll"
 # challenge is bound to the digest of that change, and it cannot be redeemed as a
 # sign-in (or the other way round).
 _PURPOSE_CONFIRM = "confirm"
+
+# What a confirmation is bound to when the thing being approved is "add another
+# passkey". A settings change is bound to a 64-digit digest of the change, so neither
+# can ever stand in for the other.
+ADD_PASSKEY_BINDING = "add-passkey"
+# How long the code behind an addition from the page stays open: a little longer than a
+# challenge lives, since the new passkey is created straight after the confirmation.
+ADD_PASSKEY_MINUTES = 3
 
 
 def _b64(data: bytes) -> str:
@@ -283,6 +297,11 @@ class PasskeyOwnerAuth:
     def has_owner(self) -> bool:
         return bool(self._store.credentials())
 
+    def passkeys(self) -> List[Tuple[str, str]]:
+        """The name and the day of enrollment of each passkey, oldest first: what the
+        owner is shown. Nothing here could be used to sign in."""
+        return [(c.label or "passkey", c.created[:10]) for c in self._store.credentials()]
+
     # -- challenge bookkeeping ----------------------------------------------
 
     def _remember(self, challenge: bytes, purpose: str, binding: str = "") -> str:
@@ -415,6 +434,30 @@ class PasskeyOwnerAuth:
         return self._remember(options.challenge, _PURPOSE_ENROLL, digest), json.loads(
             options_to_json(options)
         )
+
+    def begin_additional_enrollment(self) -> Optional[Tuple[str, Dict[str, Any]]]:
+        """Options for the browser to create one more passkey, with no code to type.
+
+        Only for an owner who is signed in and has just confirmed, with a passkey they
+        already hold, that this is what they want: the caller checks both (a
+        confirmation bound to `ADD_PASSKEY_BINDING`). None if no passkey exists yet:
+        the first one is always enrolled with the code printed on the host.
+
+        It is an ordinary enrollment underneath. A one-time code is made here, used at
+        once and never shown, so the new passkey is added under the same single-use
+        rules as one enrolled from the host, and a code that was open before (one the
+        host command printed, say) is replaced and no longer works."""
+        if not self._store.credentials():
+            return None
+        replaced = self._store.enrollment_open()
+        code = self._store.new_enrollment_code(minutes=ADD_PASSKEY_MINUTES, allow_additional=True)
+        if replaced:
+            # Someone who printed a code on the host and finds it refused can see why.
+            logger.info(
+                "An enrollment code that was still unused was replaced: "
+                "a passkey is being added from the private page"
+            )
+        return self.begin_enrollment(code)
 
     def finish_enrollment(
         self, state: str, credential: Dict[str, Any], label: str = "passkey"

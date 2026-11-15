@@ -166,7 +166,7 @@ python broker_main.py serve --policy /opt/synology-broker/synology-mcp/broker-po
 
 The private page is on its own port. Publish it only to the devices you will sign in from; the MCP port is the one the adapters reach.
 
-A broker nobody has signed in to is *ready*, not unhealthy: `/healthz` and `/readyz` say nothing about the NAS, the clients or any session.
+A broker nobody has signed in to is *ready*, not unhealthy: `/healthz` and `/readyz` say nothing about the NAS, the clients or any session. On the private port `/healthz` also gives a `level`, a small number that says how new the private page is; the [desktop app](../desktop/README.md) reads it to tell when the broker is older than the app and offers to update it.
 
 ### 7. Enrol your passkey
 
@@ -175,7 +175,7 @@ Do this once, from a device you trust (a phone or computer with a passkey you co
 1. On the broker host, run `python broker_main.py enroll --owner-store /opt/synology-broker/state/owner.json new-code`. It prints a one-time code, valid for ten minutes, usable once. With the container: `docker compose --env-file broker.env exec broker python broker_main.py enroll --owner-store /state/owner.json new-code`.
 2. On your trusted device open `https://broker.example.lan:8444/enroll`, type the code, and create the passkey.
 
-The code can only be made on the broker host, which is why an AI application elsewhere cannot enrol itself. To add a second device later, run `new-code --add-device`. `enroll list` shows the enrolled passkeys and `enroll revoke ID` removes one. The broker stores only public keys.
+The code can only be made on the broker host, which is why an AI application elsewhere cannot enrol itself. To add a second device later, run `new-code --add-device`, or use **Add a passkey** on the settings page, which asks for a passkey you already have instead of a code ([below](#adding-a-passkey-from-the-private-page)). `enroll list` shows the enrolled passkeys and `enroll revoke ID` removes one. The broker stores only public keys.
 
 ### 8. Register the adapter in each AI application
 
@@ -259,6 +259,14 @@ A save is two steps. The page first says what it would change, then asks for **y
 It takes effect at once, with no restart: each client's tools and folders are the new ones on its next call, and clients stay connected, because a NAS session is not an authorization (that is judged on every call). Changing a session limit applies to sessions already open: shortening can end one immediately, and lengthening lets one run longer than it was promised. **A write grant works only inside the client's folders**, because every file-changing tool goes through the same folder checks as reading; with no folders, nothing can be created.
 
 The policy file must be writable by the broker's own account. The container template mounts the configuration directory read-only (`:ro`), and then the page says the policy is read-only and offers no save; remove `:ro` from that mount if you want to use the page there, and accept that the broker can then rewrite its own policy. Client tokens and grants are never changed from the page, so adding or revoking a client, and renewing a grant, stay file edits and a restart.
+
+### Adding a passkey from the private page
+
+The settings page lists the passkeys that sign you in (the name you gave each and the day it was added) and has **Add a passkey**. Use it to add a second device, or a passkey of a different kind: one kept by Windows Hello, for example, for a window that cannot use your password manager's.
+
+It is three steps on one page, with nothing to type but a name. The page asks for **a passkey you already have**, in a check that is made for adding a passkey and is good for nothing else (it cannot save settings or sign anyone in, and a settings confirmation cannot add a passkey). Only then does your device create the new one, and the broker stores it only if it answers the challenge that check handed out. A wrong, cancelled, expired or replayed step adds nothing; a failed check counts against the same limit as a failed sign-in. Your device is told which passkeys exist already, so it will not make a second copy in the same place: choose somewhere else to keep the new one.
+
+This is the one way a passkey can be added without the broker host: by an owner who is signed in **and** proves a current passkey at that moment. A signed-in browser alone is not enough. The first passkey is always enrolled with the code from the host, and removing one is still `enroll revoke` there. Starting an addition replaces a code that `new-code` printed and that was still unused.
 
 ## Renewing or revoking a client
 

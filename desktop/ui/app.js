@@ -1,91 +1,158 @@
 // The control window. It never shows or keeps a NAS credential: the only secret it
 // touches is the broker's Windows account password, which goes to the app's Rust side
-// and is cleared from this page as soon as it is sent.
+// and is cleared from this page as soon as it is sent. What to show for a status is
+// decided in view.js; this file only puts it on the page.
 const { invoke } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
+const View = window.BrokerView;
 
 const $ = (id) => document.getElementById(id);
 const els = {
-  pill: $('pill'), message: $('message'), configError: $('config-error'),
-  startPanel: $('start-panel'), runningPanel: $('running-panel'),
-  command: $('command'), account: $('account'),
-  form: $('start-form'), password: $('password'), start: $('start'),
-  counts: $('counts'), stop: $('stop'), externalNote: $('external-note'), certNote: $('cert-note'),
+  pill: $('pill'),
+  startPanel: $('start-panel'), progressPanel: $('progress-panel'), runningPanel: $('running-panel'),
+  form: $('start-form'), passwordLabel: $('password-label'), password: $('password'), start: $('start'),
+  progress: $('progress'), bar: $('progress-bar'),
+  open: $('open'), loginAll: $('login-all'), settings: $('settings'), log: $('log'), stop: $('stop'),
+  notices: $('notices'),
 };
 
-const LABELS = { stopped: 'Stopped', starting: 'Starting', running: 'Running', error: 'Problem' };
+let status = null;
+let localError = '';
+let dismissed = new Set();
+// The start in progress: which stage the bar is in, since when, and what it shows.
+const run = { stage: null, since: 0, shown: 0, timer: null, finishing: false };
+const busy = new Set();
 
-function setMessage(text, isError) {
-  els.message.textContent = text || '';
-  els.message.hidden = !text;
-  els.message.classList.toggle('error', Boolean(isError));
+function setBar(value) {
+  run.shown = value;
+  els.bar.style.width = `${value}%`;
+  els.progress.setAttribute('aria-valuenow', String(value));
 }
 
-function describeCounts(a) {
-  if (!a) return '';
-  const parts = [`${a.connected} connected`];
-  if (a.waiting) parts.push(`${a.waiting} waiting for you`);
-  if (a.sessions_ending_soon) parts.push(`${a.sessions_ending_soon} ending soon`);
-  if (a.grants_ending_soon) parts.push(`${a.grants_ending_soon} grant(s) to renew`);
-  return parts.join(' · ');
+function stepBar() {
+  setBar(View.progress(run.stage, Date.now() - run.since, run.shown));
 }
 
-function render(status) {
-  const attention = status.phase === 'running' && status.attention && status.attention.waiting > 0;
-  els.pill.textContent = attention ? 'Waiting for you' : LABELS[status.phase] || status.phase;
-  els.pill.className = 'pill ' + (attention ? 'attention' : status.phase);
-
-  els.command.textContent = status.start_command;
-  els.account.textContent = status.account;
-  els.configError.textContent = status.config_error || '';
-  els.configError.hidden = !status.config_error;
-
-  const running = status.phase === 'running';
-  const starting = status.phase === 'starting';
-  els.startPanel.hidden = running;
-  els.runningPanel.hidden = !running;
-  els.password.disabled = starting || Boolean(status.config_error);
-  els.start.disabled = starting || Boolean(status.config_error);
-  els.start.textContent = starting ? 'Starting...' : 'Start broker';
-
-  els.counts.textContent = describeCounts(status.attention);
-  els.stop.disabled = Boolean(status.external);
-  els.externalNote.hidden = !status.external;
-
-  const noneTrust = running && Boolean(status.cert_untrusted);
-  const windowOnly = running && !noneTrust && Boolean(status.window_untrusted);
-  els.certNote.hidden = !(noneTrust || windowOnly);
-  els.certNote.textContent = noneTrust
-    ? 'The broker is running, but its certificate is not trusted, so the tray cannot read its alerts and a window ' +
-      'here cannot use passkeys. Buttons open your browser instead. To fix it, set "ca_file" in ' +
-      'synology-broker-app.json to the CA certificate that signed it (see the README).'
-    : windowOnly
-      ? 'Windows does not trust the broker\'s certificate (only the ca_file does), so a window here cannot use ' +
-        'passkeys. The buttons open your browser instead. See the README to trust the CA for a window.'
-      : '';
-
-  setMessage(status.message, status.phase === 'error');
+function stopBar() {
+  clearInterval(run.timer);
+  run.timer = null;
+  run.stage = null;
 }
 
-els.form.addEventListener('submit', async (event) => {
+function showPanel(panel) {
+  els.startPanel.hidden = panel !== 'start';
+  els.progressPanel.hidden = panel !== 'progress';
+  els.runningPanel.hidden = panel !== 'running';
+}
+
+function renderNotices() {
+  const all = View.notices(status, localError);
+  dismissed = View.reconcile(dismissed, all);
+  els.notices.replaceChildren(...View.visible(all, dismissed).map((notice) => {
+    const card = document.createElement('div');
+    card.className = `notice ${notice.kind}`;
+    card.dataset.id = notice.id;
+    const text = document.createElement('p');
+    text.textContent = notice.text;
+    const close = document.createElement('button');
+    close.type = 'button';
+    close.className = 'close';
+    close.textContent = '×';
+    close.setAttribute('aria-label', 'Dismiss');
+    close.addEventListener('click', () => {
+      if (notice.id === 'local') localError = '';
+      else dismissed.add(notice.key);
+      renderNotices();
+    });
+    card.append(text, close);
+    if (notice.action) {
+      const act = document.createElement('button');
+      act.type = 'button';
+      act.className = 'action';
+      act.textContent = notice.action.label;
+      act.title = notice.action.hint || '';
+      act.disabled = busy.has(notice.action.command);
+      act.addEventListener('click', () => call(notice.action.command));
+      card.append(act);
+    }
+    return card;
+  }));
+}
+
+function render(next) {
+  const before = status ? status.phase : null;
+  status = next;
+  const view = View.view(status);
+
+  els.pill.textContent = view.pill.text;
+  els.pill.className = `pill ${view.pill.kind}`;
+  els.passwordLabel.textContent = view.passwordLabel;
+  els.passwordLabel.title = view.passwordHint;
+  els.start.textContent = view.startLabel;
+  els.start.disabled = !view.canStart;
+  els.password.disabled = !view.canStart;
+  els.progress.setAttribute('aria-label', view.progressLabel);
+  els.open.disabled = !view.buttons.open;
+  els.loginAll.disabled = !view.buttons.loginAll;
+  els.settings.disabled = !view.buttons.settings;
+  els.log.disabled = !view.buttons.log;
+  els.stop.disabled = !view.buttons.stop;
+
+  if (view.panel === 'progress') {
+    if (run.stage !== status.stage) {
+      if (run.stage === null) setBar(0);
+      run.stage = status.stage;
+      run.since = Date.now();
+    }
+    if (!run.timer) run.timer = setInterval(stepBar, 200);
+    stepBar();
+    showPanel('progress');
+  } else if (view.panel === 'running' && before === 'starting' && !run.finishing) {
+    // The broker answered: fill the bar, and only then show what it can do.
+    stopBar();
+    run.finishing = true;
+    setBar(100);
+    setTimeout(() => {
+      run.finishing = false;
+      if (status) showPanel(View.view(status).panel);
+    }, 450);
+  } else if (!run.finishing) {
+    stopBar();
+    showPanel(view.panel);
+  }
+  renderNotices();
+}
+
+async function call(command, args) {
+  localError = '';
+  busy.add(command);
+  renderNotices();
+  try {
+    await invoke(command, args);
+  } catch (error) {
+    localError = String(error);
+  } finally {
+    busy.delete(command);
+    renderNotices();
+  }
+}
+
+els.form.addEventListener('submit', (event) => {
   event.preventDefault();
   const password = els.password.value;
   els.password.value = '';
-  if (!password) { setMessage('Enter the password for the broker\'s Windows account.', true); return; }
-  try {
-    await invoke('start_broker', { password });
-  } catch (error) {
-    setMessage(String(error), true);
+  if (!password) {
+    localError = 'Enter the password for the broker\'s Windows account.';
+    renderNotices();
+    return;
   }
+  call('start_broker', { password });
 });
 
-const open = (path) => () => invoke('open_broker', { path }).catch((e) => setMessage(String(e), true));
-$('open').addEventListener('click', open('/'));
-$('open-browser').addEventListener('click', () => invoke('open_browser', { path: '/' }).catch((e) => setMessage(String(e), true)));
-$('login-all').addEventListener('click', open('/login-all'));
-$('log').addEventListener('click', open('/log'));
-$('stop').addEventListener('click', () => invoke('stop_broker').catch((e) => setMessage(String(e), true)));
-$('quit').addEventListener('click', () => invoke('quit_app'));
+for (const button of [els.open, els.loginAll, els.settings, els.log]) {
+  button.addEventListener('click', () => call('open_broker', { path: button.dataset.page }));
+}
+els.stop.addEventListener('click', () => call('stop_broker'));
 
 listen('broker-status', (event) => render(event.payload));
-invoke('get_status').then(render).catch((e) => setMessage(String(e), true));
+invoke('get_status').then(render).catch((error) => { localError = String(error); renderNotices(); });
