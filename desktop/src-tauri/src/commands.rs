@@ -34,6 +34,9 @@ const PAGE_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWe
     (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 Edg/130.0.0.0 SynologyBrokerApp/1";
 
 /// One view is made at a time, however many places it is asked for at once.
+// Held while webview calls that run on the main thread are made, so nothing that takes it
+// may itself run on the main thread: `stop` (and so `retire_page`) is called only from async
+// commands or spawned tasks, which is why `stop_broker` and `prepare_update` are `async`.
 static PAGE_LOCK: Mutex<()> = Mutex::new(());
 
 /// The view is kept, blank and out of sight, when the broker stops (see `retire_page`),
@@ -226,7 +229,7 @@ pub fn stop(app: &AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn stop_broker(webview: Webview, app: AppHandle) -> Result<(), String> {
+pub async fn stop_broker(webview: Webview, app: AppHandle) -> Result<(), String> {
     require_main(&webview)?;
     stop(&app)
 }
@@ -241,7 +244,7 @@ pub fn spawn_stop(app: &AppHandle) {
 /// Stop the broker and mark the next start as one that first brings the broker's code
 /// to this app's version. The password is asked for then, as for any start.
 #[tauri::command]
-pub fn prepare_update(webview: Webview, app: AppHandle) -> Result<(), String> {
+pub async fn prepare_update(webview: Webview, app: AppHandle) -> Result<(), String> {
     require_main(&webview)?;
     if !launch::commit_ok(BROKER_COMMIT) {
         return Err("This build of the app does not know which broker version to fetch.".to_string());

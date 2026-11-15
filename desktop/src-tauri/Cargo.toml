@@ -12,7 +12,7 @@ tauri-build = { version = "2", features = [] }
 # `unstable` is what lets one window hold two views: the app's own, and the broker's page
 # beside it (see commands.rs). It is still marked unstable by Tauri, so it is pinned in
 # Cargo.lock and the app is tested against it.
-tauri = { version = "2", features = ["tray-icon", "image-png", "unstable"] }
+tauri = { version = "=2.12.5", features = ["tray-icon", "image-png", "unstable"] }
 tauri-plugin-notification = "2"
 tauri-plugin-single-instance = "2"
 serde = { version = "1", features = ["derive"] }
