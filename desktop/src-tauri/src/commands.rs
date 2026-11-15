@@ -49,6 +49,8 @@ const BLANK: &str = "about:blank";
 /// dismissed (seen with a debug build on Windows 11). Going to a blank page ends the
 /// request without that, and the same view serves the next start.
 fn retire_page(page: &Webview) {
+    // Under the same lock as `show_page`, so a stop and a show happen one after the other.
+    let _one_at_a_time = PAGE_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     PAGE_RETIRED.store(true, Ordering::SeqCst);
     let _ = page.hide();
     if let Ok(blank) = Url::parse(BLANK) {
@@ -346,9 +348,11 @@ pub fn show_page(app: &AppHandle, bounds: &Bounds, path: &str) -> Result<(), Str
     }
     let _one_at_a_time = PAGE_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     if let Some(page) = app.get_webview(PAGE_LABEL) {
-        if PAGE_RETIRED.swap(false, Ordering::SeqCst) {
-            // Left blank when the broker stopped: point it at the broker again.
+        if PAGE_RETIRED.load(Ordering::SeqCst) {
+            // Left blank when the broker stopped: point it at the broker again. The flag is
+            // cleared only once that has worked, so a failure leaves it for the next try.
             page.navigate(broker_page(app, path)?).map_err(|error| error.to_string())?;
+            PAGE_RETIRED.store(false, Ordering::SeqCst);
         }
         page.set_bounds(bounds.rect()).map_err(|error| error.to_string())?;
         page.show().map_err(|error| error.to_string())?;
